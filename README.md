@@ -1,6 +1,6 @@
 # @kama/graphics
 
-A lightweight, Three.js-shaped graphics library for [kama](https://kama-lang.org), on `@kama/gpu`: scenes, meshes,
+A lightweight 3D graphics library for [kama](https://kama-lang.org), on `@kama/gpu`: scenes, meshes,
 materials, lights, cameras and loaders. It names no engine, so a tool, an editor, a product or a game can use it, and it
 does not need a frame loop, a simulation or real time.
 

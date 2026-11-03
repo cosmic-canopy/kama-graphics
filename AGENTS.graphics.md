@@ -34,6 +34,8 @@ engine / simulation or even real time."
 - **Never edit `../kama` from here.** A compiler or std gap goes in [KAMA_GAPS.md](KAMA_GAPS.md), with a minimal repro
   and the kama version.
 - **Name no engine.** Nothing here names kyoten or a game: a tool, an editor and a game use it alike.
+- **Three.js is the design reference, not a label.** The published description and the README describe the library on
+  its own terms, because how close its API sits to Three.js is undecided and a registry entry cannot be changed.
 - **Verify, don't trust.** Compile the snippet, run it, read the emitted C. A doc is not evidence, including this one.
 - **Commit on the branch, and push only when the owner asks.**
 

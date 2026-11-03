@@ -2,9 +2,9 @@
   "name": "@kama/graphics",
   "version": "0.1.0",
   "license": "MIT OR Apache-2.0",
-  "description": "A lightweight, Three.js-shaped graphics library on @kama/gpu: scenes, meshes, materials, lights, cameras and loaders",
+  "description": "A lightweight, Three.js-shaped 3D graphics library on @kama/gpu: scenes, meshes, materials, lights, cameras and loaders",
   "repository": "https://github.com/cosmic-canopy/kama-graphics",
-  "keywords": ["graphics", "scene", "mesh", "webgpu", "rendering"],
+  "keywords": ["graphics", "scene", "webgpu", "rendering"],
   "kind": "library",
   "kama": ">=0.9.831",
   "publish": {

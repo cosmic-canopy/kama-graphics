@@ -1,0 +1,18 @@
+{
+  "name": "@kama/graphics",
+  "version": "0.1.0",
+  "license": "MIT OR Apache-2.0",
+  "description": "A lightweight, Three.js-shaped graphics library on @kama/gpu: scenes, meshes, materials, lights, cameras and loaders",
+  "repository": "https://github.com/cosmic-canopy/kama-graphics",
+  "keywords": ["graphics", "3d", "scene", "webgpu", "rendering"],
+  "kind": "library",
+  "kama": ">=0.9.831",
+  "publish": {
+    "exclude": [
+      ".claude/", "AGENTS.md", "AGENTS.package.md", "AGENTS.graphics.md", "CLAUDE.md", "KAMA_GAPS.md"
+    ]
+  },
+  "modules": {
+    ".": { "visibility": "public" }
+  }
+}

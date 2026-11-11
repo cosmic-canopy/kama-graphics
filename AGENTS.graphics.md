@@ -21,6 +21,11 @@ need to be able to do the state of the art in graphics."
   natively. It is never a reference for what the library can do.
 - What it can do is measured against the state of the art, as Unreal, Unity and Godot reach it. Where the two differ,
   the state of the art wins, and the ease of use is kept on top of it.
+- **The web is the floor, and native reaches the state of the art** (the owner, 2026-11-11): "web is probably lowest
+  common denominator but output doesn't feed the simulation. so graphics fidelity can be better native if needed. or
+  even on different machines". A technique the web cannot run yet (hardware ray tracing, mesh shaders, 64-bit atomics,
+  bindless) is still in scope natively, and a machine's fidelity is its own. How it is offered is the design pass's
+  question.
 
 ## Where things stand
 

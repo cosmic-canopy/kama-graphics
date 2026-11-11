@@ -55,9 +55,13 @@ need to be able to do the state of the art in graphics."
   - each property is a pair, `x()` and `xMut()`, the second marking its owner changed (both inline at `-O3`);
   - radians with the unit in the label (`fovRad:`), sRGB colors converted to linear, lux and candela, and Y up,
     right-handed, metres.
-- **The renderer's core** (area 3, 2026-11-11; the materials question is asked again):
+- **The renderer's core** (area 3, 2026-11-11):
   - clustered forward is the one lighting path, with a depth prepass (normals and motion vectors when an effect asks)
     and 4× MSAA by default. A visibility buffer comes later, natively, and deferred only if a measurement asks;
+  - Three.js's mesh materials (`MeshStandardMaterial`, `MeshPhysicalMaterial` and the rest) are typed presets, each a
+    node graph over the standard slots. Their settings are values, so a change never compiles a shader. Any slot can be
+    replaced by a node expression or WGSL, keeping the rest of the preset. `MeshPhysicalMaterial`'s extras are glTF's
+    extensions;
   - pipelines are cached and compiled off the frame, and an object draws a frame late rather than stall one, with
     `renderer.compile(scene:)` to compile ahead. Measured: about 24 ms per lit pipeline on one thread. wgpu-native's
     asynchronous call is unimplemented, so natively the ordinary call runs on worker threads (4.7× on 8 threads);

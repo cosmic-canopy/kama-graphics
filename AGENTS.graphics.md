@@ -55,6 +55,16 @@ need to be able to do the state of the art in graphics."
   - each property is a pair, `x()` and `xMut()`, the second marking its owner changed (both inline at `-O3`);
   - radians with the unit in the label (`fovRad:`), sRGB colors converted to linear, lux and candela, and Y up,
     right-handed, metres.
+- **The renderer's core** (area 3, 2026-11-11; the materials question is asked again):
+  - clustered forward is the one lighting path, with a depth prepass (normals and motion vectors when an effect asks)
+    and 4× MSAA by default. A visibility buffer comes later, natively, and deferred only if a measurement asks;
+  - pipelines are cached and compiled off the frame, and an object draws a frame late rather than stall one, with
+    `renderer.compile(scene:)` to compile ahead. Measured: about 24 ms per lit pipeline on one thread. wgpu-native's
+    asynchronous call is unimplemented, so natively the ordinary call runs on worker threads (4.7× on 8 threads);
+  - one storage buffer of per-object records, draws sorted by pipeline, material and mesh, and a mesh and material in
+    common drawn as one instanced draw automatically;
+  - linear HDR in a 16-bit float target, tone mapped at output, AgX by default (Neutral, ACES, Reinhard and none as
+    options).
 
 **Next: the design pass, before any code** (kyoten's KYR-68; the owner, 2026-11-10). It writes this repository's
 `SPEC.md` and `ROADMAP.md`, its questions asked in full:

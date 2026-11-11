@@ -69,6 +69,17 @@ need to be able to do the state of the art in graphics."
     common drawn as one instanced draw automatically;
   - linear HDR in a 16-bit float target, tone mapped at output, AgX by default (Neutral, ACES, Reinhard and none as
     options).
+- **Beyond WebGPU** (area 4, 2026-11-11):
+  - one API everywhere. Each technique is a ladder of methods, best first, each naming the GPU features it needs. Quality
+    presets set them all, a program may set one, a missing feature takes the next method down and never stops the
+    program, and every method has a golden image of its own;
+  - hardware ray tracing natively by helping land wgpu-native's PR #630, which declares acceleration structures and mesh
+    shaders in C. Until it merges, a build of its branch is pinned for the native ray-tracing leg, as a stopgap. The
+    library's API sits above acceleration structures, so the web gains the method when browsers ship gpuweb's proposal;
+  - virtualized geometry natively first, on wgpu-native v29's 64-bit atomics, and mesh shaders later, when measured;
+  - our own temporal upscaler in WGSL everywhere, with DLSS, XeSS and FSR later as optional native packages of their
+    own, which need a native handle from wgpu-native;
+  - WebGPU is the web's only backend, with no WebGL 2 fallback.
 
 **Next: the design pass, before any code** (kyoten's KYR-68; the owner, 2026-11-10). It writes this repository's
 `SPEC.md` and `ROADMAP.md`, its questions asked in full:

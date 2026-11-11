@@ -47,6 +47,14 @@ need to be able to do the state of the art in graphics."
     and `clone()` makes a separate one;
   - scene nodes are held through `Shared` by the program and the scene, with a `Weak` parent link;
   - typed node kinds (`Mesh`, `Group`, lights, cameras) behind one node contract, each embedding a node part.
+- **The names** (area 2, 2026-11-11):
+  - Three.js's type names where the concept is the same, and `Renderer` for every backend;
+  - `make` takes what defines an object, and every other setting has Three.js's default and is changed afterwards. A
+    second common way in is a named ctor (`withSegments`, `fromImage`), and a setting fixed at creation goes in an
+    options value;
+  - each property is a pair, `x()` and `xMut()`, the second marking its owner changed (both inline at `-O3`);
+  - radians with the unit in the label (`fovRad:`), sRGB colors converted to linear, lux and candela, and Y up,
+    right-handed, metres.
 
 **Next: the design pass, before any code** (kyoten's KYR-68; the owner, 2026-11-10). It writes this repository's
 `SPEC.md` and `ROADMAP.md`, its questions asked in full:

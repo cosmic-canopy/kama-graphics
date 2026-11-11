@@ -41,6 +41,12 @@ need to be able to do the state of the art in graphics."
   - WGSL with WESL for imports;
   - materials as node graphs over the standard lit model's slots, with full WGSL as the escape;
   - compute for visuals.
+- **The object model** (the design pass's area 1, 2026-11-11, kyoten's rendering.md § Decided):
+  - two tiers: a flat core of packed instances, which an engine's render module drives, and a scene graph built on it;
+  - assets (geometry, materials, textures, render targets) are shared handles: `copy` shares, the last drop frees,
+    and `clone()` makes a separate one;
+  - scene nodes are held through `Shared` by the program and the scene, with a `Weak` parent link;
+  - typed node kinds (`Mesh`, `Group`, lights, cameras) behind one node contract, each embedding a node part.
 
 **Next: the design pass, before any code** (kyoten's KYR-68; the owner, 2026-11-10). It writes this repository's
 `SPEC.md` and `ROADMAP.md`, its questions asked in full:

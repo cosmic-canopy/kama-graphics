@@ -9,7 +9,7 @@
   "kama": ">=0.9.831",
   "publish": {
     "exclude": [
-      ".claude/", "AGENTS.md", "AGENTS.package.md", "AGENTS.graphics.md", "CLAUDE.md", "KAMA_GAPS.md"
+      ".claude/", "AGENTS.md", "AGENTS.package.md", "AGENTS.graphics.md", "CLAUDE.md", "KAMA_GAPS.md", "tools/"
     ]
   },
   "modules": {

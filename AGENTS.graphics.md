@@ -81,21 +81,34 @@ need to be able to do the state of the art in graphics."
     own, which need a native handle from wgpu-native;
   - WebGPU is the web's only backend, with no WebGL 2 fallback.
 
-**Next: the design pass, before any code** (kyoten's KYR-68; the owner, 2026-11-10). It writes this repository's
-`SPEC.md` and `ROADMAP.md`, its questions asked in full:
-- the object model in kama's terms (RAII, so nothing is disposed by hand);
-- how close its names sit to Three.js's;
-- the renderer's core;
-- what goes beyond WebGPU (ray tracing, mesh shaders, wgpu-native's extensions) without breaking web first;
-- a feature map of Three.js's and the engines' features up to the state of the art, each with its status, the example
-  that needs it, and its test and budget.
+- **The feature map** (area 5, 2026-11-11):
+  - [FEATURES.md](FEATURES.md), one row per feature: what three.js and the engines call it, its methods best first with
+    the GPU features each needs, its status, the example that first needs it, its test and its budget.
+    `tools/check-features.sh` holds every row complete;
+  - the order is by example, each a slice in [ROADMAP.md](ROADMAP.md): a lit cube, a level, a product viewer, a
+    shooter's level, stereo on Quest 3 natively, an editor viewport, a data visualization, then the state of the art
+    as programs ask. The owner: "sounds good so far and may change";
+  - each feature's budget is its web code size and its GPU time on each reference machine, set by its first
+    measurement. **A budget never limits what is built** (the owner: "I don't want to limit what we build"): a feature
+    enters with what it measures, a ratchet fails only when something built gets costlier without a written reason, and
+    a method's cost decides whether a preset turns it on, never whether it exists;
+  - goldens are rendered on a software GPU in CI (WARP, lavapipe, and SwiftShader once verified) and compared tightly,
+    checked perceptually on the reference machines, kept per GPU vendor for a method a software GPU cannot run, and
+    changed only by an explicit command whose diff is reviewed;
+  - the library holds rendering, its scene graph, render-format loaders (glTF, KTX2, HDR, EXR), clip playback with
+    skinning and morphs, text, helpers and controls. Animation state machines, UI, physics, audio and build-time baking
+    are elsewhere.
 
-Then the library is built depth-first, its first slice being what kyoten's hello cube draws: a box, the standard lit
-material, a camera, a directional light with ambient light. Every example is a test: a headless readback and a golden
-image, on web and native. A feature a program does not use drops out at link time.
+**The design pass is done** (kyoten's KYR-68, 2026-11-11). Next is GFX-1, a lit cube, after `@kama/gpu`'s render
+pipeline set (GPU-4). It is built depth-first, and every example is a test: a headless readback and a golden image, on
+web and native. A feature a program does not use drops out at link time. [SPEC.md](SPEC.md) is empty until GFX-1
+lands, since a spec is what the library is, never what it will be.
 
 ## Where the truth is
 
+- **This repository's documents, each to one purpose:** [ROADMAP.md](ROADMAP.md) is the order of work, with
+  [ROADMAP_DETAIL.md](ROADMAP_DETAIL.md) its reasoning; [FEATURES.md](FEATURES.md) is every feature and where it stands;
+  [SPEC.md](SPEC.md) is what is built.
 - **kyoten's decisions on it** are in `../kyoten/docs/design/rendering.md` § Decided and
   `../kyoten/docs/design/architecture.md` § Decided: the graphics library under question 1, its name and scope under
   question 7, and how the libraries grow (2026-11-10).
@@ -107,7 +120,13 @@ image, on web and native. A feature a program does not use drops out at link tim
 
 - **Never edit `../kama` from here.** A compiler or std gap goes in [KAMA_GAPS.md](KAMA_GAPS.md), with a minimal repro
   and the kama version.
-- **Name no engine.** Nothing here names kyoten or a game: a tool, an editor and a game use it alike.
+- **Name no engine.** Nothing here names kyoten or a game: a tool, an editor and a game use it alike. The library's
+  examples are its own, named by the kind of program they stand for.
+- **Other products are named only to refer to them** (the owner asked, 2026-11-11, whether naming them is a legal
+  issue): the words only, never a logo; never in a name of ours (a package, a type, a tool); nothing that suggests
+  affiliation or endorsement, with FEATURES.md's notice saying so; and each name spelled as its owner spells it.
+- **No code or text is copied from Unreal or Unity,** whose source is under their own licenses. Code adapted from an
+  MIT or Apache project (three.js, Godot, Bevy) keeps its notice.
 - **Three.js is a reference for ease of use, not a label and never a limit.** The published description and the README
   describe the library on its own terms, because how close its API sits to Three.js is the design pass's to decide and a
   registry entry cannot be changed.
@@ -117,6 +136,8 @@ image, on web and native. A feature a program does not use drops out at link tim
 ## Build
 
     kama check kama.json
+    tools/check-roadmap.sh    # ROADMAP.md stays the short ordered list, each row's reasoning where it links
+    tools/check-features.sh   # FEATURES.md stays complete: statuses, examples, tests and budgets
 
 On Windows, drive kama from msys2 UCRT64 (kama's `docs/platforms/windows.md`). Where `kama` is not on the `PATH`, use
 `../kama/out/UCRT64-x86_64/kama.exe`.

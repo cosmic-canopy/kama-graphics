@@ -122,6 +122,7 @@ that kind needs.
 | Points | `Points`, `PointsMaterial` | instanced quads, with size attenuation | planned | dataviz | points | — |
 | Massive point clouds | Potree-style octrees | streamed octree levels of detail | planned | asked | point-cloud-lod | — |
 | Sprites | `Sprite`, `SpriteMaterial` | camera-facing quads | planned | shooter | sprites | — |
+| Nine-slice sprites | Unity's sliced sprites; Godot's `NinePatchRect`; Android's nine-patch; CSS's `border-image` | nine quads, the corners kept and the edges and centre stretched or tiled, snapped to whole pixels · one quad sliced in the shader | planned | asked | sprites-nine-slice | — |
 | Decals | `DecalGeometry`; the engines' decal projectors | clustered decals · projected decal meshes | planned | shooter | decals | — |
 | Wireframes and edges | `wireframe`, `WireframeGeometry`, `EdgesGeometry` | barycentric wireframe in the shader · line geometry | planned | editor | wireframe | — |
 | Clipping planes and section views | `clippingPlanes` | clip distances · discard in the shader | planned | editor | clipping | — |

@@ -35,8 +35,8 @@ natively. The library's own `examples/cube` is the same scene without an engine.
     hardware, and changed only by an explicit update command whose diff is reviewed.
 - **It starts from** cosmic-forge's `render` (kyoten's rendering question 1, 2026-11-07): glTF's core material, skins,
   clips and a headless readback.
-- **It needs** `@kama/gpu`'s render pipeline set (GPU-4, built) and its fallback adapter (GPU-15), for the software
-  goldens. Its GPU time waits on timestamp queries (GPU-6), and its web code size is measured from its first build.
+- **It needs** `@kama/gpu`'s render pipeline set (GPU-4, built) and its fallback adapter (GPU-15, built), for the
+  software goldens, and `@kama/image`'s PNG, to read and write them. Its GPU time waits on timestamp queries (GPU-6), and its web code size is measured from its first build.
 - **Decided on 2026-11-14,** after measuring each (kyoten's `docs/design/rendering.md` § Decided, GFX-1's four
   questions; its `docs/research/graphics.md` § 9):
   - reversed depth, always, on depth32float, with three.js's finite `far` by default;
@@ -46,6 +46,10 @@ natively. The library's own `examples/cube` is the same scene without an engine.
     lavapipe on Linux;
   - FLIP, ported into the harness, against the leg's software golden on the reference machines, its two limits set
     from the cube's measurement; goldens as PNGs in `tests/goldens/`, left out of the published package.
+- **Decided on 2026-11-14, part 1's questions 1 and 2** (kyoten's `docs/design/rendering.md` § Decided):
+  - a `Renderer` gets its GPU both ways: `Renderer.make(window:, options:)` requests its own and draws nothing until
+    it has answered, and `withDevice(...)` takes a device the program already has;
+  - the goldens are read and written through `@kama/image`, a package of its own (`../kama-image`).
 - **Done:**
   - `examples/cube` draws from one source on both legs;
   - its golden passes on a software GPU on each leg CI has, and perceptually on the reference machines present;

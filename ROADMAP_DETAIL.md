@@ -46,10 +46,13 @@ natively. The library's own `examples/cube` is the same scene without an engine.
     lavapipe on Linux;
   - FLIP, ported into the harness, against the leg's software golden on the reference machines, its two limits set
     from the cube's measurement; goldens as PNGs in `tests/goldens/`, left out of the published package.
-- **Decided on 2026-11-14, part 1's questions 1 and 2** (kyoten's `docs/design/rendering.md` § Decided):
+- **Decided on 2026-11-14, part 1's questions 1 to 3** (kyoten's `docs/design/rendering.md` § Decided):
   - a `Renderer` gets its GPU both ways: `Renderer.make(window:, options:)` requests its own and draws nothing until
     it has answered, and `withDevice(...)` takes a device the program already has;
-  - the goldens are read and written through `@kama/image`, a package of its own (`../kama-image`).
+  - the goldens are read and written through `@kama/image`, a package of its own (`../kama-image`);
+  - each leg names its software GPU (`--golden warp`, `--golden swiftshader`), held to what the adapter can say; the
+    tests never write a golden, but print a frame that differs as one base64 PNG line, and `tools/update-goldens.sh`,
+    run on purpose, writes them into `tests/goldens/` for review; the tests read them through `std::asset`.
 - **Done:**
   - `examples/cube` draws from one source on both legs;
   - its golden passes on a software GPU on each leg CI has, and perceptually on the reference machines present;

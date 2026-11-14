@@ -102,7 +102,10 @@ need to be able to do the state of the art in graphics."
 **The design pass is done** (kyoten's KYR-68, 2026-11-11). Next is GFX-1, a lit cube; `@kama/gpu`'s render pipeline
 set (GPU-4) is built, and GFX-1's four questions are decided (2026-11-14, [ROADMAP_DETAIL.md](ROADMAP_DETAIL.md#cube)):
 reversed depth, typed nodes with a public node contract, byte-for-byte software goldens, and FLIP on the reference
-machines. It is built depth-first, and every example is a test: a headless readback and a golden image, on
+machines. Its first part's three are decided too (the same day): a `Renderer` gets its GPU both ways, the goldens are
+PNGs through `@kama/image` (`../kama-image`, a package of its own, its design pass first), and each leg names its
+software GPU while only `tools/update-goldens.sh` writes a golden. `@kama/gpu`'s fallback adapter (GPU-15) is built.
+It is built depth-first, and every example is a test: a headless readback and a golden image, on
 web and native. A feature a program does not use drops out at link time. [SPEC.md](SPEC.md) is empty until GFX-1
 lands, since a spec is what the library is, never what it will be.
 

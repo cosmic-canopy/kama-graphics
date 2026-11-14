@@ -41,7 +41,7 @@ natively. The library's own `examples/cube` is the same scene without an engine.
   questions; its `docs/research/graphics.md` § 9):
   - reversed depth, always, on depth32float, with three.js's finite `far` by default;
   - typed nodes, one per WGSL type, with operators and a public node contract, so a program's own nodes are checked as
-    the library's are (a number goes on the left until kama's fix for kyoten's KY-55);
+    the library's are, and a number on either side of an operator (kama 0.9.947, which fixed kyoten's KY-55);
   - software goldens per software GPU, compared byte for byte: SwiftShader on the web, WARP on Windows and in Firefox,
     lavapipe on Linux;
   - FLIP, ported into the harness, against the leg's software golden on the reference machines, its two limits set

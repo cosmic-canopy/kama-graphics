@@ -74,7 +74,7 @@ that kind needs.
 | Flat core for engines | Godot's `RenderingServer` | packed instances in one storage buffer | planned | cube | flat-core | — |
 | Render targets | `RenderTarget`, MRT | one or several color targets with depth | planned | cube | render-target | — |
 | Size and pixel ratio | `setSize`, `setPixelRatio` | from `@kama/window`'s window or canvas | planned | cube | resize | — |
-| Depth precision | `reverseDepthBuffer`, `logarithmicDepthBuffer` | reversed Z with float depth · logarithmic depth · standard | planned | cube | depth-precision | — |
+| Depth precision | `reverseDepthBuffer`, `logarithmicDepthBuffer` | reversed Z with float depth, the only one (decided 2026-11-14: 5 cm resolved at 5 km, where the standard convention fails) | planned | cube | depth-precision | — |
 | Quality presets and method ladders | three.js's `hasFeature`; Unreal's scalability settings; Unity's quality levels | presets per machine, and a technique set directly | planned | cube | presets | — |
 | Pipelines compiled off the frame | `compileAsync` | asynchronous creation on the web · worker threads natively | planned | cube | pipeline-cache | — |
 | Pipeline cache on disk | Unreal's PSO caches | the driver's pipeline cache, natively · none | planned | shooter | pipeline-disk-cache | — |

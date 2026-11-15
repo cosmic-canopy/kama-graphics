@@ -38,7 +38,8 @@ need to be able to do the state of the art in graphics."
 - **The decided shape** (kyoten's `../kyoten/docs/design/rendering.md` § Decided):
   - three tiers (`@kama/gpu`, this library, an engine's render module);
   - a fixed pass list per view, with render targets first-class;
-  - WGSL with WESL for imports;
+  - WGSL, with WESL a build-time format for a program's files; the library's own shader functions are typed-node
+    functions in kama, emitted once each where a material reaches them (part 3's question, 2026-11-15);
   - materials as node graphs over the standard lit model's slots, with full WGSL as the escape;
   - compute for visuals.
 - **The object model** (the design pass's area 1, 2026-11-11, kyoten's rendering.md § Decided):
@@ -119,8 +120,9 @@ rotation held both ways, as an `Euler` with five safeguards and a `Quat`; `MeshB
 part 3; every shared object a `Shared<T>` made with `new`. Its question 4 was decided the same day: a misuse the types
 cannot refuse is refused and reported, never ending the program, as `@kama/gpu`'s decision 9, built the next session
 (SPEC § Misuse).
-Then part 3, typed nodes compiled to WGSL and the lit box, with its question of how the library's shader modules are
-linked when a material compiles at run time (WESL). GFX-1 is built depth-first, and every example is a test: a headless
+Then part 3, typed nodes compiled to WGSL and the lit box. Its question, how the library's shader functions reach a
+material compiled at run time, was decided on 2026-11-15 ([ROADMAP_DETAIL.md](ROADMAP_DETAIL.md#cube)): typed-node
+functions in kama, a WGSL function as text the escape, and no WESL linker at run time. GFX-1 is built depth-first, and every example is a test: a headless
 readback and a golden image, on web and native. A feature a program does not use drops out at link time.
 [SPEC.md](SPEC.md) is what is built so far, and grows with each part.
 

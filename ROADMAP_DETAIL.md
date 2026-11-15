@@ -91,6 +91,12 @@ natively. The library's own `examples/cube` is the same scene without an engine.
   (2026-11-15, [SPEC.md](SPEC.md) § Misuse), with how the printing is turned off settled while building: the
   renderer's `printErrors()`/`printErrorsMut()`, true by default, and for `add`, `isAncestorOf(object:)` to ask first.
   Next, part 3, typed nodes and the lit box.
+- **Decided on 2026-11-15, part 3's question** (kyoten's `docs/design/rendering.md` § Decided; measured in kyoten's
+  `docs/research/graphics.md` § 10): the library's shader functions are typed-node functions in kama, as TSL's BSDFs
+  are, and the material compiler emits each one a material reaches once, callees first, with a `let` for a node used
+  twice; a WGSL function as text with its includes (`wgslFn`) is the escape, a program's or the library's; no WESL linker
+  at run time, WESL staying a build-time format for a program's files. Part 3 needs kyoten's KY-59 fixed, or hands
+  operators a temporary inside the library until it is.
 - **Done:**
   - `examples/cube` draws from one source on both legs;
   - its golden passes on a software GPU on each leg CI has, and perceptually on the reference machines present;

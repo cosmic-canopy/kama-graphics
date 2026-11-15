@@ -114,7 +114,9 @@ software GPU while only `tools/update-goldens.sh` writes a golden. `@kama/gpu`'s
   - a target's format decides what it holds, the default 8-bit sRGB target what the window would show;
   - a read hands back an `@kama/image` `Image`.
 
-Part 2, the scene graph and an unlit box, is next. GFX-1 is built depth-first, and every example is a test: a headless
+Part 2, the scene graph and an unlit box, is next, its three questions decided on 2026-11-15
+([ROADMAP_DETAIL.md](ROADMAP_DETAIL.md#cube)): rotation held both ways, as an `Euler` with five safeguards and a `Quat`;
+`MeshBasicMaterial` with its WGSL by hand until part 3; every shared object a `Shared<T>` made with `new`. GFX-1 is built depth-first, and every example is a test: a headless
 readback and a golden image, on web and native. A feature a program does not use drops out at link time.
 [SPEC.md](SPEC.md) is what is built so far, and grows with each part.
 

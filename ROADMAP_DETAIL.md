@@ -66,6 +66,17 @@ natively. The library's own `examples/cube` is the same scene without an engine.
 - **Built, part 1's `Renderer`** (2026-11-14, [SPEC.md](SPEC.md)): `withDevice`, a clear colour written in sRGB, an
   8-bit sRGB `RenderTarget` cleared and read back as an `Image`, and its golden on WARP and SwiftShader. **Part 1 is
   built**; part 2, the scene graph on the flat core and an unlit box, is next.
+- **Decided on 2026-11-15, part 2's questions 1 to 3** (kyoten's `docs/design/rendering.md` § Decided):
+  - a node holds its rotation both ways, three.js's `rotation` (an `Euler`, the library's own) and `quaternion` (a
+    std::math `Quat`), the last written winning, with five safeguards: the order part of an Euler's meaning
+    (`Euler.make(…, order:)`, `reordered(order:)`, no `orderMut()`), turns through the quaternion (`rotateX/Y/Z`,
+    `rotateOnAxis`, `rotateOnWorldAxis`, `lookAt`), no Euler blending, the Euler made from a quaternion the one nearest the
+    node's last, and degrees only through `Euler.fromDegrees`;
+  - `MeshBasicMaterial` in part 2, its WGSL by hand as a stopgap, rebuilt from typed nodes in part 3 behind the same API
+    and held to part 2's golden;
+  - every object the library shares is a `Shared<T>` made with `new`, `RenderTarget` included; measured, not a
+    performance cost (a handle holding one `Shared` is the same pointer and count), and with change marks an unchanged
+    scene costs nothing to walk.
 - **Done:**
   - `examples/cube` draws from one source on both legs;
   - its golden passes on a software GPU on each leg CI has, and perceptually on the reference machines present;

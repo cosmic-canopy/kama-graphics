@@ -2,10 +2,11 @@
 # golden is written from exactly the runs the gate then holds it to.
 #
 # Each leg names its software GPU (kyoten's rendering.md § Decided, GFX-1's part 1, question 3), since the adapter cannot
-# say which it is: WARP natively on Windows and as Firefox's fallback adapter (`--golden warp`), SwiftShader in Chromium
-# through the driver (`--golden swiftshader`). A leg with no software GPU names none, and compares no golden:
-#   - Chromium under `kama run`, which offers WebGPU its fallback adapter only when its command line asks, and
-#     `kama run` passes a browser none of our flags (kyoten's KY-57); the driver passes them;
+# say which it is: WARP natively on Windows and as Firefox's fallback adapter (`--golden warp`), SwiftShader in the pinned
+# Chrome for Testing (`--golden swiftshader`), which Chromium offers WebGPU only when its command line asks: every browser
+# runs under `kama run`, and tools/browsers.mjs says what each is started with (decided with the owner on 2026-11-14).
+# A leg with no software GPU names none, and compares no golden:
+#   - Edge and an installed Chrome, which run as a player's do, on their real GPU: the web's hardware leg;
 #   - natively on macOS, where Metal has none;
 #   - natively on Linux, until lavapipe is measured.
 #
@@ -42,10 +43,21 @@ mkdir -p tests/out
 # waits for ever (kyoten's KY-53).
 bounded() { if command -v timeout >/dev/null 2>&1; then timeout 300 "$@"; else "$@"; fi; }
 
-# The software GPU each leg names, "" for none.
+# What a browser is (firefox, chrome-for-testing, edge or chrome), and what `kama run` starts it with, one word a line
+# and nothing for most (tools/browsers.mjs).
+browserKind() { node tools/browsers.mjs kind "$1" | tr -d '\r'; }
+browserFlags() { node tools/browsers.mjs flags "$1" | tr -d '\r'; }
+
+# The software GPU each leg names, "" for none. The pinned Chrome for Testing names SwiftShader, which its flags offer;
+# a run whose flags do not offer it fails on the adapter, never comparing a hardware frame.
 nativeGolden() { case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) echo warp ;; *) echo "" ;; esac; }
-runGolden() { local name="${1##*[/\\]}"; if [[ "${name,,}" == *firefox* ]]; then echo warp; else echo ""; fi; }
-driverGolden() { echo swiftshader; }
+runGolden() {
+    case "$(browserKind "$1")" in
+        firefox) echo warp ;;
+        chrome-for-testing) echo swiftshader ;;
+        *) echo "" ;;
+    esac
+}
 
 buildNative() {
     local mode="$1" flag=""
@@ -71,14 +83,9 @@ runNative() {
 }
 
 runKama() {
-    local browser="$1" gpu="$2" log="$3" args=()
+    local browser="$1" gpu="$2" log="$3" args=() flags=() f
+    while IFS= read -r f; do [ -n "$f" ] && flags+=("$f"); done < <(browserFlags "$browser")
     [ -n "$gpu" ] && args=(-- --golden "$gpu")
-    KAMA_BROWSER="$browser" bounded "$KAMA" run tests/kama.json --target WASM --headless ${args[@]+"${args[@]}"} < /dev/null 2>&1 \
-        | tr -d '\r' | tee "$log"
-}
-
-runDriver() {
-    local browser="$1" gpu="$2" log="$3" query=""
-    [ -n "$gpu" ] && query="?arg=--golden&arg=$gpu"
-    node tools/webtest.mjs tests/out/web "graphicstests.html$query" --browser "$browser" < /dev/null 2>&1 | tr -d '\r' | tee "$log"
+    KAMA_BROWSER="$browser" bounded "$KAMA" run tests/kama.json --target WASM --headless ${flags[@]+"${flags[@]}"} \
+        ${args[@]+"${args[@]}"} < /dev/null 2>&1 | tr -d '\r' | tee "$log"
 }

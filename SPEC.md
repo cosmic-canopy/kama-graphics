@@ -77,13 +77,15 @@ PixelStatus s = read.poll();   // Pending, Ready(image:) or Failed(error:)
 - `tools/goldens-agree.sh` on five crafted records;
 - `kama check` on the library and its tests;
 - then `tests/`, one program, built debug and release and run natively, and built for the web and run under `kama run`
-  in Edge and Firefox and through the driver in Chrome for Testing.
+  in Edge, Firefox and the pinned Chrome for Testing, each started as `tools/browsers.mjs` says.
 
 It is 32 cases on each leg that names a software GPU, and 28 in Edge, whose leg names none.
 
 - **The goldens** (kyoten's rendering.md § Decided, GFX-1's part 1, questions 2 and 3):
-  - Each leg names its software GPU: `--golden warp` natively on Windows and in Firefox, `--golden swiftshader` through
-    the driver. Chromium under `kama run` (kyoten's KY-57) and macOS natively name none.
+  - Each leg names its software GPU: `--golden warp` natively on Windows and in Firefox, `--golden swiftshader` in the
+    pinned Chrome for Testing, started with the flags that offer WebGPU SwiftShader. Edge and an installed Chrome, which
+    run on their real GPU as a player's do, and macOS natively name none. The gate fails a pinned Chrome for Testing
+    that ran naming none.
   - The adapter is asked for with `forceFallbackAdapter` and held to what it can say: its kind is CPU, and SwiftShader's
     architecture names it.
   - Every frame is held byte for byte to `tests/goldens/<test>/<gpu>.png`, read through `std::asset` and decoded with

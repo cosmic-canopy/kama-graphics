@@ -15,3 +15,6 @@ package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   it hands back an `@kama/image` `Image`; `RenderTarget.make(width:, height:)`, 8-bit sRGB, a shared handle; and `Color`,
   written in sRGB (`make`, `fromHex`, `hex()`) and held linear. Depends on `@kama/gpu`, `@kama/window` and `@kama/image`
   by path.
+- The gate runs every browser under `kama run`, the pinned Chrome for Testing among them, started as
+  `tools/browsers.mjs` says, so its DevTools driver, `tools/webtest.mjs`, is retired. The gate needs kama 0.9.956
+  (`--chromium-arg`) or later.

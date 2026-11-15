@@ -6,9 +6,9 @@
 #   tools/test.sh
 #
 # Run it from msys2 UCRT64 on Windows (bash -lic, so emcc and node are on PATH for the web leg), or any shell elsewhere.
-# The web leg is built when `emcc` is on PATH and run, headless, in every browser tools/browsers.mjs finds: under
-# `kama run --target WASM` in Edge and Chrome as installed and in the pinned Firefox, and through tools/webtest.mjs in the
-# pinned Chrome for Testing (KAMA_BROWSER names one). Each part is skipped, and says so, without what it needs.
+# The web leg is built when `emcc` is on PATH and run, headless, under `kama run --target WASM` in every browser
+# tools/browsers.mjs finds: Edge and Chrome as installed, the pinned Firefox and the pinned Chrome for Testing
+# (KAMA_BROWSER names one). Each part is skipped, and says so, without what it needs.
 #
 # The goldens (tests/goldens/<test>/<gpu>.png) are never written here. A frame that differs from its golden, or has none,
 # fails its leg and is printed as a `golden-png` line; tools/update-goldens.sh, run on purpose, writes those, and the
@@ -74,9 +74,9 @@ agreeCase() {
         failed=1
     fi
 }
-ran='native warp\nfirefox warp\ndriver swiftshader\n'
+ran='native warp\nfirefox warp\nchrome swiftshader\n'
 agreeCase "two legs of WARP printing the same frame agree, and it is written" 'exit 0' "$ran" \
-    'native FAIL harness warp\nfirefox FAIL harness warp\ndriver ok harness swiftshader\n' \
+    'native FAIL harness warp\nfirefox FAIL harness warp\nchrome ok harness swiftshader\n' \
     'native harness warp AAAA\nfirefox harness warp AAAA\n'
 agreeCase "two legs of WARP printing different frames are refused" \
     $'harness warp: native and firefox printed different frames\nexit 1' "$ran" \
@@ -161,30 +161,30 @@ elif ! command -v node >/dev/null 2>&1; then
 else
     if browsers="$(node tools/browsers.mjs run 2>/dev/null)"; then
         n=0
+        cft=0
         while IFS= read -r browser; do
             n=$((n + 1))
             name="${browser##*[/\\]}"
             gpu="$(runGolden "$browser")"
-            echo "-- kama run, $browser${gpu:+, --golden $gpu}"
+            flags="$(browserFlags "$browser" | tr '\n' ' ')"
+            echo "-- kama run, $browser${flags:+ ${flags% }}${gpu:+, --golden $gpu}"
             runKama "$browser" "$gpu" "tests/out/run-web-$n.log" || failed=1
             goldensHeld "tests/out/run-web-$n.log" "$gpu" "$name"
+            # The pinned Chrome for Testing is the web's SwiftShader leg (decided with the owner on 2026-11-14): one that
+            # ran naming no software GPU passed on its hardware, comparing nothing.
+            if [ "$(browserKind "$browser")" = chrome-for-testing ]; then
+                cft=1
+                if [ "$gpu" = swiftshader ]; then
+                    echo "ok   the pinned Chrome for Testing compared SwiftShader's goldens"
+                else
+                    echo "FAIL the pinned Chrome for Testing ran naming '$gpu', not swiftshader, so it compared no SwiftShader golden"
+                    failed=1
+                fi
+            fi
         done <<< "$browsers"
+        [ "$cft" = 1 ] || echo "skip no Chrome for Testing pinned under ~/browsers, so no leg compared SwiftShader's goldens"
     else
-        echo "skip no browser for kama run (Edge or Chrome installed, or Firefox pinned under ~/browsers; or set KAMA_BROWSER)"
-    fi
-    # The pinned Chrome for Testing, through the stopgap driver: it never loads a page under `kama run` (kyoten's KY-53),
-    # and the driver is what passes Chromium the flags that give WebGPU SwiftShader.
-    if browsers="$(node tools/browsers.mjs driver 2>/dev/null)"; then
-        n=0
-        while IFS= read -r browser; do
-            n=$((n + 1))
-            gpu="$(driverGolden)"
-            echo "-- the driver, $browser, --golden $gpu"
-            runDriver "$browser" "$gpu" "tests/out/run-driver-$n.log" || failed=1
-            goldensHeld "tests/out/run-driver-$n.log" "$gpu" "the driver"
-        done <<< "$browsers"
-    else
-        echo "skip no Chrome for Testing pinned under ~/browsers, so no driver run"
+        echo "skip no browser for kama run (Edge or Chrome installed, Firefox or Chrome for Testing pinned under ~/browsers; or set KAMA_BROWSER)"
     fi
 fi
 

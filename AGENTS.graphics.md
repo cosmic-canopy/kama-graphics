@@ -161,10 +161,21 @@ needs wgpu-native's SDK: `$KAMA_WGPU_DIR`, else `third_party/wgpu/<platform>`, e
 **The tests are one program, `tests/`, and every frame in them is held to a golden** (kyoten's rendering.md § Decided,
 GFX-1's part 1, question 3): a saved picture of what a test draws, rendered on a software GPU, which draws the same bytes
 on every run, and compared byte for byte.
-- **Each leg names its software GPU** (tools/legs.sh): `--golden warp` natively on Windows and in Firefox under
-  `kama run`, `--golden swiftshader` in Chrome for Testing through the driver. Chromium under `kama run` (kyoten's
-  KY-57), macOS natively and Linux natively until lavapipe is measured name none and compare no golden. The adapter is
-  held to what it can say: its kind is CPU, and SwiftShader's architecture names it.
+- **Each leg names its software GPU** (tools/legs.sh): `--golden warp` natively on Windows and in Firefox,
+  `--golden swiftshader` in the pinned Chrome for Testing. Edge and an installed Chrome, macOS natively and Linux
+  natively until lavapipe is measured name none and compare no golden. The adapter is held to what it can say: its kind
+  is CPU, and SwiftShader's architecture names it.
+- **Every browser runs under `kama run`, started as `tools/browsers.mjs` says** (decided with the owner on 2026-11-14,
+  kyoten's rendering.md § Decided). The pinned Chrome for Testing alone takes flags, on its own command line:
+  `--enable-unsafe-webgpu` and `--enable-unsafe-swiftshader`, which offer WebGPU SwiftShader,
+  `--disable-features=NetworkServiceSandbox`, without which an unzipped Chrome for Testing loads no page, and
+  `--scale 1.5`. Edge runs as a player's does, on its real GPU: the web's hardware leg. The flags never go in the tests'
+  `kama.json`, whose `chromiumArgs` would reach Edge too. The DevTools driver, `tools/webtest.mjs`, is retired. The
+  gate fails a pinned Chrome for Testing that ran naming no software GPU. Built the same night: 32 cases in Chrome for
+  Testing under `kama run`, both SwiftShader goldens matched. **Mutations: 5 of 6 caught** by the gate: either
+  SwiftShader flag dropped, the network sandbox flag dropped, Chrome for Testing read as an installed Chrome, and it
+  naming no golden. The sixth, Edge given Chrome for Testing's flags, passes here, since Edge's leg never asks for a
+  fallback adapter; `@kama/gpu`'s gate catches it in the same `tools/browsers.mjs`, which this one copies unchanged.
 - **A golden is `tests/goldens/<test>/<gpu>.png`,** read through std::asset, preloaded beside the page on the web, and
   left out of the published package.
 - **The tests never write a golden.** A frame that differs, or has none, fails and is printed as one line,

@@ -55,16 +55,6 @@ if command -v emcc >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
             collect "kama-run-$n" "$gpu" "$work/run-$n.log"
         done <<< "$browsers"
     fi
-    if browsers="$(node tools/browsers.mjs driver 2>/dev/null)"; then
-        n=0
-        while IFS= read -r browser; do
-            n=$((n + 1))
-            gpu="$(driverGolden)"
-            echo "== the driver, $browser, --golden $gpu"
-            runDriver "$browser" "$gpu" "$work/driver-$n.log" > /dev/null || true
-            collect "driver-$n" "$gpu" "$work/driver-$n.log"
-        done <<< "$browsers"
-    fi
 else
     echo "skip the web legs: no emcc or node on PATH (run from an interactive UCRT64 shell, bash -lic)"
 fi

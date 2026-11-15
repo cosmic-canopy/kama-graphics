@@ -1,0 +1,134 @@
+// The renderer, on every backend (`Renderer`, not `WebGPURenderer`: area 2, item 1). It gets its GPU both ways (kyoten's
+// rendering.md § Decided, GFX-1's part 1, question 1): `withDevice` takes a device the program already has, which an
+// engine, an editor's several views or a test on the fallback adapter hands it, and `make(window:, options:)`, which
+// requests its own, comes with the window (part 6).
+//
+// A camera names the target it draws into, and with none it draws into the window (question 4). A target is cleared and
+// read on its own: `clear(target:)` fills it with the clear colour, and `readRenderTargetPixels(target:)` starts a read
+// that hands back an @kama/image `Image` (question 6). kama has no promises, so a read is a request the program polls, as
+// @kama/gpu's are, and the poll moves the device on itself, so a program never polls the device.
+
+import {
+    std::collections::DynamicArray, std::collections::FixedArray,
+    gpu::Device, gpu::Queue, gpu::GpuError, gpu::Texture, gpu::TextureView, gpu::TextureViewDescriptor,
+    gpu::Buffer, gpu::BufferDescriptor, gpu::BufferUsage, gpu::BufferRead, gpu::ReadStatus,
+    gpu::CommandEncoder, gpu::CommandBuffer, gpu::RenderPass, gpu::RenderPassDescriptor, gpu::ColorAttachment,
+    gpu::Color as GpuColor,
+    image::Image, image::ImageError, image::PixelFormat, image::AlphaMode, image::ColorSpace,
+    Color, RenderTarget,
+};
+export { Renderer, PixelRead, PixelStatus };
+
+// A copied row's bytes: WebGPU aligns them to 256.
+fn uint32 rowBytes(uint32 width) { return (width * 4 + 255) / 256 * 256; }
+
+type resource Renderer {
+    Device device;
+    Queue queue;
+    Color clearTo = Color.fromHex(hex: 0x000000);
+    float32 alpha = 1.0;
+
+    // A renderer on a device the program already has, with its queue: each a handle of its own, so the program keeps
+    // its own (`copy device`) and several renderers share one device.
+    public ctor withDevice(Device device, Queue queue) {
+        this.device = give device;
+        this.queue = give queue;
+    }
+
+    // The colour `clear` fills a target with, written in sRGB: black, as three.js's.
+    public const fn Color clearColor() { return this.clearTo; }
+    public fn ref Color clearColorMut() { return this.clearTo; }
+
+    // Its alpha, 0 to 1, which is never sRGB-encoded: 1, as three.js's.
+    public const fn float32 clearAlpha() { return this.alpha; }
+    public fn ref float32 clearAlphaMut() { return this.alpha; }
+
+    // Fill the target with the clear colour. On the default 8-bit sRGB target it reads back as written: a target
+    // cleared to #336699 reads 0x33 0x66 0x99.
+    public unsafe fn void clear(ref RenderTarget target) {
+        Texture texture = target.textureOn(device: ref this.device);
+        TextureView view = texture.createView(descriptor: TextureViewDescriptor.make());
+        GpuColor linear = GpuColor.of(r: cast<float64>(this.clearTo.linearR()), g: cast<float64>(this.clearTo.linearG()),
+                                      b: cast<float64>(this.clearTo.linearB()), a: cast<float64>(this.alpha));
+        RenderPassDescriptor pass = RenderPassDescriptor.make();
+        pass.color(attachment: ColorAttachment.clearing(view: give view, color: linear));
+        pass.label(text: "a render target cleared");
+        CommandEncoder encoder = this.device.createCommandEncoder();
+        RenderPass rp = encoder.beginRenderPass(descriptor: give pass);
+        give rp.end();
+        CommandBuffer commands = give encoder.finish();
+        this.queue.submit(commands: give commands);
+    }
+
+    // Start reading the target back, as three.js's `readRenderTargetPixelsAsync`: poll the read until it hands back its
+    // image, the target's size in 8-bit RGBA, sRGB, top row first.
+    public unsafe fn PixelRead readRenderTargetPixels(ref RenderTarget target) {
+        Texture texture = target.textureOn(device: ref this.device);
+        uint32 width = target.width();
+        uint32 height = target.height();
+        uint32 row = rowBytes(width: width);
+        uint64 size = cast<uint64>(row) * cast<uint64>(height);
+        BufferDescriptor described = BufferDescriptor.make(size: size, usage: BufferUsage::MapRead | BufferUsage::CopyDst);
+        described.label(text: "a render target read back");
+        Buffer buffer = this.device.createBuffer(descriptor: give described);
+        CommandEncoder encoder = this.device.createCommandEncoder();
+        encoder.copyTextureToBuffer(texture: texture, buffer: buffer, width: width, height: height, bytesPerRow: row);
+        CommandBuffer commands = give encoder.finish();
+        this.queue.submit(commands: give commands);
+        BufferRead read = buffer.mapRead(offset: 0, size: size);
+        return PixelRead.start(device: copy this.device, buffer: give buffer, read: give read, width: width, height: height, row: row);
+    }
+}
+
+// What a read says when polled: still pending, its image (handed over once), or why it failed. Polled again after its
+// image was handed over, it says `Taken`, as @kama/gpu's requests do.
+type enum PixelStatus { Pending, Ready(Image image), Failed(GpuError error) }
+
+// A read of a render target, under way. Dropping it while it is pending is safe: the map is left to finish and be freed.
+type resource PixelRead {
+    Device device;
+    Buffer buffer;     // kept alive while it is mapped
+    BufferRead read;
+    uint32 w;
+    uint32 h;
+    uint32 row;
+    bool handed = false;
+
+    friend Renderer::readRenderTargetPixels[start];
+
+    ctor start(Device device, Buffer buffer, BufferRead read, uint32 width, uint32 height, uint32 row) {
+        this.device = give device;
+        this.buffer = give buffer;
+        this.read = give read;
+        this.w = width;
+        this.h = height;
+        this.row = row;
+    }
+
+    public unsafe fn PixelStatus poll() {
+        if (this.handed) { return PixelStatus::Failed(error: GpuError::Taken); }
+        this.device.poll(wait: false);
+        ReadStatus s = this.read.poll();
+        match (give s) {
+            case Pending: { return PixelStatus::Pending; }
+            case Failed(error: e): { this.handed = true; return PixelStatus::Failed(error: e); }
+            case Ready: { }
+        };
+        this.handed = true;
+        DynamicArray<uint8> mapped = this.read.bytes();
+        isize width = cast<isize>(this.w);
+        isize height = cast<isize>(this.h);
+        isize stride = cast<isize>(this.row);
+        FixedArray<uint8> samples = FixedArray.make(size: width * height * 4);
+        for (isize y = 0; y < height; y = y + 1) {
+            for (isize x = 0; x < width * 4; x = x + 1) { samples[y * width * 4 + x] = mapped[y * stride + x]; }
+        }
+        Result<Image, ImageError> made = Image.fromSamples8(width: width, height: height, format: PixelFormat::Rgba8Unorm,
+                                                            alpha: AlphaMode::Straight, colorSpace: ColorSpace.srgb(),
+                                                            samples: give samples);
+        return match (give made) {
+            case Ok(value: img): PixelStatus::Ready(image: give img);
+            case Err(error: e): PixelStatus::Failed(error: GpuError::Refused(words: "the read's image: " + e.message()));
+        };
+    }
+}

@@ -105,11 +105,18 @@ reversed depth, typed nodes with a public node contract, byte-for-byte software 
 machines. Its first part's three are decided too (the same day): a `Renderer` gets its GPU both ways, the goldens are
 PNGs through `@kama/image` (`../kama-image`, a package of its own, its design pass first), and each leg names its
 software GPU while only `tools/update-goldens.sh` writes a golden. `@kama/gpu`'s fallback adapter (GPU-15) is built.
-**Part 1's gate and golden harness are built** (2026-11-14, § Build): the tests program, `tools/test.sh` on every leg,
-and the harness held to frames made in memory and to its own scene drawn on WARP and SwiftShader. Its `Renderer` comes
-next. It is built depth-first, and every example is a test: a headless readback and a golden image, on
-web and native. A feature a program does not use drops out at link time. [SPEC.md](SPEC.md) is empty until GFX-1
-lands, since a spec is what the library is, never what it will be.
+**Part 1 is built** (2026-11-14):
+- **the gate and the golden harness** (§ Build): the tests program, `tools/test.sh` on every leg, and the harness held
+  to frames made in memory and to its own scene drawn on WARP and SwiftShader;
+- **a `Renderer` with no window** that clears a render target and reads it back. Its shape was decided the same day
+  (part 1's questions 4 to 6):
+  - a camera names the target it draws into, and with none the window;
+  - a target's format decides what it holds, the default 8-bit sRGB target what the window would show;
+  - a read hands back an `@kama/image` `Image`.
+
+Part 2, the scene graph and an unlit box, is next. GFX-1 is built depth-first, and every example is a test: a headless
+readback and a golden image, on web and native. A feature a program does not use drops out at link time.
+[SPEC.md](SPEC.md) is what is built so far, and grows with each part.
 
 ## Where the truth is
 

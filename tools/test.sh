@@ -25,6 +25,13 @@ rm -f tests/out/run-*.log   # this run's logs only, for the goldens' last word b
 # compares any more, fails. A leg that names none must say it compared none.
 goldensHeld() {
     local log="$1" gpu="$2" leg="$3" want printed said
+    # Every leg, whether it names a GPU or not, runs its GPU cases to the end: one whose device never opened fails here.
+    if grep -qx 'gpu cases: all run' "$log"; then
+        echo "ok   every GPU case ran ($leg)"
+    else
+        echo "FAIL ($leg) its GPU cases did not all run"
+        failed=1
+    fi
     printed="$(grep -c '^golden-png ' "$log" || true)"
     said="$(grep '^goldens: ' "$log" || echo 'no goldens line')"
     if [ -z "$gpu" ]; then
@@ -114,6 +121,28 @@ if [ -x "tests/out/native-debug/graphicstests$EXE" ]; then
     else
         tail -5 tests/out/unknown-gpu.txt
         echo "FAIL --golden nonesuch failed, but not as refused"
+        failed=1
+    fi
+else
+    echo "FAIL no native debug build to run"
+    failed=1
+fi
+
+step "a leg naming a software GPU its adapter is not compares no golden and prints no frame"
+# Natively on Windows the fallback adapter is WARP, so a run naming SwiftShader must fail on what the adapter says, and
+# never hold WARP's frames to SwiftShader's goldens nor print one as SwiftShader's, which update-goldens.sh would write.
+if [ "$(nativeGolden)" != warp ]; then
+    echo "skip natively this platform's fallback adapter is not WARP"
+elif [ -x "tests/out/native-debug/graphicstests$EXE" ]; then
+    "tests/out/native-debug/graphicstests$EXE" --golden swiftshader < /dev/null > tests/out/wrong-gpu.txt 2>&1 && code=0 || code=$?
+    tr -d '\r' < tests/out/wrong-gpu.txt > tests/out/wrong-gpu.log
+    if [ "$code" != 0 ] \
+            && grep -q "^FAIL --golden swiftshader: the adapter says SwiftShader exactly where the leg names it: " tests/out/wrong-gpu.log \
+            && ! grep -q '^golden-png ' tests/out/wrong-gpu.log && grep -q '^goldens: [0-9]* declared, 0 matched, on swiftshader$' tests/out/wrong-gpu.log; then
+        echo "ok   --golden swiftshader on WARP fails the run, compares no golden and prints no frame"
+    else
+        grep -E '^FAIL|^golden-png|^goldens:' tests/out/wrong-gpu.log | cut -c1-160
+        echo "FAIL --golden swiftshader on WARP: the run's status is $code, or it compared or printed a frame"
         failed=1
     fi
 else

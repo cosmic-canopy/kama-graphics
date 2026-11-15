@@ -1,0 +1,157 @@
+// The device every GPU case runs on, opened a step a tick, since on the web the adapter and the device are answered by
+// the browser between ticks. On a leg that names a software GPU (`--golden warp`, `--golden swiftshader`) the adapter is
+// asked for with WebGPU's forceFallbackAdapter, and held to what it can say of itself: its kind is CPU, and SwiftShader
+// names itself in its architecture where WARP names nothing (natively WARP's vendor is the Windows build, and Firefox's
+// is blank). A leg that names none opens its own GPU, and compares no golden.
+
+import {
+    core::println,
+    gpu::Instance, gpu::Adapter, gpu::AdapterOptions, gpu::AdapterRequest, gpu::AdapterStatus, gpu::AdapterInfo,
+    gpu::AdapterKind, gpu::PowerPreference, gpu::DeviceOptions,
+    gpu::Device, gpu::Queue, gpu::DeviceRequest, gpu::DeviceStatus, gpu::GpuError,
+    std::memory::replace,
+    Verdicts,
+};
+export { GpuOpen };
+
+comptime int32 SETTLE = 120;   // the most ticks a request waits
+
+fn string kindName(AdapterKind k) {
+    return match (k) {
+        case DiscreteGPU: "DiscreteGPU";
+        case IntegratedGPU: "IntegratedGPU";
+        case CPU: "CPU";
+        case Unknown: "Unknown";
+    };
+}
+
+fn bool isCpu(AdapterKind k) { return match (k) { case CPU: true; case _: false; }; }
+
+type resource GpuOpen {
+    int32 stage = 0;           // 0 the instance, 1 the adapter, 2 the device, 3 settled
+    int32 waited = 0;
+    string gpu;                // the software GPU this leg names, "" for none
+    bool isSoftware = false;   // the adapter is the software GPU the leg names: its frames are held to their goldens
+    Verdicts found;
+    Optional<Instance> instance = Optional::None;
+    Optional<AdapterRequest> adapterRequest = Optional::None;
+    Optional<DeviceRequest> deviceRequest = Optional::None;
+    Optional<Device> device = Optional::None;
+    Optional<Queue> queue = Optional::None;
+
+    public ctor make(string gpu) {
+        this.gpu = give gpu;
+        this.found = Verdicts.make();
+    }
+
+    public fn ref Verdicts verdicts() { return this.found; }
+
+    // Whether the adapter is the software GPU the leg names.
+    public const fn bool software() { return this.isSoftware; }
+
+    // The device and its queue once settled, handed over once; None when none was opened.
+    public fn Optional<Device> takeDevice() { return replace(place: this.device, with: Optional::None); }
+    public fn Optional<Queue> takeQueue() { return replace(place: this.queue, with: Optional::None); }
+
+    // One tick's step: true once settled, with a device or without one.
+    public unsafe fn bool step() {
+        this.waited = this.waited + 1;
+        if (this.stage == 0) { this.open(); }
+        else if (this.stage == 1) { this.awaitAdapter(); }
+        else if (this.stage == 2) { this.awaitDevice(); }
+        if (this.stage == 3) {
+            this.deviceRequest = Optional::None;
+            this.adapterRequest = Optional::None;
+            this.instance = Optional::None;
+            return true;
+        }
+        return false;
+    }
+
+    unsafe fn void next(int32 to) { this.stage = to; this.waited = 0; }
+
+    unsafe fn void open() {
+        Result<Instance, GpuError> made = Instance.make();
+        match (give made) {
+            case Ok(value: inst): {
+                AdapterOptions options = AdapterOptions.make(power: PowerPreference::Default);
+                if (!this.gpu.isEmpty()) { options.forceFallbackAdapter(on: true); }
+                this.adapterRequest = Optional::Some(value: inst.requestAdapter(options: options));
+                this.instance = Optional::Some(value: give inst);
+                this.next(to: 1);
+            }
+            case Err(error: e): {
+                string why = e.message();
+                this.found.add(name: "an instance for the GPU cases", why: give why);
+                this.next(to: 3);
+            }
+        };
+    }
+
+    // The adapter: on a leg that names a software GPU, the fallback one, held to what it can say of itself.
+    unsafe fn void awaitAdapter() {
+        AdapterStatus s = match (this.adapterRequest) { case Some(value: r): r.poll(); case None: AdapterStatus::Failed(error: GpuError::Taken); };
+        bool pending = match (s) { case Pending: true; case _: false; };
+        if (pending) {
+            if (this.waited < SETTLE) { return; }
+            this.found.add(name: "an adapter for the GPU cases", why: "still pending after ${SETTLE} ticks");
+            this.next(to: 3);
+            return;
+        }
+        this.adapterRequest = Optional::None;
+        match (give s) {
+            case Ready(adapter: a): {
+                AdapterInfo info = a.info();
+                string kind = kindName(k: info.kind());
+                string vendor = info.vendor();
+                string architecture = info.architecture();
+                string said = "kind " + kind + ", vendor '" + vendor + "', architecture '" + architecture + "'";
+                println(s: "info the adapter: " + said);
+                if (!this.gpu.isEmpty()) {
+                    bool cpu = isCpu(k: info.kind());
+                    this.found.add(name: "--golden " + this.gpu + ": the adapter is the fallback one, a software GPU (its kind is CPU)",
+                                   why: cpu ? "" : "it is not: " + said);
+                    bool namesSwiftShader = architecture.equalsIgnoringAsciiCase(other: "swiftshader");
+                    bool wantsSwiftShader = this.gpu == "swiftshader";
+                    this.found.add(name: "--golden " + this.gpu + ": the adapter says SwiftShader exactly where the leg names it",
+                                   why: namesSwiftShader == wantsSwiftShader ? "" : "the leg names " + this.gpu + ", the adapter says " + said);
+                    this.isSoftware = cpu && namesSwiftShader == wantsSwiftShader;
+                }
+                DeviceOptions options = DeviceOptions.defaults();
+                options.printErrors = false;
+                this.deviceRequest = Optional::Some(value: a.requestDevice(options: options));
+                this.next(to: 2);
+            }
+            case Failed(error: e): {
+                string why = e.message();
+                this.found.add(name: "an adapter for the GPU cases", why: "refused: " + why);
+                this.next(to: 3);
+            }
+            case Pending: { }
+        };
+    }
+
+    unsafe fn void awaitDevice() {
+        DeviceStatus s = match (this.deviceRequest) { case Some(value: r): r.poll(); case None: DeviceStatus::Failed(error: GpuError::Taken); };
+        bool pending = match (s) { case Pending: true; case _: false; };
+        if (pending) {
+            if (this.waited < SETTLE) { return; }
+            this.found.add(name: "a device for the GPU cases", why: "still pending after ${SETTLE} ticks");
+            this.next(to: 3);
+            return;
+        }
+        this.deviceRequest = Optional::None;
+        match (give s) {
+            case Ready(device: d, queue: q): {
+                this.device = Optional::Some(value: give d);
+                this.queue = Optional::Some(value: give q);
+            }
+            case Failed(error: e): {
+                string why = e.message();
+                this.found.add(name: "a device for the GPU cases", why: "refused: " + why);
+            }
+            case Pending: { }
+        };
+        this.next(to: 3);
+    }
+}

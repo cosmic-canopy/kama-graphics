@@ -2,6 +2,7 @@
   "lockVersion": 1,
   "packages": {
     "@kama/gpu": { "source": "path", "path": "../kama-gpu", "dependencies": ["@kama/window"] },
+    "@kama/image": { "source": "path", "path": "../kama-image", "dependencies": [] },
     "@kama/window": { "source": "path", "path": "../kama-window", "dependencies": [] }
   }
 }

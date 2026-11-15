@@ -18,6 +18,7 @@
   },
   "dependencies": {
     "@kama/gpu": { "path": "../kama-gpu" },
-    "@kama/window": { "path": "../kama-window" }
+    "@kama/window": { "path": "../kama-window" },
+    "@kama/image": { "path": "../kama-image" }
   }
 }

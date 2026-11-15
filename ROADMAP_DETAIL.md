@@ -56,6 +56,16 @@ natively. The library's own `examples/cube` is the same scene without an engine.
 - **Built, part 1's gate and golden harness** (2026-11-14, AGENTS.graphics.md § Build): the tests program,
   `tools/test.sh` natively and in every headless browser present, and the harness held to frames made in memory and to
   its own scene on WARP and SwiftShader. Part 1's `Renderer` that clears and reads back comes next.
+- **Decided on 2026-11-14, part 1's questions 4 to 6** (kyoten's `docs/design/rendering.md` § Decided), the `Renderer`'s
+  shape with no window:
+  - a camera names the target it draws into, and with none it draws into the window. A target is cleared and read on
+    its own, `clear(target:)` and `readRenderTargetPixels(target:)`;
+  - a target's format decides what it holds. The default, 8-bit sRGB, holds what the window would show, and a 16-bit
+    float target the linear HDR scene;
+  - a read hands back an `@kama/image` `Image`, polled until ready, so the library depends on `@kama/image`.
+- **Built, part 1's `Renderer`** (2026-11-14, [SPEC.md](SPEC.md)): `withDevice`, a clear colour written in sRGB, an
+  8-bit sRGB `RenderTarget` cleared and read back as an `Image`, and its golden on WARP and SwiftShader. **Part 1 is
+  built**; part 2, the scene graph on the flat core and an unlit box, is next.
 - **Done:**
   - `examples/cube` draws from one source on both legs;
   - its golden passes on a software GPU on each leg CI has, and perceptually on the reference machines present;

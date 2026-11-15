@@ -1,0 +1,69 @@
+// A render target: a texture a camera draws into in place of the window, cleared and read on its own (kyoten's
+// rendering.md § Decided, GFX-1's part 1, questions 4 to 6). Its format decides what it holds. The default, made here,
+// is 8-bit sRGB and holds what the window would show, so it reads back as a picture.
+//
+// It is an asset, so a shared handle (area 1, item 2): `copy` is the same target, and the last drop frees it. It is made
+// with no device, as three.js's `new RenderTarget(width, height)` is, and a renderer makes its texture on its device the
+// first time it uses it. A target used by renderers on two devices has a texture on each, as three.js keeps one per
+// renderer.
+
+import {
+    std::collections::DynamicArray,
+    std::memory::Shared,
+    gpu::Device, gpu::Texture, gpu::TextureDescriptor, gpu::TextureFormat, gpu::TextureUsage,
+    Renderer,
+};
+export { RenderTarget };
+
+// What every copy of a target shares: its size, and its texture on each device that has used it.
+type resource TargetState {
+    uint32 w;
+    uint32 h;
+    DynamicArray<UnsafePtr> devices;   // the device each texture below was made on, by its handle
+    DynamicArray<Texture> textures;
+
+    public unsafe ctor make(uint32 width, uint32 height) {
+        this.w = width;
+        this.h = height;
+        this.devices = DynamicArray.empty();
+        this.textures = DynamicArray.empty();
+    }
+    public const fn uint32 width() { return this.w; }
+    public const fn uint32 height() { return this.h; }
+
+    // The target's texture on `device`, made the first time: a handle of its own to the one texture. A texture holds its
+    // device, so a device's handle is never reused while its texture is kept here.
+    public unsafe fn Texture textureOn(ref Device device) {
+        UnsafePtr at = device.raw();
+        for (isize i = 0; i < this.devices.length(); i = i + 1) {
+            if (this.devices[i] == at) { return copy this.textures[i]; }
+        }
+        TextureDescriptor d = TextureDescriptor.make(width: this.w, height: this.h, format: TextureFormat::RGBA8UnormSrgb,
+                                                     usage: TextureUsage::RenderAttachment | TextureUsage::CopySrc | TextureUsage::TextureBinding);
+        d.label(text: "a render target");
+        Texture made = device.createTexture(descriptor: give d);
+        this.devices.add(item: at);
+        this.textures.add(item: copy made);
+        return made;
+    }
+}
+
+type resource RenderTarget implements Copyable<This>(bare: give) {
+    Shared<TargetState> state;
+
+    friend Renderer::clear[textureOn];
+    friend Renderer::readRenderTargetPixels[textureOn];
+
+    // A target `width` by `height` texels, 8-bit sRGB.
+    public unsafe ctor make(uint32 width, uint32 height) {
+        Shared<TargetState> s = new TargetState.make(width: width, height: height);
+        this.state = give s;
+    }
+    // Another handle to the same target.
+    public ctor copy(ref RenderTarget source) { this.state = copy source.state; }
+
+    public const fn uint32 width() { return this.state.width(); }
+    public const fn uint32 height() { return this.state.height(); }
+
+    unsafe fn Texture textureOn(ref Device device) { return this.state.textureOn(device: ref device); }
+}

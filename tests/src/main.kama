@@ -1,12 +1,15 @@
 // @kama/graphics' tests, one program (AGENTS.package.md). First, on every leg and with no GPU, the golden harness's own
-// cases (tests/src/harness.kama). Then, a step a tick, the harness end to end on the leg's GPU (tests/src/scene.kama).
+// cases (tests/src/harness.kama) and `Color`'s (tests/src/renderer.kama). Then, a step a tick on the leg's GPU, opened
+// once (tests/src/open.kama): the harness end to end (tests/src/scene.kama), and the `Renderer` that clears a target and
+// reads it back (tests/src/renderer.kama), each on its own handle to the one device.
 //
 // A leg names its software GPU with `--golden warp` or `--golden swiftshader` (kyoten's rendering.md § Decided, GFX-1's
 // part 1, question 3). There every frame is held to its golden, `tests/goldens/<test>/<gpu>.png`, byte for byte. A leg
 // that names none, such as a hardware GPU, compares no golden. The program's last lines say what was compared:
 // `goldens: <n> declared, <n> matched, on <gpu>`, or `goldens: none, this leg names no software GPU`. tools/test.sh holds
 // every leg that names a GPU to declaring and matching every golden tests/goldens/ has for it, so no leg passes by
-// skipping one.
+// skipping one. Once every GPU case has run, it says `gpu cases: all run`, which the gate holds every leg to, so a leg
+// whose device never opened fails, whether it names a GPU or not.
 //
 // It is a state machine, an `App` that std::app::run ticks, because on the web the adapter, the device and the map are
 // answered by the browser between ticks. A failing case prints its name, and the exit status is 1 when any failed.
@@ -16,7 +19,8 @@ import {
     core::env::args, core::env::Args,
     std::app::App, std::app::Lifecycle, std::app::run, std::app::quit,
     std::memory::Owned, std::memory::replace,
-    Verdicts, harnessCases, GoldenRun,
+    gpu::Device, gpu::Queue,
+    Verdicts, harnessCases, colorCases, GpuOpen, GoldenRun, RendererRun,
 };
 
 // The software GPUs a leg can name: WARP, natively on Windows and as Firefox's fallback adapter, and SwiftShader, as
@@ -45,12 +49,18 @@ type resource Check implements App {
     string gpu;
     int32 declared = 0;
     int32 matched = 0;
-    int32 stage = 0;     // 0 the scene, 1 done
+    int32 stage = 0;     // 0 the device, 1 the scene, 2 the renderer, 3 done
+    Optional<GpuOpen> opening = Optional::None;
+    Optional<Device> device = Optional::None;
+    Optional<Queue> queue = Optional::None;
+    bool software = false;
     Optional<GoldenRun> scene = Optional::None;
+    Optional<RendererRun> rendering = Optional::None;
 
     public unsafe ctor make() {
         Verdicts found = Verdicts.make();
         harnessCases(found: ref found);
+        colorCases(found: ref found);
         this.report(found: found);
         string named = goldenArgument();
         if (named.isEmpty() || knownGpu(gpu: named)) {
@@ -59,7 +69,7 @@ type resource Check implements App {
             this.verdict(name: "--golden names a software GPU the harness knows (warp, swiftshader)", why: "it names '" + named + "'");
             this.gpu = "";
         }
-        this.scene = Optional::Some(value: GoldenRun.make(gpu: copy this.gpu));
+        this.opening = Optional::Some(value: GpuOpen.make(gpu: copy this.gpu));
     }
 
     public fn void verdict(const ref string name, const ref string why) {
@@ -87,25 +97,74 @@ type resource Check implements App {
     public fn void lifecycle(Lifecycle event) { }
 
     unsafe fn int32 step() {
-        if (this.stage == 0) { this.sceneStep(); }
-        if (this.stage == 1) { return this.finish(); }
+        if (this.stage == 0) { this.openStep(); }
+        if (this.stage == 1) { this.sceneStep(); }
+        if (this.stage == 2) { this.rendererStep(); }
+        if (this.stage == 3) { return this.finish(); }
         return 1;
+    }
+
+    // The device, opened once for every GPU case (tests/src/open.kama). With none, the GPU cases do not run: on a leg
+    // that names a software GPU the gate then finds its goldens uncompared.
+    unsafe fn void openStep() {
+        Optional<GpuOpen> taken = replace(place: this.opening, with: Optional::None);
+        GpuOpen pending = match (give taken) { case Some(value: o): give o; case None: GpuOpen.make(gpu: copy this.gpu); };
+        bool done = pending.step();
+        this.report(found: pending.verdicts());
+        pending.verdicts().clear();
+        if (!done) { this.opening = Optional::Some(value: give pending); return; }
+        this.software = pending.software();
+        this.device = pending.takeDevice();
+        this.queue = pending.takeQueue();
+        if (this.device.isNone() || this.queue.isNone()) {
+            this.verdict(name: "a device for the GPU cases", why: "none was opened, so no GPU case ran");
+            this.stage = 3;
+            return;
+        }
+        this.stage = 1;
     }
 
     // The harness end to end (tests/src/scene.kama), a step this tick, its verdicts reported here.
     unsafe fn void sceneStep() {
         Optional<GoldenRun> taken = replace(place: this.scene, with: Optional::None);
-        GoldenRun pending = match (give taken) { case Some(value: r): give r; case None: GoldenRun.make(gpu: copy this.gpu); };
+        GoldenRun pending = match (give taken) {
+            case Some(value: r): give r;
+            case None: GoldenRun.make(gpu: copy this.gpu, software: this.software, device: this.deviceCopy(), queue: this.queueCopy());
+        };
         bool done = pending.step();
         this.report(found: pending.verdicts());
         pending.verdicts().clear();
-        if (done) {
-            this.declared = this.declared + pending.declared();
-            this.matched = this.matched + pending.matched();
-            this.stage = 1;
-        }
-        this.scene = Optional::Some(value: give pending);
-        if (done) { this.scene = Optional::None; }
+        if (!done) { this.scene = Optional::Some(value: give pending); return; }
+        this.declared = this.declared + pending.declared();
+        this.matched = this.matched + pending.matched();
+        this.stage = 2;
+    }
+
+    // The renderer's clears and reads (tests/src/renderer.kama), a step this tick.
+    unsafe fn void rendererStep() {
+        Optional<RendererRun> taken = replace(place: this.rendering, with: Optional::None);
+        RendererRun pending = match (give taken) {
+            case Some(value: r): give r;
+            case None: RendererRun.make(gpu: copy this.gpu, software: this.software, device: this.deviceCopy(), queue: this.queueCopy());
+        };
+        bool done = pending.step();
+        this.report(found: pending.verdicts());
+        pending.verdicts().clear();
+        if (!done) { this.rendering = Optional::Some(value: give pending); return; }
+        this.declared = this.declared + pending.declared();
+        this.matched = this.matched + pending.matched();
+        this.queue = Optional::None;
+        this.device = Optional::None;
+        println(s: "gpu cases: all run");
+        this.stage = 3;
+    }
+
+    // A handle of its own to the one device, and to its queue: a copy is another reference to the same one.
+    unsafe fn Device deviceCopy() {
+        return match (this.device) { case Some(value: d): copy d; case None: { panic(msg: "the GPU cases run only once a device is open"); } };
+    }
+    unsafe fn Queue queueCopy() {
+        return match (this.queue) { case Some(value: q): copy q; case None: { panic(msg: "the GPU cases run only once a device is open"); } };
     }
 
     unsafe fn int32 finish() {

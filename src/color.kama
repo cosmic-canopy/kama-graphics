@@ -1,0 +1,59 @@
+// A colour. It is written in sRGB, as a hex number or as numbers from 0 to 1, and held in the linear working space the
+// renderer computes in (kyoten's rendering.md § Decided, the design pass's area 2, item 4: "colors are written in sRGB and
+// converted to a linear working space, as Three.js's color management does"). The curve is three.js's sRGB transfer, so
+// every 8-bit value written reads back unchanged.
+
+import { std::math::pow };
+export { Color };
+
+// The sRGB curve, both ways, as three.js's ColorManagement writes it (SRGBToLinear and LinearToSRGB).
+fn float64 srgbToLinear(float64 c) {
+    if (c < 0.04045) { return c * 0.0773993808; }
+    return pow(x: c * 0.9478672986 + 0.0521327014, y: 2.4);
+}
+
+fn float64 linearToSrgb(float64 c) {
+    if (c < 0.0031308) { return c * 12.92; }
+    return 1.055 * pow(x: c, y: 0.41666) - 0.055;
+}
+
+// A channel in sRGB from 0 to 1 as its 8-bit value, rounded, and held to 0 to 255.
+fn uint32 byteOf(float64 c) {
+    float64 scaled = c * 255.0 + 0.5;
+    if (scaled <= 0.0) { return 0; }
+    if (scaled >= 255.0) { return 255; }
+    return cast<uint32>(truncate<int32>(scaled));
+}
+
+type value Color {
+    float32 red;     // the linear working space
+    float32 green;
+    float32 blue;
+
+    // From sRGB numbers, 0 to 1 for a displayable colour; beyond them for a brighter one.
+    public ctor make(float32 r, float32 g, float32 b) {
+        this.red = cast<float32>(srgbToLinear(c: cast<float64>(r)));
+        this.green = cast<float32>(srgbToLinear(c: cast<float64>(g)));
+        this.blue = cast<float32>(srgbToLinear(c: cast<float64>(b)));
+    }
+
+    // From an sRGB hex number, 0xRRGGBB, as three.js's `new Color(0x336699)`.
+    public ctor fromHex(uint32 hex) {
+        this.red = cast<float32>(srgbToLinear(c: cast<float64>((hex >> 16) & 255) / 255.0));
+        this.green = cast<float32>(srgbToLinear(c: cast<float64>((hex >> 8) & 255) / 255.0));
+        this.blue = cast<float32>(srgbToLinear(c: cast<float64>(hex & 255) / 255.0));
+    }
+
+    // As an sRGB hex number, 0xRRGGBB, each channel rounded and held to 0 to 255, as three.js's `getHex()`.
+    public const fn uint32 hex() {
+        uint32 r = byteOf(c: linearToSrgb(c: cast<float64>(this.red)));
+        uint32 g = byteOf(c: linearToSrgb(c: cast<float64>(this.green)));
+        uint32 b = byteOf(c: linearToSrgb(c: cast<float64>(this.blue)));
+        return (r << 16) | (g << 8) | b;
+    }
+
+    // Each channel in the linear working space, as three.js's `r`, `g` and `b`: what a shader computes with.
+    public const fn float32 linearR() { return this.red; }
+    public const fn float32 linearG() { return this.green; }
+    public const fn float32 linearB() { return this.blue; }
+}

@@ -8,7 +8,8 @@ is the git log and [CHANGELOG.md](CHANGELOG.md).
 **Where it stands** (2026-11-15, kama 0.9.956): GFX-1's parts 1 and 2. A `Renderer` with no window draws a scene of
 unlit boxes through a perspective camera into a render target, with reversed depth, and reads it back as an
 `@kama/image` `Image`, natively on Windows on wgpu-native v29.0.1.1 and on the web in headless Edge 157, Chrome for
-Testing 157 and Firefox 160. Every frame in the tests is held to its software GPU's golden. Not published.
+Testing 157 and Firefox 160. A misuse the types cannot refuse is refused and reported, never ending the program. Every
+frame in the tests is held to its software GPU's golden. Not published.
 
 ## Using it
 
@@ -77,6 +78,25 @@ a resource the program owns.
 - **`info()` says what the last render did,** as three.js's `renderer.info`: `calls`, `triangles`, `objects` (the meshes
   the scene holds a record for) and `matrices` (the world matrices its walk made: 0 when nothing in the scene changed).
 
+## Misuse
+
+**A misuse the types cannot refuse is refused and reported, and never ends the program** (kyoten's rendering.md §
+Decided, GFX-1's part 2, question 4), as `@kama/gpu` reports every misuse of WebGPU as a validation error (its decision
+9), and as three.js, Godot and Unity report theirs.
+
+- **A camera naming no target, rendered by a renderer with no window, draws nothing.** The renderer records the error,
+  of kind `GraphicsErrorKind::NoTarget`, and the scene's walk still runs, so `info()` says 0 calls.
+- **`renderer.takeErrors()` hands back what was recorded since the last call,** as `@kama/gpu`'s `device.takeErrors()`
+  does: a `RendererErrors`, with `reports()` (each a `GraphicsErrorReport`, its `kind()` and `message()`), `dropped()`
+  and `isEmpty()`. It keeps the oldest 64, since the first is usually the cause, and counts the rest in `dropped()`.
+  `GraphicsErrorKind` is `@nonExhaustive`, so a later misuse joins it and a program's `match` has a `case _:`.
+- **Each misuse is also printed to stderr as it happens,** one line beginning `@kama/graphics:`, so a misuse nobody reads
+  is never silent. `printErrors()` and `printErrorsMut()` are a property pair, true by default, as `@kama/gpu`'s
+  `DeviceOptions.printErrors`. A program that reads `takeErrors()` itself turns it off. It is a property of the renderer
+  rather than an option at its making, since a renderer's own misuses never arise while it is made.
+- **A node added under itself or one of its own children is refused** (§ The scene graph): `add` changes nothing,
+  prints the refusal and says `false`.
+
 ## Render targets
 
 - **`new RenderTarget.make(width:, height:)` is a target that size, 8-bit sRGB,** which holds what the window would
@@ -94,9 +114,15 @@ a resource the program owns.
   place in the tree), reached through the contract as `node()` and `nodeMut()`.
 - **`add(object:)` adds a child, taking it from any parent it had, and `remove(object:)` takes one out,** as three.js's;
   removing a node that is not a child leaves everything as it was. `childCount()` and `child(index:)` read the
-  children. A node is held by every holder of its `Shared`, the tree included, and freed with the last. A node added
-  under itself or one of its own children ends the program, naming the mistake, since the loop could never be walked or
-  freed.
+  children. A node is held by every holder of its `Shared`, the tree included, and freed with the last.
+- **`add` says whether it added.** A node added under itself or one of its own children would make a loop the scene
+  could never walk or free, so `add` refuses it: it changes nothing (each node keeps its children, its parent and its
+  marks), prints the refusal and says `false`, which a program may ignore (§ Misuse). Godot's `add_child` and three.js's
+  `add` refuse and print the same way.
+- **`isAncestorOf(object:)` says whether a node is above another,** its parent, its parent's parent and so on, as
+  Godot's `is_ancestor_of`; a node is not its own ancestor. `parent.add(object: child)` is refused exactly when `child`
+  is `parent` or `child.isAncestorOf(object: parent)`, so a program that must not print, such as an editor refusing a
+  drag, asks first.
 - **The transform is three.js's, through property pairs** (area 2, item 3): `position()`/`positionMut()` and
   `scale()`/`scaleMut()` are std::math `Vec3`s, Y up, right-handed, metres. A write marks the node changed, so a program
   never sets a needs-update flag. `matrixWorld()` is the node's world matrix as of the last render.
@@ -177,7 +203,7 @@ a resource the program owns.
 - then `tests/`, one program, built debug and release and run natively, and built for the web and run under `kama run`
   in Edge, Firefox and the pinned Chrome for Testing, each started as `tools/browsers.mjs` says.
 
-It is 82 cases on each leg that names a software GPU, and 77 in Edge, whose leg names none.
+It is 95 cases on each leg that names a software GPU, and 90 in Edge, whose leg names none.
 
 - **The goldens** (kyoten's rendering.md § Decided, GFX-1's part 1, questions 2 and 3):
   - Each leg names its software GPU: `--golden warp` natively on Windows and in Firefox, `--golden swiftshader` in the
@@ -228,7 +254,10 @@ It is 82 cases on each leg that names a software GPU, and 77 in Edge, whose leg 
   - the camera's projection against three.js's, its depth at the near and far planes, a changed field of view, and an
     infinite far;
   - `MeshBasicMaterial`'s default and its settings;
-  - the tree's add, remove and freeing.
+  - the tree's add, remove and freeing;
+  - question 4's refusals: a node added under itself, its child, its grandchild, or its own child with a parent of its
+    own, each refused with `false` and nothing changed; `isAncestorOf` above a child and a grandchild, never itself, its
+    parent or a node elsewhere, and following a node `add` moved.
 - **Part 2, on each leg's GPU** (`tests/src/boxes.kama`):
   - two boxes crossing in depth, against `boxes/<gpu>.png`, and on every leg every texel the backdrop or a box's colour,
     exactly;
@@ -237,4 +266,10 @@ It is 82 cases on each leg that names a software GPU, and 77 in Edge, whose leg 
   - world matrices through a turned parent, `rotateOnWorldAxis` under one, `lookAt`, and a mesh removed giving up its
     record;
   - a camera inside a box seeing the backdrop;
-  - a material's colour changed after its first frame.
+  - a material's colour changed after its first frame;
+  - question 4's on the GPU: a refused add (the scene under one of its own meshes) marking nothing and drawing the same;
+    a camera naming no target drawing nothing, reported once as `NoTarget`, and drained; `printErrors` true by default
+    and false once turned off; a renderer told not to print keeping the oldest 64 of 70 and counting 6, its count
+    drained too.
+- **Printed from outside the program:** the gate counts each leg's printed lines, one for the render refused by the
+  renderer that prints and five for the refused adds, and none from the renderer told not to print.

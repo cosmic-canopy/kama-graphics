@@ -87,8 +87,10 @@ natively. The library's own `examples/cube` is the same scene without an engine.
 - **Decided on 2026-11-15, part 2's question 4** (kyoten's `docs/design/rendering.md` § Decided): a misuse the types
   cannot refuse is refused and reported, never ending the program, as `@kama/gpu`'s decision 9. A camera naming no
   target on a renderer with no window draws nothing, its error recorded for `renderer.takeErrors()` and printed by
-  default; a node added under itself or one of its children is refused, printed, and `add` returns `false`. **Built
-  next;** until then the first draws nothing and the second ends the program. Then part 3, typed nodes and the lit box.
+  default; a node added under itself or one of its children is refused, printed, and `add` returns `false`. **Built**
+  (2026-11-15, [SPEC.md](SPEC.md) § Misuse), with how the printing is turned off settled while building: the
+  renderer's `printErrors()`/`printErrorsMut()`, true by default, and for `add`, `isAncestorOf(object:)` to ask first.
+  Next, part 3, typed nodes and the lit box.
 - **Done:**
   - `examples/cube` draws from one source on both legs;
   - its golden passes on a software GPU on each leg CI has, and perceptually on the reference machines present;

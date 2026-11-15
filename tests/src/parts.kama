@@ -336,6 +336,47 @@ unsafe fn void treeCases(ref Verdicts found) {
         case None: false;
     };
     found.add(name: "tree: a node is freed once nothing holds it, the tree's handle the last", why: freed ? "" : "it is still alive");
+    loopCases(found: ref found);
+}
+
+// A node added under itself or one of its own children is refused, changing nothing, and printed (kyoten's rendering.md
+// § Decided, GFX-1's part 2, question 4): `add` says false. tools/test.sh counts the printed lines from outside the
+// program. `isAncestorOf` lets a program ask first.
+unsafe fn void loopCases(ref Verdicts found) {
+    Shared<Group> top = new Group.make();
+    Shared<Group> middle = new Group.make();
+    Shared<Group> bottom = new Group.make();
+    Shared<Group> stranger = new Group.make();
+    bool tookMiddle = top.add(object: middle);
+    bool tookBottom = middle.add(object: bottom);
+    found.add(name: "tree: add says true when it adds a node", why: tookMiddle && tookBottom ? "" : "it said ${tookMiddle} and ${tookBottom}");
+    bool underItself = top.add(object: top);
+    bool underChild = middle.add(object: top);
+    bool underGrandchild = bottom.add(object: top);
+    bool parentUnderChild = bottom.add(object: middle);   // a node with a parent of its own, which a refusal leaves there
+    found.add(name: "tree: a node added under itself, its child or its grandchild is refused: add says false",
+              why: !underItself && !underChild && !underGrandchild && !parentUnderChild ? ""
+                   : "it said ${underItself}, ${underChild}, ${underGrandchild} and ${parentUnderChild}");
+    isize topKids = top.childCount();
+    isize middleKids = middle.childCount();
+    isize bottomKids = bottom.childCount();
+    bool chain = top.isAncestorOf(object: middle) && middle.isAncestorOf(object: bottom);
+    bool looped = bottom.isAncestorOf(object: top) || middle.isAncestorOf(object: top) || top.isAncestorOf(object: top);
+    found.add(name: "tree: a refused add changes nothing: each node keeps its children and its parent",
+              why: topKids == 1 && middleKids == 1 && bottomKids == 0 && chain && !looped ? ""
+                   : "children ${topKids}, ${middleKids} and ${bottomKids}; the chain held ${chain}; a loop ${looped}");
+    bool aboveChild = top.isAncestorOf(object: middle);
+    bool aboveGrandchild = top.isAncestorOf(object: bottom);
+    bool aboveItself = top.isAncestorOf(object: top);
+    bool aboveParent = bottom.isAncestorOf(object: middle);
+    bool aboveStranger = top.isAncestorOf(object: stranger);
+    found.add(name: "tree: isAncestorOf: a node is above its child and its grandchild, and never itself, its parent or a node elsewhere",
+              why: aboveChild && aboveGrandchild && !aboveItself && !aboveParent && !aboveStranger ? ""
+                   : "child ${aboveChild}, grandchild ${aboveGrandchild}, itself ${aboveItself}, parent ${aboveParent}, elsewhere ${aboveStranger}");
+    bool moved = stranger.add(object: bottom);
+    bool followed = !middle.isAncestorOf(object: bottom) && stranger.isAncestorOf(object: bottom) && !top.isAncestorOf(object: bottom);
+    found.add(name: "tree: isAncestorOf follows a node moved elsewhere by add",
+              why: moved && followed ? "" : "add said ${moved}, and the old and new parents did not follow");
 }
 
 unsafe fn void partCases(ref Verdicts found) {

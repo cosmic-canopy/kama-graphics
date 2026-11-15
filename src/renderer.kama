@@ -13,9 +13,15 @@
 // depth is reversed (GFX-1's question 1: near 1, far 0, the test Greater); and each mesh is one draw, reading its record
 // by its instance index. Sorting draws and drawing a mesh and material in common as one instanced draw come with
 // automatic instancing (GFX-2). `info()` says what the last render did, as three.js's `renderer.info`.
+//
+// A misuse the types cannot refuse is refused and reported, never ending the program (part 2, question 4), as @kama/gpu's
+// decision 9 does below it: a camera naming no target, rendered by a renderer with no window, draws nothing. The error
+// is the renderer's, read by `takeErrors()` as @kama/gpu's device's are, and printed as it happens unless the program
+// turns `printErrors` off, which a program that reads them itself does.
 
 import {
     std::collections::DynamicArray, std::collections::FixedArray,
+    std::io::stderr, std::io::StdErr, std::memory::replace,
     std::math::Mat4,
     gpu::Device, gpu::Queue, gpu::GpuError, gpu::Texture, gpu::TextureView, gpu::TextureViewDescriptor, gpu::TextureFormat,
     gpu::Buffer, gpu::BufferDescriptor, gpu::BufferUsage, gpu::BufferRead, gpu::ReadStatus, gpu::BufferBinding,
@@ -30,7 +36,7 @@ import {
     image::Image, image::ImageError, image::PixelFormat, image::AlphaMode, image::ColorSpace,
     Color, RenderTarget, Scene, PerspectiveCamera, Geometry, BufferGeometry, Material,
 };
-export { Renderer, RenderInfo, PixelRead, PixelStatus };
+export { Renderer, RenderInfo, PixelRead, PixelStatus, GraphicsErrorKind, GraphicsErrorReport, RendererErrors };
 
 // A copied row's bytes: WebGPU aligns them to 256.
 fn uint32 rowBytes(uint32 width) { return (width * 4 + 255) / 256 * 256; }
@@ -43,12 +49,59 @@ fn string prelude() {
         + "@group(0) @binding(1) var<storage, read> objects: array<mat4x4f>;\n";
 }
 
+// A refused misuse, printed to stderr as one line, as @kama/gpu prints a device's errors (`@kama/gpu: …`); scene.kama's
+// `add` prints its own the same way. A write that fails is let go: there is nowhere left to report it.
+unsafe fn void printMisuse(const ref string words) {
+    StdErr err = stderr();
+    string line = "@kama/graphics: " + words + "\n";
+    match (err.write(bytes: line.bytes())) { case Ok(value: n): { } case Err(error: e): { } };
+}
+
 fn void putFloat(ref DynamicArray<uint8> into, float32 value) {
     uint32 bits = bitcast<uint32>(value);
     into.add(item: truncate<uint8>(bits));
     into.add(item: truncate<uint8>(bits >> 8));
     into.add(item: truncate<uint8>(bits >> 16));
     into.add(item: truncate<uint8>(bits >> 24));
+}
+
+// The most misuses a renderer keeps until `takeErrors()` drains them, as @kama/gpu's channel keeps 64.
+comptime isize KEPT = 64;
+
+// What kind of misuse a renderer refused. `NoTarget`: a camera naming no render target was rendered by a renderer with
+// no window to draw into. A later misuse joins the list, so a program's `match` on it has a `case _:`.
+@nonExhaustive
+type enum GraphicsErrorKind { NoTarget }
+
+// One misuse a renderer refused, in its words, whole, as @kama/gpu's `GpuErrorReport`.
+type resource GraphicsErrorReport {
+    GraphicsErrorKind sort;
+    string words;
+
+    public ctor of(GraphicsErrorKind kind, string message) {
+        this.sort = kind;
+        this.words = give message;
+    }
+    public const fn GraphicsErrorKind kind() { return this.sort; }
+    public const fn string message() { return copy this.words; }
+}
+
+// What `renderer.takeErrors()` drained: the misuses refused since the last drain, the oldest first. A full record keeps
+// the oldest 64, since the first is usually the cause and the later ones its repeats, and counts the rest in
+// `dropped()`, as @kama/gpu's `DeviceErrors` does.
+type resource RendererErrors {
+    DynamicArray<GraphicsErrorReport> items;
+    int64 overflow;
+
+    friend Renderer::takeErrors[make];
+
+    ctor make(DynamicArray<GraphicsErrorReport> reports, int64 dropped) {
+        this.items = give reports;
+        this.overflow = dropped;
+    }
+    public const fn const ref DynamicArray<GraphicsErrorReport> reports() { return this.items; }
+    public const fn int64 dropped() { return this.overflow; }
+    public const fn bool isEmpty() { return this.items.length() == 0 && this.overflow == 0; }
 }
 
 // What the last render did, as three.js's `renderer.info`: its draw calls and triangles, the meshes its scene holds a
@@ -73,6 +126,9 @@ type resource Renderer {
     DynamicArray<string> sources;     // the pipelines made, by the WGSL they run
     DynamicArray<RenderPipeline> pipelines;
     RenderInfo last = RenderInfo.of(calls: 0, triangles: 0, objects: 0, matrices: 0);
+    bool printing = true;                       // printErrors
+    DynamicArray<GraphicsErrorReport> errors;   // the misuses refused since the last takeErrors, at most KEPT
+    int64 overflow = 0;                         // those past KEPT, counted
 
     // A renderer on a device the program already has, with its queue: each a handle of its own, so the program keeps
     // its own (`copy device`) and several renderers share one device.
@@ -98,6 +154,7 @@ type resource Renderer {
         this.frame = device.createBuffer(descriptor: give described);
         this.sources = DynamicArray.empty();
         this.pipelines = DynamicArray.empty();
+        this.errors = DynamicArray.empty();
         this.device = give device;
         this.queue = give queue;
     }
@@ -112,6 +169,32 @@ type resource Renderer {
 
     // What the last render did.
     public const fn RenderInfo info() { return this.last; }
+
+    // Whether each misuse the renderer refuses is also printed to stderr as it happens: true, as @kama/gpu's
+    // `DeviceOptions.printErrors`, so a misuse nobody reads is never silent. A program that reads `takeErrors()` itself
+    // turns it off. A property pair, as `clearColor`, since the renderer's own errors never arise while it is made.
+    public const fn bool printErrors() { return this.printing; }
+    public fn ref bool printErrorsMut() { return this.printing; }
+
+    // The misuses refused since the last call, the oldest first, with how many past the 64 kept were counted.
+    public fn RendererErrors takeErrors() {
+        DynamicArray<GraphicsErrorReport> fresh = DynamicArray.empty();
+        DynamicArray<GraphicsErrorReport> taken = replace(place: this.errors, with: give fresh);
+        int64 counted = this.overflow;
+        this.overflow = 0;
+        return RendererErrors.make(reports: give taken, dropped: counted);
+    }
+
+    // A misuse refused: printed when the renderer prints, and kept while the record has room.
+    unsafe fn void refuse(GraphicsErrorKind kind, string message) {
+        if (this.printing) { printMisuse(words: message); }
+        if (this.errors.length() < KEPT) {
+            this.errors.add(item: GraphicsErrorReport.of(kind: kind, message: give message));
+        } else {
+            this.overflow = this.overflow + 1;
+            string unkept = give message;
+        }
+    }
 
     fn GpuColor clearing() {
         return GpuColor.of(r: cast<float64>(this.clearTo.linearR()), g: cast<float64>(this.clearTo.linearG()),
@@ -164,7 +247,10 @@ type resource Renderer {
         int32 objects = cast<int32>(scene.objects());
         Optional<Shared<RenderTarget>> named = camera.target();
         if (named.isNone()) {
+            // no target, and no window to draw into until part 6 gives the renderer one
             this.last = RenderInfo.of(calls: 0, triangles: 0, objects: objects, matrices: made);
+            this.refuse(kind: GraphicsErrorKind::NoTarget,
+                        message: "render drew nothing: the camera names no render target, and this renderer has no window to draw into (name a target with the camera's targetMut())");
             return;
         }
         Shared<RenderTarget> target = match (give named) { case Some(value: t): give t; case None: { panic(msg: "checked above"); } };

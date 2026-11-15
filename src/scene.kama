@@ -18,10 +18,16 @@
 //   matrix, geometry and material, written when it changed and freed when the mesh leaves the scene. The table reaches
 //   the GPU as one storage buffer, written where it changed. It stays internal until an engine first drives it.
 //
+// - **A misuse the types cannot refuse is refused and reported, never ending the program** (part 2, question 4): a node
+//   added under itself or one of its own children would make a loop, so `add` refuses it, changes nothing, prints it and
+//   says false, as three.js's and Godot's `add` print and refuse. A program that must not reach it asks
+//   `isAncestorOf` first, as Godot's `is_ancestor_of`.
+//
 // World-space helpers (`rotateOnWorldAxis`, `lookAt`) read a parent's world matrix as of the last render.
 
 import {
     std::collections::DynamicArray,
+    std::io::stderr, std::io::StdErr,
     std::math::Vec3, std::math::Vec4, std::math::Quat, std::math::Mat4, std::math::sqrt, std::math::tan,
     gpu::Device, gpu::Queue, gpu::Buffer, gpu::BufferDescriptor, gpu::BufferUsage,
     Euler, EulerOrder, Geometry, Material, RenderTarget, Renderer,
@@ -254,6 +260,14 @@ type resource Anchor {
     public fn void setWorld(Mat4 m) { this.world = m; }
 }
 
+// A refused misuse, printed to stderr as one line, as @kama/gpu prints a device's errors (`@kama/gpu: …`). A write
+// that fails is let go: there is nowhere left to report it.
+unsafe fn void printRefusal(const ref string words) {
+    StdErr err = stderr();
+    string line = "@kama/graphics: " + words + "\n";
+    match (err.write(bytes: line.bytes())) { case Ok(value: n): { } case Err(error: e): { } };
+}
+
 // Marks each anchor from `start` up as having a change below it, stopping at the first already marked.
 unsafe fn void markAbove(Optional<Weak<Anchor>> start) {
     Optional<Weak<Anchor>> at = give start;
@@ -393,17 +407,28 @@ type resource NodePart {
         this.quaternionMut() = rotationOf(m: parent).conjugate() * world;
     }
 
-    // Adds a child, taking it from any parent it had, as three.js's `add`. A node is never added under itself or under
-    // one of its own children: that would make a loop the scene could never walk or free.
-    public unsafe fn void add(Shared<Object3D> object) {
+    // Adds a child, taking it from any parent it had, as three.js's `add`, and says whether it did. A node is never added
+    // under itself or under one of its own children: that would make a loop the scene could never walk or free. Such an
+    // add is refused, changes nothing and is printed; a program may ignore the `false`.
+    public unsafe fn bool add(Shared<Object3D> object) {
         if (this.inside(other: object.node())) {
-            panic(msg: "@kama/graphics: a node cannot be added under itself or one of its children");
+            printRefusal(words: "add refused a node under itself or one of its own children, which would make a loop; nothing changed");
+            return false;
         }
         object.nodeMut().detach();
         object.nodeMut().linkTo(up: this.anch.downgrade());
         this.anch.push(o: object);
         this.anch.setBelow(on: true);
         markAbove(start: this.anch.upLink());
+        return true;
+    }
+
+    // Whether this node is above `object` in its tree: its parent, its parent's parent and so on, as Godot's
+    // `is_ancestor_of`. A node is not its own ancestor. `parent.add(object: child)` is refused exactly when `child` is
+    // `parent` or `child.isAncestorOf(object: parent)`, so a program can ask before it adds.
+    public unsafe const fn bool isAncestorOf(Shared<Object3D> object) {
+        if (addr(of: this.anch.deref()) == addr(of: object.node().anch.deref())) { return false; }
+        return object.node().inside(other: this);
     }
 
     // Removes a child, as three.js's `remove`; a node that is not a child is left alone.
@@ -433,7 +458,7 @@ type resource NodePart {
     }
 
     // Whether `other`'s node is this one, or an ancestor of it.
-    unsafe fn bool inside(const ref NodePart other) {
+    unsafe const fn bool inside(const ref NodePart other) {
         if (addr(of: this.anch.deref()) == addr(of: other.anch.deref())) { return true; }
         Optional<Weak<Anchor>> at = this.anch.upLink();
         bool going = true;
@@ -578,7 +603,8 @@ type resource Scene implements Object3D {
     public unsafe fn void rotateOnAxis(Vec3 axis, float32 rad) { this.part.rotateOnAxis(axis: axis, rad: rad); }
     public unsafe fn void rotateOnWorldAxis(Vec3 axis, float32 rad) { this.part.rotateOnWorldAxis(axis: axis, rad: rad); }
     public unsafe fn void lookAt(Vec3 target) { this.part.lookAt(target: target); }
-    public unsafe fn void add(Shared<Object3D> object) { this.part.add(object: object); }
+    public unsafe fn bool add(Shared<Object3D> object) { return this.part.add(object: object); }
+    public unsafe const fn bool isAncestorOf(Shared<Object3D> object) { return this.part.isAncestorOf(object: object); }
     public unsafe fn void remove(Shared<Object3D> object) { this.part.remove(object: object); }
     public const fn isize childCount() { return this.part.childCount(); }
     public unsafe const fn Shared<Object3D> child(isize index) { return this.part.child(index: index); }
@@ -612,7 +638,8 @@ type resource Group implements Object3D {
     public unsafe fn void rotateOnAxis(Vec3 axis, float32 rad) { this.part.rotateOnAxis(axis: axis, rad: rad); }
     public unsafe fn void rotateOnWorldAxis(Vec3 axis, float32 rad) { this.part.rotateOnWorldAxis(axis: axis, rad: rad); }
     public unsafe fn void lookAt(Vec3 target) { this.part.lookAt(target: target); }
-    public unsafe fn void add(Shared<Object3D> object) { this.part.add(object: object); }
+    public unsafe fn bool add(Shared<Object3D> object) { return this.part.add(object: object); }
+    public unsafe const fn bool isAncestorOf(Shared<Object3D> object) { return this.part.isAncestorOf(object: object); }
     public unsafe fn void remove(Shared<Object3D> object) { this.part.remove(object: object); }
     public const fn isize childCount() { return this.part.childCount(); }
     public unsafe const fn Shared<Object3D> child(isize index) { return this.part.child(index: index); }
@@ -662,7 +689,8 @@ type resource Mesh implements Object3D {
     public unsafe fn void rotateOnAxis(Vec3 axis, float32 rad) { this.part.rotateOnAxis(axis: axis, rad: rad); }
     public unsafe fn void rotateOnWorldAxis(Vec3 axis, float32 rad) { this.part.rotateOnWorldAxis(axis: axis, rad: rad); }
     public unsafe fn void lookAt(Vec3 target) { this.part.lookAt(target: target); }
-    public unsafe fn void add(Shared<Object3D> object) { this.part.add(object: object); }
+    public unsafe fn bool add(Shared<Object3D> object) { return this.part.add(object: object); }
+    public unsafe const fn bool isAncestorOf(Shared<Object3D> object) { return this.part.isAncestorOf(object: object); }
     public unsafe fn void remove(Shared<Object3D> object) { this.part.remove(object: object); }
     public const fn isize childCount() { return this.part.childCount(); }
     public unsafe const fn Shared<Object3D> child(isize index) { return this.part.child(index: index); }
@@ -760,7 +788,8 @@ type resource PerspectiveCamera implements Object3D {
     public unsafe fn void rotateOnAxis(Vec3 axis, float32 rad) { this.part.rotateOnAxis(axis: axis, rad: rad); }
     public unsafe fn void rotateOnWorldAxis(Vec3 axis, float32 rad) { this.part.rotateOnWorldAxis(axis: axis, rad: rad); }
     public unsafe fn void lookAt(Vec3 target) { this.part.lookAt(target: target); }
-    public unsafe fn void add(Shared<Object3D> object) { this.part.add(object: object); }
+    public unsafe fn bool add(Shared<Object3D> object) { return this.part.add(object: object); }
+    public unsafe const fn bool isAncestorOf(Shared<Object3D> object) { return this.part.isAncestorOf(object: object); }
     public unsafe fn void remove(Shared<Object3D> object) { this.part.remove(object: object); }
     public const fn isize childCount() { return this.part.childCount(); }
     public unsafe const fn Shared<Object3D> child(isize index) { return this.part.child(index: index); }

@@ -117,7 +117,8 @@ software GPU while only `tools/update-goldens.sh` writes a golden. `@kama/gpu`'s
 **Part 2 is built** (2026-11-15), its three questions decided that day ([ROADMAP_DETAIL.md](ROADMAP_DETAIL.md#cube)):
 rotation held both ways, as an `Euler` with five safeguards and a `Quat`; `MeshBasicMaterial` with its WGSL by hand until
 part 3; every shared object a `Shared<T>` made with `new`. Its question 4 was decided the same day: a misuse the types
-cannot refuse is refused and reported, never ending the program, as `@kama/gpu`'s decision 9; it is built first next.
+cannot refuse is refused and reported, never ending the program, as `@kama/gpu`'s decision 9, built the next session
+(SPEC § Misuse).
 Then part 3, typed nodes compiled to WGSL and the lit box, with its question of how the library's shader modules are
 linked when a material compiles at run time (WESL). GFX-1 is built depth-first, and every example is a test: a headless
 readback and a golden image, on web and native. A feature a program does not use drops out at link time.

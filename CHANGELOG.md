@@ -29,6 +29,14 @@ package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - `Renderer.render(scene:, camera:)` and `info()` (`RenderInfo`: calls, triangles, objects, matrices).
   - **Changed:** `RenderTarget` is a `Shared<RenderTarget>` made with `new`, as every shared object is, so `clear` and
     `readRenderTargetPixels` take one; it gains a 32-bit float depth texture on each device that draws into it.
+- GFX-1's part 2, question 4: a misuse the types cannot refuse is refused and reported, never ending the program.
+  - `Renderer.render` with a camera naming no target, on a renderer with no window, draws nothing and records a
+    `GraphicsErrorReport` of kind `GraphicsErrorKind::NoTarget`; `renderer.takeErrors()` hands back a `RendererErrors`
+    (`reports()`, `dropped()`, `isEmpty()`), the oldest 64 kept and the rest counted.
+  - Each misuse is printed to stderr as `@kama/graphics: …` unless `printErrorsMut()` turns `printErrors()` off.
+  - **Changed:** `add(object:)` returns `bool`. A node added under itself or one of its own children is refused,
+    changes nothing, is printed and says `false`, where it ended the program.
+  - `isAncestorOf(object:)` on every node, so a program can ask before it adds.
 - The gate runs every browser under `kama run`, the pinned Chrome for Testing among them, started as
   `tools/browsers.mjs` says, so its DevTools driver, `tools/webtest.mjs`, is retired. The gate needs kama 0.9.956
   (`--chromium-arg`) or later.

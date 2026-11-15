@@ -52,6 +52,22 @@ goldensHeld() {
     fi
 }
 
+# A misuse the library refuses is printed by default (kyoten's rendering.md § Decided, GFX-1's part 2, question 4), which
+# only the run's output can show: the tests' renderer that prints refuses one render, the one told not to print refuses
+# 70 and must print none, and the tree refuses five adds (tests/src/boxes.kama and parts.kama). Each refusal printed
+# once, on every leg.
+refusalsPrinted() {
+    local log="$1" leg="$2" renders adds
+    renders="$(grep -c '@kama/graphics: render drew nothing' "$log" || true)"
+    adds="$(grep -c '@kama/graphics: add refused' "$log" || true)"
+    if [ "$renders" = 1 ] && [ "$adds" = 5 ]; then
+        echo "ok   each refused misuse was printed once, and none by the renderer told not to print ($leg)"
+    else
+        echo "FAIL ($leg) the refused misuses printed: ${renders} render line(s), not 1, and ${adds} add line(s), not 5"
+        failed=1
+    fi
+}
+
 step "the roadmap"
 tools/check-roadmap.sh || failed=1
 
@@ -105,6 +121,7 @@ for mode in debug release; do
     if buildNative "$mode"; then
         runNative "$mode" "$gpu" "tests/out/run-$mode.log" || failed=1
         goldensHeld "tests/out/run-$mode.log" "$gpu" "native, $mode"
+        refusalsPrinted "tests/out/run-$mode.log" "native, $mode"
     else
         failed=1
     fi
@@ -170,6 +187,7 @@ else
             echo "-- kama run, $browser${flags:+ ${flags% }}${gpu:+, --golden $gpu}"
             runKama "$browser" "$gpu" "tests/out/run-web-$n.log" || failed=1
             goldensHeld "tests/out/run-web-$n.log" "$gpu" "$name"
+            refusalsPrinted "tests/out/run-web-$n.log" "$name"
             # The pinned Chrome for Testing is the web's SwiftShader leg (decided with the owner on 2026-11-14): one that
             # ran naming no software GPU passed on its hardware, comparing nothing.
             if [ "$(browserKind "$browser")" = chrome-for-testing ]; then

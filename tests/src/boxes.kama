@@ -19,6 +19,7 @@ import {
     graphics::Color, graphics::Renderer, graphics::RenderInfo, graphics::RenderTarget, graphics::PixelRead,
     graphics::PixelStatus, graphics::Scene, graphics::Group, graphics::Mesh, graphics::PerspectiveCamera,
     graphics::BoxGeometry, graphics::MeshBasicMaterial, graphics::Euler, graphics::EulerOrder,
+    graphics::RendererErrors, graphics::GraphicsErrorKind,
     Verdicts, checkGolden,
 };
 export { BoxesRun };
@@ -258,6 +259,11 @@ type resource BoxesRun {
             RenderInfo dropped = this.renderOnly(scene: copy s);
             this.found.add(name: "render: the mesh removed again is drawn no more",
                            why: infoIs(got: dropped, calls: 2, triangles: 24, objects: 2, matrices: 0));
+            // a refused add (the scene under one of its own meshes) changes nothing: no mark, no record, the same draws
+            bool looped = a.add(object: s);
+            RenderInfo refused = this.renderOnly(scene: copy s);
+            this.found.add(name: "render: an add refused, the scene under one of its own meshes, marks nothing and draws the same",
+                           why: looped ? "add said true" : infoIs(got: refused, calls: 2, triangles: 24, objects: 2, matrices: 0));
             RenderInfo first = this.renderAndRead(scene: this.nearAndFar(nearFirst: true));
             this.next(to: 2);
         } else if (this.stage == 2) {
@@ -320,6 +326,7 @@ type resource BoxesRun {
             this.found.add(name: "render: a box moved after its first frame is drawn where it moved: the left box's edge 3 or more texels further left",
                            why: this.failed.isEmpty() && moved >= 0 && moved + 3 <= this.leftEdge ? ""
                                 : "its leftmost column was ${this.leftEdge}, and is ${moved}");
+            this.refusalCases();
             DeviceErrors errs = this.device.takeErrors();
             isize n = errs.reports().length();
             string firstError = n > 0 ? errs.reports()[0].message() : "";
@@ -336,6 +343,55 @@ type resource BoxesRun {
             this.stage = 999;
         }
         return this.stage == 999;
+    }
+
+    // A camera naming no target, rendered by a renderer with no window, draws nothing and is reported (kyoten's
+    // rendering.md § Decided, GFX-1's part 2, question 4): its error is the renderer's, read by `takeErrors()` and
+    // printed by default. tools/test.sh counts the printed lines from outside the program: the renderer that prints
+    // refuses one render here, and the one told not to print refuses 70.
+    unsafe fn void refusalCases() {
+        Shared<Scene> s = match (this.crossing) { case Some(value: x): copy x; case None: { panic(msg: "made at the first stage"); } };
+        Shared<PerspectiveCamera> aimless = new PerspectiveCamera.make(fovRad: 1.0, aspect: 1.0, near: 0.1, far: 10.0);
+        Renderer told = Renderer.withDevice(device: copy this.device, queue: copy this.queue);
+        bool printsByDefault = told.printErrors();
+        this.found.add(name: "Renderer: it prints the misuses it refuses by default, as @kama/gpu's device prints its errors",
+                       why: printsByDefault ? "" : "printErrors() is false");
+        told.render(scene: copy s, camera: copy aimless);
+        RenderInfo drew = told.info();
+        this.found.add(name: "render: a camera naming no target, on a renderer with no window, draws nothing",
+                       why: drew.calls == 0 && drew.triangles == 0 ? "" : "calls ${drew.calls}, triangles ${drew.triangles}");
+        RendererErrors taken = told.takeErrors();
+        isize kept = taken.reports().length();
+        string why = "";
+        if (kept != 1 || taken.dropped() != 0) {
+            int64 over = taken.dropped();
+            why = "takeErrors handed back ${kept} report(s), ${over} dropped";
+        } else {
+            bool noTarget = match (taken.reports()[0].kind()) { case NoTarget: true; case _: false; };
+            string words = taken.reports()[0].message();
+            if (!noTarget) { why = "its kind is not NoTarget"; }
+            else if (!words.contains(substring: "names no render target")) { why = "its words are: " + words; }
+        }
+        this.found.add(name: "render: a camera naming no target is reported once, as NoTarget, by takeErrors", why: give why);
+        RendererErrors again = told.takeErrors();
+        isize remaining = again.reports().length();
+        this.found.add(name: "Renderer: takeErrors drains: a second call hands back nothing",
+                       why: again.isEmpty() ? "" : "it handed back ${remaining} report(s)");
+        Renderer quiet = Renderer.withDevice(device: copy this.device, queue: copy this.queue);
+        quiet.printErrorsMut() = false;
+        bool silenced = !quiet.printErrors();
+        this.found.add(name: "Renderer: printErrors reads back false once a program turns it off",
+                       why: silenced ? "" : "printErrors() is still true");
+        for (int32 i = 0; i < 70; i = i + 1) { quiet.render(scene: copy s, camera: copy aimless); }
+        RendererErrors full = quiet.takeErrors();
+        isize held = full.reports().length();
+        int64 counted = full.dropped();
+        this.found.add(name: "Renderer: its record keeps the oldest 64 misuses and counts the rest, as @kama/gpu's channel does",
+                       why: held == 64 && counted == 6 ? "" : "it kept ${held} and counted ${counted} dropped");
+        RendererErrors after = quiet.takeErrors();
+        int64 stillCounted = after.dropped();
+        this.found.add(name: "Renderer: takeErrors drains the count too: after a full record, the next call hands back nothing",
+                       why: after.isEmpty() ? "" : "it still counts ${stillCounted} dropped");
     }
 
     // The leftmost column of `frame` holding anything but the backdrop, -1 when none does.

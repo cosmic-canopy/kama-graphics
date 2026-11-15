@@ -95,8 +95,8 @@ natively. The library's own `examples/cube` is the same scene without an engine.
   `docs/research/graphics.md` § 10): the library's shader functions are typed-node functions in kama, as TSL's BSDFs
   are, and the material compiler emits each one a material reaches once, callees first, with a `let` for a node used
   twice; a WGSL function as text with its includes (`wgslFn`) is the escape, a program's or the library's; no WESL linker
-  at run time, WESL staying a build-time format for a program's files. Part 3 needs kyoten's KY-59 fixed, or hands
-  operators a temporary inside the library until it is.
+  at run time, WESL staying a build-time format for a program's files. Part 3 needed kyoten's KY-59 fixed, and kama
+  fixed it the same day (0.9.960, kyoten's pin since 2026-11-15).
 - **Done:**
   - `examples/cube` draws from one source on both legs;
   - its golden passes on a software GPU on each leg CI has, and perceptually on the reference machines present;

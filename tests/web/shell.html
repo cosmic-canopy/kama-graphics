@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>@kama/graphics tests</title>
+<!--
+  The page the tests program runs in, in the browser legs: under `kama run --target WASM` and through tools/webtest.mjs.
+  Every frame the tests draw is offscreen, so the page's one canvas is emscripten's own, never drawn to. The goldens
+  are preloaded beside the page (graphicstests.data, from tests/kama.json's `assets`), so std::asset reads them without
+  waiting. The program's output goes to the console, which the driver reads, and so does its end: "webtest: exit
+  <status>" from emscripten's `onExit`, or "webtest: abort <what>" from `onAbort` (`kama run` reads the end itself). The
+  page's query is the program's arguments: `?arg=--golden&arg=swiftshader`.
+-->
+<style>
+  html, body { margin: 0; padding: 0; }
+  canvas { display: block; }
+</style>
+</head>
+<body>
+<canvas id="canvas"></canvas>
+<script>
+  var Module = {
+    arguments: new URLSearchParams(location.search).getAll('arg'),
+    print: function (text) { console.log(text); },
+    printErr: function (text) { console.error(text); },
+    onExit: function (status) { console.log('webtest: exit ' + status); },
+    onAbort: function (what) { console.log('webtest: abort ' + what); },
+  };
+</script>
+{{{ SCRIPT }}}
+</body>
+</html>

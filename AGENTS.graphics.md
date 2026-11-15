@@ -105,7 +105,9 @@ reversed depth, typed nodes with a public node contract, byte-for-byte software 
 machines. Its first part's three are decided too (the same day): a `Renderer` gets its GPU both ways, the goldens are
 PNGs through `@kama/image` (`../kama-image`, a package of its own, its design pass first), and each leg names its
 software GPU while only `tools/update-goldens.sh` writes a golden. `@kama/gpu`'s fallback adapter (GPU-15) is built.
-It is built depth-first, and every example is a test: a headless readback and a golden image, on
+**Part 1's gate and golden harness are built** (2026-11-14, § Build): the tests program, `tools/test.sh` on every leg,
+and the harness held to frames made in memory and to its own scene drawn on WARP and SwiftShader. Its `Renderer` comes
+next. It is built depth-first, and every example is a test: a headless readback and a golden image, on
 web and native. A feature a program does not use drops out at link time. [SPEC.md](SPEC.md) is empty until GFX-1
 lands, since a spec is what the library is, never what it will be.
 
@@ -140,9 +142,27 @@ lands, since a spec is what the library is, never what it will be.
 
 ## Build
 
-    kama check kama.json
+    tools/test.sh             # the gate, before every commit: every leg present, each frame held to its golden
+    tools/update-goldens.sh   # run on purpose: writes the goldens the legs print, for review in the diff
     tools/check-roadmap.sh    # ROADMAP.md stays the short ordered list, each row's reasoning where it links
     tools/check-features.sh   # FEATURES.md stays complete: statuses, examples, tests and budgets
 
-On Windows, drive kama from msys2 UCRT64 (kama's `docs/platforms/windows.md`). Where `kama` is not on the `PATH`, use
-`../kama/out/UCRT64-x86_64/kama.exe`.
+On Windows, drive kama from msys2 UCRT64 (kama's `docs/platforms/windows.md`), and run the gate from an interactive
+shell (`bash -lic`) so the web leg finds emcc and node. Where `kama` is not on the `PATH`, set `KAMA`. The native leg
+needs wgpu-native's SDK: `$KAMA_WGPU_DIR`, else `third_party/wgpu/<platform>`, else `@kama/gpu`'s beside this one.
+
+**The tests are one program, `tests/`, and every frame in them is held to a golden** (kyoten's rendering.md § Decided,
+GFX-1's part 1, question 3): a saved picture of what a test draws, rendered on a software GPU, which draws the same bytes
+on every run, and compared byte for byte.
+- **Each leg names its software GPU** (tools/legs.sh): `--golden warp` natively on Windows and in Firefox under
+  `kama run`, `--golden swiftshader` in Chrome for Testing through the driver. Chromium under `kama run` (kyoten's
+  KY-57), macOS natively and Linux natively until lavapipe is measured name none and compare no golden. The adapter is
+  held to what it can say: its kind is CPU, and SwiftShader's architecture names it.
+- **A golden is `tests/goldens/<test>/<gpu>.png`,** read through std::asset, preloaded beside the page on the web, and
+  left out of the published package.
+- **The tests never write a golden.** A frame that differs, or has none, fails and is printed as one line,
+  `golden-png <test> <gpu> <base64 PNG>`, at `@kama/image`'s `archival()`. `tools/update-goldens.sh` runs the legs that
+  name a GPU, writes those lines, and refuses when the legs of one GPU disagree (`tools/goldens-agree.sh`, held by the
+  gate on crafted records). Review the images in the diff, then run the gate.
+- **The gate holds every leg that names a GPU to comparing and matching every golden there is for it,** from the run's
+  last word, `goldens: <n> declared, <n> matched, on <gpu>`, so no leg passes by skipping one.

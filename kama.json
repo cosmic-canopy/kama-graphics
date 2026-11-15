@@ -6,13 +6,18 @@
   "repository": "https://github.com/cosmic-canopy/kama-graphics",
   "keywords": ["graphics", "scene", "webgpu", "rendering"],
   "kind": "library",
-  "kama": ">=0.9.831",
+  "kama": ">=0.9.949",
   "publish": {
     "exclude": [
-      ".claude/", "AGENTS.md", "AGENTS.package.md", "AGENTS.graphics.md", "CLAUDE.md", "KAMA_GAPS.md", "tools/"
+      ".claude/", "AGENTS.md", "AGENTS.package.md", "AGENTS.graphics.md", "CLAUDE.md", "KAMA_GAPS.md", "tools/",
+      "third_party/", "tests/goldens/"
     ]
   },
   "modules": {
     ".": { "visibility": "public" }
+  },
+  "dependencies": {
+    "@kama/gpu": { "path": "../kama-gpu" },
+    "@kama/window": { "path": "../kama-window" }
   }
 }

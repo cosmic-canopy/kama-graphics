@@ -1,0 +1,282 @@
+// The golden harness's own cases, on every leg and with no GPU: frames made in memory, held to goldens made in memory, so
+// what `compareGolden` says and prints is checked against frames whose every byte is known. A frame that is its golden's
+// bytes passes and prints nothing; one that differs anywhere, in any channel, alpha included, in any row, fails, saying
+// where, and prints a line that decodes back to that frame exactly; a golden that is missing, of another size, not a
+// PNG, unreadable or of another format fails, saying so.
+
+import {
+    std::collections::DynamicArray, std::collections::FixedArray,
+    std::encoding::base64::decode as base64Decode, std::encoding::base64::encode as base64Encode,
+    std::encoding::base64::DecodeError,
+    std::io::IoError, std::io::IoErrorKind,
+    image::Image, image::ImageError, image::PixelFormat, image::AlphaMode, image::ColorSpace, image::DecodeOptions,
+    image::png::decode as pngDecode, image::png::encode as pngEncode, image::png::EncodeOptions,
+    GoldenVerdict, compareGolden, framePng, isGoldenName, Verdicts,
+};
+export { harnessCases };
+
+comptime isize W = 5;
+comptime isize H = 3;
+
+// A frame `width` by `height`, each texel's four bytes its own, alpha included, so a row read upside down, a column off
+// or a channel dropped all show.
+fn DynamicArray<uint8> patterned(isize width, isize height) {
+    DynamicArray<uint8> f = DynamicArray.empty();
+    for (isize y = 0; y < height; y = y + 1) {
+        for (isize x = 0; x < width; x = x + 1) {
+            f.add(item: truncate<uint8>(x * 40 + y * 3 + 7));
+            f.add(item: truncate<uint8>(y * 70 + x + 11));
+            f.add(item: truncate<uint8>(x * y * 13 + 5));
+            f.add(item: truncate<uint8>(255 - x * 9 - y * 31));
+        }
+    }
+    return f;
+}
+
+// The same frame upside down.
+fn DynamicArray<uint8> flipped(const ref DynamicArray<uint8> frame, isize width, isize height) {
+    DynamicArray<uint8> f = DynamicArray.empty();
+    for (isize y = height - 1; y >= 0; y = y - 1) {
+        for (isize i = 0; i < width * 4; i = i + 1) { f.add(item: frame[y * width * 4 + i]); }
+    }
+    return f;
+}
+
+// A golden as std::asset would read it: the frame's PNG.
+fn Result<DynamicArray<uint8>, IoError> goldenOf(const ref DynamicArray<uint8> frame, isize width, isize height) {
+    Result<DynamicArray<uint8>, ImageError> png = framePng(width: width, height: height, frame: frame);
+    return match (give png) {
+        case Ok(value: b): Result::Ok(value: give b);
+        case Err(error: e): Result::Err(error: IoError.make(kind: IoErrorKind::InvalidData));
+    };
+}
+
+// A golden that is the bytes of `text`.
+fn Result<DynamicArray<uint8>, IoError> bytesOf(const ref string text) {
+    DynamicArray<uint8> b = DynamicArray.empty();
+    for (isize i = 0; i < text.length(); i = i + 1) { b.add(item: text[i]); }
+    return Result::Ok(value: give b);
+}
+
+fn Result<DynamicArray<uint8>, IoError> failedRead(IoErrorKind kind) { return Result::Err(error: IoError.make(kind: kind)); }
+
+// "" when `line` is `golden-png <test> <gpu> <base64>` and its base64 is a PNG of exactly the frame.
+fn string lineIsFrame(const ref string line, const ref string test, const ref string gpu, isize width, isize height,
+                      const ref DynamicArray<uint8> frame) {
+    string prefix = "golden-png " + test + " " + gpu + " ";
+    if (!line.startsWith(prefix: copy prefix)) {
+        string head = copy line;
+        return "the line does not start '" + prefix + "': '" + head.truncate(maxBytes: 60) + "'";
+    }
+    string text = line.substring(start: prefix.length(), end: line.length());
+    Result<DynamicArray<uint8>, DecodeError> decoded = base64Decode(text: text);
+    DynamicArray<uint8> file = match (give decoded) {
+        case Ok(value: b): give b;
+        case Err(error: e): { return "the line's base64 does not decode: " + e.message(); }
+    };
+    Result<Image, ImageError> read = pngDecode(bytes: file.view(), options: DecodeOptions.defaults());
+    Image img = match (give read) {
+        case Ok(value: i): give i;
+        case Err(error: e): { return "the line's PNG does not decode: " + e.message(); }
+    };
+    isize iw = img.width();
+    isize ih = img.height();
+    if (iw != width || ih != height) { return "the line's PNG is ${iw}x${ih}, the frame ${width}x${height}"; }
+    borrow img.samples8() as got {
+        if (got.length() != frame.length()) {
+            isize gl = got.length();
+            return "the line's PNG holds ${gl} bytes";
+        }
+        for (isize i = 0; i < got.length(); i = i + 1) {
+            if (got[i] != frame[i]) {
+                uint8 g = got[i];
+                uint8 f = frame[i];
+                return "the line's PNG differs from the frame at byte ${i}: ${g}, the frame ${f}";
+            }
+        }
+    }
+    return "";
+}
+
+// "" when the verdict failed with words holding each of `said`, and printed the frame as its line.
+fn string failedSaying(const ref GoldenVerdict v, const ref string test, const ref string gpu, isize width, isize height,
+                       const ref DynamicArray<uint8> frame, const ref string said) {
+    string why = v.why();
+    if (why.isEmpty()) { return "it passed"; }
+    if (!why.contains(substring: copy said)) { return "its words do not say '" + said + "': '" + why + "'"; }
+    string line = v.line();
+    if (line.isEmpty()) { return "it printed no line: '" + why + "'"; }
+    return lineIsFrame(line: line, test: test, gpu: gpu, width: width, height: height, frame: frame);
+}
+
+fn void harnessCases(ref Verdicts found) {
+    string test = "harness-case";
+    string gpu = "warp";
+    DynamicArray<uint8> frame = patterned(width: W, height: H);
+
+    {
+        Result<DynamicArray<uint8>, IoError> golden = goldenOf(frame: frame, width: W, height: H);
+        GoldenVerdict v = compareGolden(test: test, gpu: gpu, width: W, height: H, frame: frame, golden: golden);
+        string why = v.why();
+        string line = v.line();
+        isize printed = line.length();
+        found.add(name: "golden: a frame that is its golden's bytes passes, with nothing to print",
+                why: why.isEmpty() && line.isEmpty() ? "" : "it did not: '" + why + "', a line of ${printed} bytes");
+    }
+    {
+        // texel (3, 1)'s blue one step off
+        DynamicArray<uint8> off = patterned(width: W, height: H);
+        isize at = (1 * W + 3) * 4 + 2;
+        off[at] = off[at] ^ 1ui8;
+        Result<DynamicArray<uint8>, IoError> golden = goldenOf(frame: frame, width: W, height: H);
+        GoldenVerdict v = compareGolden(test: test, gpu: gpu, width: W, height: H, frame: off, golden: golden);
+        found.add(name: "golden: a frame one step off in one texel's blue fails, naming the texel, and prints itself as its line",
+                why: failedSaying(v: v, test: test, gpu: gpu, width: W, height: H, frame: off,
+                                  said: "1 of its texels differ from the golden's, the first at (3, 1)"));
+    }
+    {
+        // The line is the frame's PNG at archival(), sRGB with its alpha as it is, made here apart from the harness: the
+        // golden a test keeps is a file whose bytes no kama version moves.
+        DynamicArray<uint8> off = patterned(width: W, height: H);
+        off[0] = off[0] ^ 1ui8;
+        Result<DynamicArray<uint8>, IoError> golden = goldenOf(frame: frame, width: W, height: H);
+        GoldenVerdict v = compareGolden(test: test, gpu: gpu, width: W, height: H, frame: off, golden: golden);
+        FixedArray<uint8> samples = FixedArray.make(size: off.length());
+        for (isize i = 0; i < off.length(); i = i + 1) { samples[i] = off[i]; }
+        Result<Image, ImageError> made = Image.fromSamples8(width: W, height: H, format: PixelFormat::Rgba8Unorm,
+                                                            alpha: AlphaMode::Straight, colorSpace: ColorSpace.srgb(),
+                                                            samples: give samples);
+        string want = match (give made) {
+            case Ok(value: img): {
+                Result<DynamicArray<uint8>, ImageError> png = pngEncode(image: img, options: EncodeOptions.archival());
+                := match (give png) {
+                    case Ok(value: b): "golden-png " + test + " " + gpu + " " + base64Encode(bytes: b.view());
+                    case Err(error: e): "the frame not encoded: " + e.message();
+                };
+            }
+            case Err(error: e): "the frame not made: " + e.message();
+        };
+        string line = v.line();
+        isize got = line.length();
+        isize wanted = want.length();
+        found.add(name: "golden: the printed line is the frame's PNG at archival(), sRGB with its alpha as it is",
+                  why: line == want ? "" : "a line of ${got} bytes, where archival()'s is ${wanted}");
+    }
+    {
+        // texel (0, 2)'s alpha one step off
+        DynamicArray<uint8> off = patterned(width: W, height: H);
+        isize at = (2 * W + 0) * 4 + 3;
+        off[at] = off[at] ^ 1ui8;
+        Result<DynamicArray<uint8>, IoError> golden = goldenOf(frame: frame, width: W, height: H);
+        GoldenVerdict v = compareGolden(test: test, gpu: gpu, width: W, height: H, frame: off, golden: golden);
+        found.add(name: "golden: a frame off in one texel's alpha alone fails, and its line keeps that alpha",
+                why: failedSaying(v: v, test: test, gpu: gpu, width: W, height: H, frame: off,
+                                  said: "1 of its texels differ from the golden's, the first at (0, 2)"));
+    }
+    {
+        // the golden upside down: its first and last rows differ from the frame's, its middle row is the same
+        DynamicArray<uint8> upsideDown = flipped(frame: frame, width: W, height: H);
+        Result<DynamicArray<uint8>, IoError> golden = goldenOf(frame: upsideDown, width: W, height: H);
+        GoldenVerdict v = compareGolden(test: test, gpu: gpu, width: W, height: H, frame: frame, golden: golden);
+        found.add(name: "golden: a frame held to its golden upside down fails, its first and last rows differing",
+                why: failedSaying(v: v, test: test, gpu: gpu, width: W, height: H, frame: frame,
+                                  said: "10 of its texels differ from the golden's, the first at (0, 0)"));
+    }
+    {
+        Result<DynamicArray<uint8>, IoError> golden = failedRead(kind: IoErrorKind::NotFound);
+        GoldenVerdict v = compareGolden(test: test, gpu: gpu, width: W, height: H, frame: frame, golden: golden);
+        string why = v.why();
+        string said = failedSaying(v: v, test: test, gpu: gpu, width: W, height: H, frame: frame, said: "no golden yet");
+        if (said.isEmpty() && why != "no golden yet") { said = "its words say more than 'no golden yet': '" + why + "'"; }
+        found.add(name: "golden: a test with no golden yet fails, saying so, and prints its frame as its line", why: give said);
+    }
+    {
+        DynamicArray<uint8> narrower = patterned(width: W - 1, height: H);
+        Result<DynamicArray<uint8>, IoError> golden = goldenOf(frame: narrower, width: W - 1, height: H);
+        GoldenVerdict v = compareGolden(test: test, gpu: gpu, width: W, height: H, frame: frame, golden: golden);
+        found.add(name: "golden: a golden of another size fails, naming both sizes",
+                why: failedSaying(v: v, test: test, gpu: gpu, width: W, height: H, frame: frame,
+                                  said: "the golden is 4x3, the frame 5x3"));
+    }
+    {
+        Result<DynamicArray<uint8>, IoError> golden = bytesOf(text: "this is not a PNG file");
+        GoldenVerdict v = compareGolden(test: test, gpu: gpu, width: W, height: H, frame: frame, golden: golden);
+        found.add(name: "golden: a golden that is not a PNG fails, saying why",
+                why: failedSaying(v: v, test: test, gpu: gpu, width: W, height: H, frame: frame,
+                                  said: "the golden is not a PNG this harness reads: "));
+    }
+    {
+        Result<DynamicArray<uint8>, IoError> golden = failedRead(kind: IoErrorKind::PermissionDenied);
+        GoldenVerdict v = compareGolden(test: test, gpu: gpu, width: W, height: H, frame: frame, golden: golden);
+        found.add(name: "golden: a golden that cannot be read fails, naming the error, not as one missing",
+                why: failedSaying(v: v, test: test, gpu: gpu, width: W, height: H, frame: frame,
+                                  said: "the golden could not be read: "));
+    }
+    {
+        // a 16-bit golden, though the frame is 8-bit: refused, never converted
+        FixedArray<uint16> wide = FixedArray.make(size: W * H * 4);
+        for (isize i = 0; i < wide.length(); i = i + 1) { wide[i] = cast<uint16>(frame[i]) * 257ui16; }
+        Result<Image, ImageError> made = Image.fromSamples16(width: W, height: H, format: PixelFormat::Rgba16Unorm,
+                                                             alpha: AlphaMode::Straight, colorSpace: ColorSpace.srgb(),
+                                                             samples: give wide);
+        Result<DynamicArray<uint8>, IoError> golden = match (give made) {
+            case Ok(value: img): {
+                Result<DynamicArray<uint8>, ImageError> png = pngEncode(image: img, options: EncodeOptions.archival());
+                := match (give png) {
+                    case Ok(value: b): Result::Ok(value: give b);
+                    case Err(error: e): failedRead(kind: IoErrorKind::InvalidData);
+                };
+            }
+            case Err(error: e): failedRead(kind: IoErrorKind::InvalidData);
+        };
+        GoldenVerdict v = compareGolden(test: test, gpu: gpu, width: W, height: H, frame: frame, golden: golden);
+        found.add(name: "golden: a golden of 16 bits a channel fails, never converted to the frame's 8",
+                why: failedSaying(v: v, test: test, gpu: gpu, width: W, height: H, frame: frame,
+                                  said: "the golden decodes as Rgba16Unorm, not Rgba8Unorm"));
+    }
+    {
+        // an opaque frame, and its golden written as RGB with no alpha channel: the same picture, so it passes
+        DynamicArray<uint8> opaque = patterned(width: W, height: H);
+        for (isize i = 3; i < opaque.length(); i = i + 4) { opaque[i] = 255ui8; }
+        FixedArray<uint8> samples = FixedArray.make(size: opaque.length());
+        for (isize i = 0; i < opaque.length(); i = i + 1) { samples[i] = opaque[i]; }
+        Result<Image, ImageError> made = Image.fromSamples8(width: W, height: H, format: PixelFormat::Rgba8Unorm,
+                                                            alpha: AlphaMode::Opaque, colorSpace: ColorSpace.srgb(),
+                                                            samples: give samples);
+        Result<DynamicArray<uint8>, IoError> golden = match (give made) {
+            case Ok(value: img): {
+                Result<DynamicArray<uint8>, ImageError> png = pngEncode(image: img, options: EncodeOptions.archival());
+                := match (give png) {
+                    case Ok(value: b): Result::Ok(value: give b);
+                    case Err(error: e): failedRead(kind: IoErrorKind::InvalidData);
+                };
+            }
+            case Err(error: e): failedRead(kind: IoErrorKind::InvalidData);
+        };
+        GoldenVerdict v = compareGolden(test: test, gpu: gpu, width: W, height: H, frame: opaque, golden: golden);
+        string why = v.why();
+        found.add(name: "golden: an opaque frame is its golden's bytes when the golden was written as RGB, with no alpha channel",
+                why: give why);
+    }
+    {
+        DynamicArray<uint8> cut = patterned(width: W, height: H);
+        Optional<uint8> dropped = cut.pop();
+        Result<DynamicArray<uint8>, IoError> golden = goldenOf(frame: frame, width: W, height: H);
+        GoldenVerdict v = compareGolden(test: test, gpu: gpu, width: W, height: H, frame: cut, golden: golden);
+        string why = v.why();
+        string line = v.line();
+        isize printed = line.length();
+        found.add(name: "golden: a frame of the wrong length fails, naming it, and prints nothing it cannot encode",
+                why: why.contains(substring: "the frame holds 59 bytes, not 5x3 RGBA8") && line.isEmpty()
+                    ? "" : "it said '" + why + "', with a line of ${printed} bytes");
+    }
+    {
+        string bad = "";
+        InlineArray<string>#(4) good = ["harness", "readback", "swift-shader2", "a"];
+        for (isize i = 0; i < 4; i = i + 1) { if (!isGoldenName(name: good[i])) { bad = bad + " refused '" + good[i] + "';"; } }
+        InlineArray<string>#(8) refused = ["", "Warp", "../x", "a/b", "-a", "a-", "a b", "a\\b"];
+        for (isize i = 0; i < 8; i = i + 1) { if (isGoldenName(name: refused[i])) { bad = bad + " took '" + refused[i] + "';"; } }
+        found.add(name: "golden: a test's and a GPU's names are lowercase letters, digits and inner hyphens, so a line names no file outside tests/goldens/",
+                why: give bad);
+    }
+}

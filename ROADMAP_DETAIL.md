@@ -53,6 +53,9 @@ natively. The library's own `examples/cube` is the same scene without an engine.
   - each leg names its software GPU (`--golden warp`, `--golden swiftshader`), held to what the adapter can say; the
     tests never write a golden, but print a frame that differs as one base64 PNG line, and `tools/update-goldens.sh`,
     run on purpose, writes them into `tests/goldens/` for review; the tests read them through `std::asset`.
+- **Built, part 1's gate and golden harness** (2026-11-14, AGENTS.graphics.md § Build): the tests program,
+  `tools/test.sh` natively and in every headless browser present, and the harness held to frames made in memory and to
+  its own scene on WARP and SwiftShader. Part 1's `Renderer` that clears and reads back comes next.
 - **Done:**
   - `examples/cube` draws from one source on both legs;
   - its golden passes on a software GPU on each leg CI has, and perceptually on the reference machines present;

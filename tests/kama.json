@@ -1,0 +1,20 @@
+{
+  "name": "graphicstests",
+  "version": "0.1.0",
+  "kind": "executable",
+  "kama": ">=0.9.949",
+  "description": "@kama/graphics' tests, one program: the golden harness, and every frame held to its software GPU's golden",
+  "entry": "src/main.kama",
+  "webgpu": true,
+  "shellFile": "web/shell.html",
+  "assets": "goldens",
+  "modules": {
+    ".": { "visibility": "internal" }
+  },
+  "dependencies": {
+    "@kama/graphics": { "path": ".." },
+    "@kama/gpu": { "path": "../../kama-gpu" },
+    "@kama/window": { "path": "../../kama-window" },
+    "@kama/image": { "path": "../../kama-image" }
+  }
+}

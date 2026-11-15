@@ -3,3 +3,5 @@
 # rather than executed (golden images' digests, generated files), and a shell script with CRLF fails under a strict sh.
 # Binary files are left alone.
 * text=auto eol=lf
+# The goldens are images, compared byte for byte: never a text filter on them.
+*.png binary

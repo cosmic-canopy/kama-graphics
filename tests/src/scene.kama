@@ -1,0 +1,351 @@
+// The golden harness end to end, a step a tick on every leg: the harness's own scene, two triangles with their colours
+// interpolated at 4x MSAA and resolved, drawn through @kama/gpu into a target 37 by 23 texels (odd both ways, so a
+// copy's rows carry padding), copied out, mapped and read back, and held to its golden as every frame is. Its golden is
+// `tests/goldens/harness/<gpu>.png`, and the software GPUs draw it differently (WARP and SwiftShader cover the edges'
+// samples differently, kyoten's .scratch/gfx1-probe), which is why each has its own.
+//
+// On a leg that names a software GPU (`--golden warp`, `--golden swiftshader`) the adapter is asked for with WebGPU's
+// forceFallbackAdapter, and held to what it can say: its kind is CPU, and SwiftShader names itself in its architecture
+// where WARP names nothing. A leg that names none draws on its own GPU, holds the frame to what any GPU draws, and
+// compares no golden; tools/test.sh holds every leg that names one to comparing each golden there is for it.
+
+import {
+    core::println,
+    std::collections::DynamicArray,
+    gpu::Instance, gpu::Adapter, gpu::AdapterOptions, gpu::AdapterRequest, gpu::AdapterStatus, gpu::AdapterInfo,
+    gpu::AdapterKind, gpu::PowerPreference, gpu::DeviceOptions,
+    gpu::Device, gpu::Queue, gpu::DeviceRequest, gpu::DeviceStatus, gpu::GpuError, gpu::DeviceErrors,
+    gpu::CommandEncoder, gpu::CommandBuffer, gpu::RenderPass, gpu::Color,
+    gpu::RenderPassDescriptor, gpu::ColorAttachment, gpu::LoadOp, gpu::StoreOp,
+    gpu::Buffer, gpu::BufferDescriptor, gpu::BufferUsage, gpu::BufferRead, gpu::ReadStatus,
+    gpu::Texture, gpu::TextureDescriptor, gpu::TextureViewDescriptor, gpu::TextureView, gpu::TextureFormat,
+    gpu::TextureUsage, gpu::ShaderModuleDescriptor, gpu::ShaderModule,
+    gpu::ColorTargetState, gpu::VertexState, gpu::FragmentState, gpu::Layout,
+    gpu::RenderPipelineDescriptor, gpu::RenderPipeline,
+    Verdicts, checkGolden,
+};
+export { GoldenRun };
+
+comptime int32 SETTLE = 120;   // the most ticks a request or a map waits
+comptime uint32 WIDE = 37;     // the target's texels across: 148 bytes a row, padded to 256 in the copy
+comptime uint32 HIGH = 23;
+comptime uint32 ROW = 256;     // a copied row's bytes, WebGPU's alignment
+
+// Two triangles, the second drawn over the first, each with a colour at every corner.
+fn string sceneWgsl() {
+    return "struct VOut { @builtin(position) pos: vec4f, @location(0) color: vec3f };\n"
+        + "@vertex fn vs(@builtin(vertex_index) i: u32) -> VOut {\n"
+        + "  var p = array<vec2f, 6>(vec2f(-0.9, -0.8), vec2f(0.8, -0.6), vec2f(-0.2, 0.9),\n"
+        + "                          vec2f(-0.5, 0.7), vec2f(-0.6, -0.4), vec2f(0.9, 0.3));\n"
+        + "  var c = array<vec3f, 6>(vec3f(1.0, 0.0, 0.0), vec3f(0.0, 1.0, 0.0), vec3f(0.0, 0.0, 1.0),\n"
+        + "                          vec3f(1.0, 1.0, 0.0), vec3f(0.0, 1.0, 1.0), vec3f(1.0, 0.0, 1.0));\n"
+        + "  var o: VOut; o.pos = vec4f(p[i], 0.5, 1.0); o.color = c[i]; return o; }\n"
+        + "@fragment fn fs(v: VOut) -> @location(0) vec4f { return vec4f(v.color, 1.0); }\n";
+}
+
+fn string kindName(AdapterKind k) {
+    return match (k) {
+        case DiscreteGPU: "DiscreteGPU";
+        case IntegratedGPU: "IntegratedGPU";
+        case CPU: "CPU";
+        case Unknown: "Unknown";
+    };
+}
+
+fn bool isCpu(AdapterKind k) { return match (k) { case CPU: true; case _: false; }; }
+
+type resource GoldenRun {
+    int32 stage = 0;
+    int32 waited = 0;
+    string gpu;                // the software GPU this leg names, "" for none
+    bool software = false;     // the adapter is one: its frame is held to the golden
+    int32 declaredCount = 0;   // the golden cases this run has, on a leg that names a GPU
+    int32 matchedCount = 0;    // those whose frame was its golden's bytes
+    Verdicts found;
+    Optional<Instance> instance = Optional::None;
+    Optional<AdapterRequest> adapterRequest = Optional::None;
+    Optional<DeviceRequest> deviceRequest = Optional::None;
+    Optional<Device> device = Optional::None;
+    Optional<Queue> queue = Optional::None;
+    Optional<RenderPipeline> pipeline = Optional::None;
+    Optional<Buffer> readback = Optional::None;
+    Optional<BufferRead> reading = Optional::None;
+
+    public ctor make(string gpu) {
+        this.gpu = give gpu;
+        this.found = Verdicts.make();
+    }
+
+    public fn ref Verdicts verdicts() { return this.found; }
+    public const fn int32 declared() { return this.declaredCount; }
+    public const fn int32 matched() { return this.matchedCount; }
+
+    // One tick's step: true once every case has run.
+    public unsafe fn bool step() {
+        this.waited = this.waited + 1;
+        if (this.stage == 0) { this.open(); }
+        else if (this.stage == 1) { this.awaitAdapter(); }
+        else if (this.stage == 2) { this.awaitDevice(); }
+        else if (this.stage == 3) { this.draw(); }
+        else if (this.stage == 4) { this.awaitRead(); }
+        if (this.stage == 999) {
+            this.reading = Optional::None;
+            this.readback = Optional::None;
+            this.pipeline = Optional::None;
+            this.queue = Optional::None;
+            this.device = Optional::None;
+            this.deviceRequest = Optional::None;
+            this.adapterRequest = Optional::None;
+            this.instance = Optional::None;
+            return true;
+        }
+        return false;
+    }
+
+    unsafe fn void next(int32 to) { this.stage = to; this.waited = 0; }
+
+    // A golden case that cannot compare, counted as declared and failed, so a leg never passes by skipping it.
+    fn void unmatched(const ref string why) {
+        if (this.gpu.isEmpty()) { return; }
+        this.declaredCount = this.declaredCount + 1;
+        this.found.add(name: "golden harness on " + this.gpu, why: copy why);
+    }
+
+    unsafe fn void open() {
+        Result<Instance, GpuError> made = Instance.make();
+        match (give made) {
+            case Ok(value: inst): {
+                AdapterOptions options = AdapterOptions.make(power: PowerPreference::Default);
+                if (!this.gpu.isEmpty()) { options.forceFallbackAdapter(on: true); }
+                this.adapterRequest = Optional::Some(value: inst.requestAdapter(options: options));
+                this.instance = Optional::Some(value: give inst);
+                this.next(to: 1);
+            }
+            case Err(error: e): {
+                string why = e.message();
+                this.found.add(name: "an instance for the harness's scene", why: copy why);
+                this.unmatched(why: "no instance: " + why);
+                this.next(to: 999);
+            }
+        };
+    }
+
+    // The adapter: on a leg that names a software GPU, the fallback one, held to what it can say of itself.
+    unsafe fn void awaitAdapter() {
+        AdapterStatus s = match (this.adapterRequest) { case Some(value: r): r.poll(); case None: AdapterStatus::Failed(error: GpuError::Taken); };
+        bool pending = match (s) { case Pending: true; case _: false; };
+        if (pending) {
+            if (this.waited < SETTLE) { return; }
+            this.found.add(name: "an adapter for the harness's scene", why: "still pending after ${SETTLE} ticks");
+            this.unmatched(why: "no adapter");
+            this.next(to: 999);
+            return;
+        }
+        this.adapterRequest = Optional::None;
+        match (give s) {
+            case Ready(adapter: a): {
+                AdapterInfo info = a.info();
+                string kind = kindName(k: info.kind());
+                string vendor = info.vendor();
+                string architecture = info.architecture();
+                string said = "kind " + kind + ", vendor '" + vendor + "', architecture '" + architecture + "'";
+                println(s: "info the harness's adapter: " + said);
+                if (!this.gpu.isEmpty()) {
+                    this.software = isCpu(k: info.kind());
+                    this.found.add(name: "--golden " + this.gpu + ": the adapter is the fallback one, a software GPU (its kind is CPU)",
+                                   why: this.software ? "" : "it is not: " + said);
+                    bool namesSwiftShader = architecture.equalsIgnoringAsciiCase(other: "swiftshader");
+                    bool wantsSwiftShader = this.gpu == "swiftshader";
+                    this.found.add(name: "--golden " + this.gpu + ": the adapter says SwiftShader exactly where the leg names it",
+                                   why: namesSwiftShader == wantsSwiftShader ? "" : "the leg names " + this.gpu + ", the adapter says " + said);
+                    if (namesSwiftShader != wantsSwiftShader) { this.software = false; }
+                }
+                DeviceOptions options = DeviceOptions.defaults();
+                options.printErrors = false;
+                this.deviceRequest = Optional::Some(value: a.requestDevice(options: options));
+                this.next(to: 2);
+            }
+            case Failed(error: e): {
+                string why = e.message();
+                this.found.add(name: "an adapter for the harness's scene", why: "refused: " + why);
+                this.unmatched(why: "no adapter: " + why);
+                this.next(to: 999);
+            }
+            case Pending: { }
+        };
+    }
+
+    unsafe fn void awaitDevice() {
+        DeviceStatus s = match (this.deviceRequest) { case Some(value: r): r.poll(); case None: DeviceStatus::Failed(error: GpuError::Taken); };
+        bool pending = match (s) { case Pending: true; case _: false; };
+        if (pending) {
+            if (this.waited < SETTLE) { return; }
+            this.found.add(name: "a device for the harness's scene", why: "still pending after ${SETTLE} ticks");
+            this.unmatched(why: "no device");
+            this.next(to: 999);
+            return;
+        }
+        this.deviceRequest = Optional::None;
+        match (give s) {
+            case Ready(device: d, queue: q): {
+                ShaderModuleDescriptor m = ShaderModuleDescriptor.make(wgsl: sceneWgsl());
+                m.label(text: "the harness's scene");
+                ShaderModule stages = d.createShaderModule(descriptor: give m);
+                this.pipeline = Optional::Some(value: d.createRenderPipeline(descriptor: scenePipeline(m: stages)));
+                this.device = Optional::Some(value: give d);
+                this.queue = Optional::Some(value: give q);
+                this.next(to: 3);
+            }
+            case Failed(error: e): {
+                string why = e.message();
+                this.found.add(name: "a device for the harness's scene", why: "refused: " + why);
+                this.unmatched(why: "no device: " + why);
+                this.next(to: 999);
+            }
+            case Pending: { }
+        };
+    }
+
+    // The scene drawn at 4x MSAA, resolved into a target with CopySrc, copied into a buffer whose map is started.
+    unsafe fn void draw() {
+        Optional<Buffer> copied = Optional::None;
+        Optional<BufferRead> started = Optional::None;
+        match (this.device) {
+            case Some(value: d): {
+                match (this.pipeline) {
+                    case Some(value: p): {
+                        uint64 bytes = cast<uint64>(ROW) * cast<uint64>(HIGH);
+                        Buffer b = d.createBuffer(descriptor: BufferDescriptor.make(size: bytes, usage: BufferUsage::MapRead | BufferUsage::CopyDst));
+                        CommandEncoder encoder = d.createCommandEncoder();
+                        Texture resolved = sceneTexture(d: d, usage: TextureUsage::RenderAttachment | TextureUsage::CopySrc, samples: 1);
+                        Texture four = sceneTexture(d: d, usage: TextureUsage::RenderAttachment, samples: 4);
+                        ColorAttachment a = ColorAttachment.make(view: whole(t: four), load: LoadOp::Clear(color: Color.of(r: 0.0, g: 0.0, b: 0.0, a: 1.0)),
+                                                                 store: StoreOp::Discard);
+                        a.resolveTarget(view: whole(t: resolved));
+                        RenderPassDescriptor pass = RenderPassDescriptor.make();
+                        pass.color(attachment: give a);
+                        RenderPass rp = encoder.beginRenderPass(descriptor: give pass);
+                        rp.setPipeline(pipeline: p);
+                        rp.draw(vertexCount: 6, instanceCount: 1, firstVertex: 0, firstInstance: 0);
+                        give rp.end();
+                        encoder.copyTextureToBuffer(texture: resolved, buffer: b, width: WIDE, height: HIGH, bytesPerRow: ROW);
+                        CommandBuffer commands = give encoder.finish();
+                        match (this.queue) {
+                            case Some(value: q): { q.submit(commands: give commands); }
+                            case None: { CommandBuffer unsent = give commands; }
+                        };
+                        started = Optional::Some(value: b.mapRead(offset: 0, size: bytes));
+                        copied = Optional::Some(value: give b);
+                    }
+                    case None: { }
+                };
+            }
+            case None: { }
+        };
+        if (copied.isNone()) {
+            this.found.add(name: "the harness's scene is drawn", why: "no device or pipeline");
+            this.unmatched(why: "nothing drawn");
+            this.next(to: 999);
+            return;
+        }
+        this.readback = give copied;
+        this.reading = give started;
+        this.next(to: 4);
+    }
+
+    // The frame read back, held to what any GPU draws of it, then, on a software GPU, to its golden.
+    unsafe fn void awaitRead() {
+        match (this.device) { case Some(value: d): { d.poll(wait: true); } case None: { } };
+        ReadStatus s = match (this.reading) { case Some(value: r): r.poll(); case None: ReadStatus::Failed(error: GpuError::Taken); };
+        bool pending = match (s) { case Pending: true; case _: false; };
+        if (pending && this.waited < SETTLE) { return; }
+        string why = match (s) {
+            case Pending: "the map did not finish";
+            case Failed(error: e): e.message();
+            case Ready: "";
+        };
+        DynamicArray<uint8> got = DynamicArray.empty();
+        if (why.isEmpty()) { got = match (this.reading) { case Some(value: r): texels(r: r); case None: DynamicArray.empty(); }; }
+        this.reading = Optional::None;
+        this.readback = Optional::None;
+        if (why.isEmpty()) { why = drawnSomething(got: got); }
+        string errs = this.channel();
+        if (why.isEmpty()) { why = copy errs; }
+        this.found.add(name: "the harness's scene reads back 37x23 texels, the clear colour and the triangles both, with no WebGPU error",
+                       why: copy why);
+        if (!this.gpu.isEmpty()) {
+            if (!why.isEmpty()) { this.unmatched(why: "the frame was not read: " + why); }
+            else if (!this.software) { this.unmatched(why: "the adapter is not the software GPU the leg names, so its frame is not compared"); }
+            else {
+                this.declaredCount = this.declaredCount + 1;
+                string said = checkGolden(test: "harness", gpu: this.gpu, width: cast<isize>(WIDE), height: cast<isize>(HIGH), frame: got);
+                if (said.isEmpty()) { this.matchedCount = this.matchedCount + 1; }
+                this.found.add(name: "golden harness on " + this.gpu, why: give said);
+            }
+        }
+        this.next(to: 999);
+    }
+
+    // The device's channel, as a failure's words: "" when it holds nothing.
+    unsafe fn string channel() {
+        match (this.device) {
+            case Some(value: d): {
+                DeviceErrors errs = d.takeErrors();
+                if (errs.isEmpty()) { return ""; }
+                isize n = errs.reports().length();
+                return "the channel holds ${n} error(s), the first: " + errs.reports()[0].message();
+            }
+            case None: { return "the device is gone"; }
+        };
+    }
+}
+
+unsafe fn Texture sceneTexture(ref Device d, TextureUsage usage, uint32 samples) {
+    TextureDescriptor t = TextureDescriptor.make(width: WIDE, height: HIGH, format: TextureFormat::RGBA8Unorm, usage: usage);
+    t.sampleCount(count: samples);
+    return d.createTexture(descriptor: give t);
+}
+
+unsafe fn TextureView whole(ref Texture t) { return t.createView(descriptor: TextureViewDescriptor.make()); }
+
+unsafe fn RenderPipelineDescriptor scenePipeline(ShaderModule m) {
+    RenderPipelineDescriptor p = RenderPipelineDescriptor.make(layout: Layout::Auto, vertex: VertexState.make(module: copy m, entryPoint: "vs"));
+    FragmentState f = FragmentState.make(module: copy m, entryPoint: "fs");
+    f.target(state: ColorTargetState.make(format: TextureFormat::RGBA8Unorm));
+    p.fragment(state: give f);
+    p.multisampleMut().count = 4;
+    p.label(text: "the harness's scene");
+    return p;
+}
+
+// A mapped copy's texels, row by row from the top, without the rows' padding.
+unsafe fn DynamicArray<uint8> texels(const ref BufferRead r) {
+    DynamicArray<uint8> all = r.bytes();
+    DynamicArray<uint8> kept = DynamicArray.empty();
+    for (isize y = 0; y < cast<isize>(HIGH); y = y + 1) {
+        for (isize x = 0; x < cast<isize>(WIDE) * 4; x = x + 1) {
+            isize at = y * cast<isize>(ROW) + x;
+            if (at < all.length()) { kept.add(item: all[at]); }
+        }
+    }
+    return kept;
+}
+
+// "" when the texels are the target's count, and hold the clear colour somewhere and the triangles somewhere.
+fn string drawnSomething(const ref DynamicArray<uint8> got) {
+    isize want = cast<isize>(WIDE) * cast<isize>(HIGH) * 4;
+    if (got.length() != want) {
+        isize n = got.length();
+        return "${n} bytes read, not ${want}";
+    }
+    isize clear = 0;
+    isize drawn = 0;
+    for (isize i = 0; i < got.length(); i = i + 4) {
+        bool isClear = got[i] == 0 && got[i + 1] == 0 && got[i + 2] == 0 && got[i + 3] == 255;
+        if (isClear) { clear = clear + 1; } else { drawn = drawn + 1; }
+    }
+    if (drawn == 0) { return "every texel is the clear colour: nothing was drawn"; }
+    if (clear == 0) { return "no texel is the clear colour: the scene covers the whole target"; }
+    println(s: "info the harness's scene: ${drawn} texels drawn, ${clear} the clear colour");
+    return "";
+}

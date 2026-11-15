@@ -1,0 +1,27 @@
+// What a run of cases found, for the check to report: each a name and why it failed ("" when it passed). A run that is
+// stepped a tick at a time (the GPU's, which waits on the browser between ticks) cannot reach the check itself, so it
+// reports here and the check reads it each tick, as @kama/gpu's tests do.
+
+import { std::collections::DynamicArray };
+export { Verdicts };
+
+type resource Verdicts {
+    DynamicArray<string> names;
+    DynamicArray<string> whys;
+
+    public ctor make() {
+        this.names = DynamicArray.empty();
+        this.whys = DynamicArray.empty();
+    }
+    public fn void add(string name, string why) {
+        this.names.add(item: give name);
+        this.whys.add(item: give why);
+    }
+    public const fn isize count() { return this.names.length(); }
+    public const fn string nameAt(isize at) { return copy this.names[at]; }
+    public const fn string whyAt(isize at) { return copy this.whys[at]; }
+    public fn void clear() {
+        this.names = DynamicArray.empty();
+        this.whys = DynamicArray.empty();
+    }
+}

@@ -1,0 +1,116 @@
+// What a mesh is drawn with. Three.js's mesh materials are typed presets over one node-material system (kyoten's
+// rendering.md § Decided, area 3, item 2); `MeshBasicMaterial`, unlit, is the first (GFX-1's part 2, question 2). A
+// material is an asset, shared: a program makes it with `new`, every mesh holding its `Shared` draws with it, and changing
+// a setting changes them all, as in three.js. A setting is a value, so changing one never compiles a shader.
+//
+// **Stopgap until part 3:** `MeshBasicMaterial`'s WGSL is written by hand here. Part 3 builds it from typed nodes behind
+// the same API, and part 2's golden holds that to the same bytes.
+
+import {
+    std::collections::DynamicArray,
+    gpu::Device, gpu::Queue, gpu::Buffer, gpu::BufferDescriptor, gpu::BufferUsage, gpu::BufferBinding,
+    gpu::BindGroup, gpu::BindGroupDescriptor, gpu::BindGroupLayout, gpu::BindingResource,
+    Color, Renderer,
+};
+export { Material, MaterialGpu, MeshBasicMaterial };
+
+// What every material is to the renderer: the WGSL its draws run, its settings as the shader reads them, and a number
+// that moves whenever a setting changes, so the renderer writes them again only then. The WGSL takes the renderer's
+// frame and object records in group 0 (`frame.viewProjection`, `objects[instance]`) and the material's settings in
+// group 1, binding 0.
+type contract Material for resource {
+    const fn string shaderSource();
+    const fn DynamicArray<uint8> settingBytes();
+    const fn uint32 version();
+    fn ref MaterialGpu gpuMut();
+}
+
+// A material's settings on each device that drew it: a uniform buffer and its bind group, written again when the
+// material's version moved. Only a renderer reaches it.
+type resource MaterialGpu {
+    DynamicArray<UnsafePtr> devices;
+    DynamicArray<Buffer> uniforms;
+    DynamicArray<BindGroup> groups;
+    DynamicArray<uint32> versions;
+
+    friend Renderer::render[groupOn];
+
+    public unsafe ctor make() {
+        this.devices = DynamicArray.empty();
+        this.uniforms = DynamicArray.empty();
+        this.groups = DynamicArray.empty();
+        this.versions = DynamicArray.empty();
+    }
+
+    // The bind group of `settings` on `device`, made with `layout` the first time, and its buffer written whenever
+    // `version` is not the one last written.
+    unsafe fn BindGroup groupOn(ref Device device, ref Queue queue, const ref BindGroupLayout layout,
+                                const ref DynamicArray<uint8> settings, uint32 version) {
+        UnsafePtr at = device.raw();
+        for (isize i = 0; i < this.devices.length(); i = i + 1) {
+            if (this.devices[i] == at) {
+                if (this.versions[i] != version) {
+                    queue.writeBuffer(buffer: this.uniforms[i], offset: 0, data: settings.view());
+                    this.versions[i] = version;
+                }
+                return copy this.groups[i];
+            }
+        }
+        BufferDescriptor described = BufferDescriptor.make(size: cast<uint64>(settings.length()),
+                                                           usage: BufferUsage::Uniform | BufferUsage::CopyDst);
+        described.label(text: "a material's settings");
+        Buffer uniform = device.createBuffer(descriptor: give described);
+        queue.writeBuffer(buffer: uniform, offset: 0, data: settings.view());
+        BindGroupDescriptor bound = BindGroupDescriptor.make(layout: copy layout);
+        bound.entry(binding: 0, resource: BindingResource::Buffer(binding: BufferBinding.whole(buffer: copy uniform)));
+        bound.label(text: "a material's group");
+        BindGroup group = device.createBindGroup(descriptor: give bound);
+        this.devices.add(item: at);
+        this.uniforms.add(item: give uniform);
+        this.groups.add(item: copy group);
+        this.versions.add(item: version);
+        return group;
+    }
+}
+
+// A float's four bytes, little-endian, as WGSL reads them on every leg.
+fn void putFloat(ref DynamicArray<uint8> into, float32 value) {
+    uint32 bits = bitcast<uint32>(value);
+    into.add(item: truncate<uint8>(bits));
+    into.add(item: truncate<uint8>(bits >> 8));
+    into.add(item: truncate<uint8>(bits >> 16));
+    into.add(item: truncate<uint8>(bits >> 24));
+}
+
+// Unlit: every fragment its colour, as three.js's `MeshBasicMaterial`, white by default.
+type resource MeshBasicMaterial implements Material {
+    Color tint = Color.fromHex(hex: 0xffffff);
+    uint32 changes = 0;
+    MaterialGpu cache;
+
+    public ctor make() { this.cache = MaterialGpu.make(); }
+
+    public fn ref MaterialGpu gpuMut() { return this.cache; }
+
+    // Its colour, written in sRGB and held linear, as every colour is.
+    public const fn Color color() { return this.tint; }
+    public fn ref Color colorMut() { this.changes = this.changes + 1; return this.tint; }
+
+    public const fn uint32 version() { return this.changes; }
+    public const fn DynamicArray<uint8> settingBytes() {
+        DynamicArray<uint8> bytes = DynamicArray.empty();
+        putFloat(into: ref bytes, value: this.tint.linearR());
+        putFloat(into: ref bytes, value: this.tint.linearG());
+        putFloat(into: ref bytes, value: this.tint.linearB());
+        putFloat(into: ref bytes, value: 1.0);
+        return bytes;
+    }
+    public const fn string shaderSource() {
+        return "struct Basic { color: vec4f };\n"
+            + "@group(1) @binding(0) var<uniform> basic: Basic;\n"
+            + "@vertex fn vs(@builtin(instance_index) object: u32, @location(0) position: vec3f) -> @builtin(position) vec4f {\n"
+            + "  return frame.viewProjection * objects[object] * vec4f(position, 1.0);\n"
+            + "}\n"
+            + "@fragment fn fs() -> @location(0) vec4f { return basic.color; }\n";
+    }
+}

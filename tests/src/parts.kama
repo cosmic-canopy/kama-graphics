@@ -1,0 +1,347 @@
+// GFX-1's part 2, with no GPU: `Euler` and its safeguards, `BoxGeometry` as three.js's, the camera's reversed depth,
+// `MeshBasicMaterial`, and the tree's add and remove (kyoten's rendering.md § Decided, GFX-1's part 2). Each want is
+// three.js's own number or one reached another way: a rotation's quaternion against the product of its axes' matrices,
+// a box's first vertices against three.js's `buildPlane` worked by hand, its winding against its normals.
+
+import {
+    std::collections::DynamicArray,
+    std::math::Vec2, std::math::Vec3, std::math::Vec4, std::math::Quat, std::math::Mat4, std::math::abs,
+    std::math::sin, std::math::cos, std::math::radians,
+    graphics::Euler, graphics::EulerOrder, graphics::BoxGeometry, graphics::BufferGeometry, graphics::Geometry,
+    graphics::GeometryGroup, graphics::MeshBasicMaterial, graphics::Material, graphics::PerspectiveCamera,
+    graphics::Scene, graphics::Group, graphics::Mesh, graphics::Object3D, graphics::Color,
+    Verdicts,
+};
+export { partCases };
+
+comptime float32 EPS = 0.00001;
+
+fn bool close(float32 a, float32 b) { return abs(x: a - b) < EPS; }
+fn bool closeVec(Vec3 a, Vec3 b) { return close(a: a.x, b: b.x) && close(a: a.y, b: b.y) && close(a: a.z, b: b.z); }
+fn bool closeMat(const ref Mat4 a, const ref Mat4 b) {
+    for (int32 c = 0; c < 4; c = c + 1) {
+        for (int32 r = 0; r < 4; r = r + 1) { if (!close(a: a.get(c: c, r: r), b: b.get(c: c, r: r))) { return false; } }
+    }
+    return true;
+}
+// The same turn: q or -q.
+fn bool sameTurn(Quat a, Quat b) {
+    bool plus = close(a: a.x, b: b.x) && close(a: a.y, b: b.y) && close(a: a.z, b: b.z) && close(a: a.w, b: b.w);
+    bool minus = close(a: a.x, b: 0.0 - b.x) && close(a: a.y, b: 0.0 - b.y) && close(a: a.z, b: 0.0 - b.z) && close(a: a.w, b: 0.0 - b.w);
+    return plus || minus;
+}
+
+fn string orderName(EulerOrder o) {
+    return match (o) {
+        case XYZ: "XYZ"; case YXZ: "YXZ"; case ZXY: "ZXY"; case ZYX: "ZYX"; case YZX: "YZX"; case XZY: "XZY";
+    };
+}
+
+// The rotation matrix of three angles in an order, made from the axes' matrices alone.
+fn Mat4 byMatrices(float32 x, float32 y, float32 z, EulerOrder o) {
+    Mat4 rx = Mat4.rotationX(rad: x);
+    Mat4 ry = Mat4.rotationY(rad: y);
+    Mat4 rz = Mat4.rotationZ(rad: z);
+    return match (o) {
+        case XYZ: rx * ry * rz; case YXZ: ry * rx * rz; case ZXY: rz * rx * ry;
+        case ZYX: rz * ry * rx; case YZX: ry * rz * rx; case XZY: rx * rz * ry;
+    };
+}
+
+// An Euler in `o` whose first, middle and last angles (by the order's letters) are the ones given.
+fn Euler byRole(float32 first, float32 middle, float32 last, EulerOrder o) {
+    return match (o) {
+        case XYZ: Euler.make(xRad: first, yRad: middle, zRad: last, order: o);
+        case YXZ: Euler.make(xRad: middle, yRad: first, zRad: last, order: o);
+        case ZXY: Euler.make(xRad: middle, yRad: last, zRad: first, order: o);
+        case ZYX: Euler.make(xRad: last, yRad: middle, zRad: first, order: o);
+        case YZX: Euler.make(xRad: last, yRad: first, zRad: middle, order: o);
+        case XZY: Euler.make(xRad: first, yRad: last, zRad: middle, order: o);
+    };
+}
+
+unsafe fn void eulerCases(ref Verdicts found) {
+    DynamicArray<EulerOrder> orders = DynamicArray.empty();
+    orders.add(item: EulerOrder::XYZ); orders.add(item: EulerOrder::YXZ); orders.add(item: EulerOrder::ZXY);
+    orders.add(item: EulerOrder::ZYX); orders.add(item: EulerOrder::YZX); orders.add(item: EulerOrder::XZY);
+    {
+        string bad = "";
+        for (isize i = 0; i < orders.length(); i = i + 1) {
+            EulerOrder o = orders[i];
+            Euler e = Euler.make(xRad: 0.3, yRad: -0.7, zRad: 1.1, order: o);
+            Mat4 got = e.quaternion().toMat4();
+            Mat4 want = byMatrices(x: 0.3, y: -0.7, z: 1.1, o: o);
+            if (!closeMat(a: got, b: want)) { bad = bad + " " + orderName(o: o); }
+        }
+        found.add(name: "Euler: in every order its quaternion is the product of its axes' rotations in that order (XYZ is Rx Ry Rz)",
+                  why: bad.isEmpty() ? "" : "differs in" + bad);
+    }
+    {
+        string bad = "";
+        for (isize i = 0; i < orders.length(); i = i + 1) {
+            EulerOrder o = orders[i];
+            Euler e = byRole(first: 2.5, middle: -0.9, last: -2.0, o: o);
+            Euler back = Euler.fromQuaternion(q: e.quaternion(), order: o);
+            bool same = close(a: back.x, b: e.x) && close(a: back.y, b: e.y) && close(a: back.z, b: e.z);
+            if (!same || orderName(o: back.order()) != orderName(o: o)) { bad = bad + " " + orderName(o: o); }
+        }
+        found.add(name: "Euler: fromQuaternion gives back the angles that made it, in every order, the middle within a quarter turn and the others past it",
+                  why: bad.isEmpty() ? "" : "differs in" + bad);
+    }
+    {
+        Euler e = Euler.make(xRad: 0.5, yRad: 0.2, zRad: -0.8, order: EulerOrder::XYZ);
+        Euler r = e.reordered(order: EulerOrder::ZYX);
+        bool turn = sameTurn(a: r.quaternion(), b: e.quaternion());
+        bool numbers = !close(a: r.x, b: e.x) || !close(a: r.z, b: e.z);
+        string why = "";
+        if (orderName(o: r.order()) != "ZYX") { why = "its order is " + orderName(o: r.order()); }
+        else if (!turn) { why = "the turn changed"; }
+        else if (!numbers) { why = "the numbers are the same, so nothing was reordered"; }
+        found.add(name: "Euler: reordered keeps the turn, in new numbers under the new order", why: give why);
+    }
+    {
+        Euler d = Euler.fromDegrees(x: 90.0, y: 45.0, z: -30.0, order: EulerOrder::YXZ);
+        bool ok = close(a: d.x, b: radians(deg: 90.0)) && close(a: d.y, b: radians(deg: 45.0)) && close(a: d.z, b: radians(deg: -30.0))
+            && orderName(o: d.order()) == "YXZ";
+        found.add(name: "Euler: fromDegrees is the one way degrees come in, each angle turned to radians",
+                  why: ok ? "" : "it made ${d.x} ${d.y} ${d.z}");
+    }
+    {
+        // a node spun past a half turn, then turned through its quaternion: its rotation keeps going, never jumping by 2π
+        Shared<Group> g = new Group.make();
+        g.rotationMut().y = 3.1;
+        g.rotateY(rad: 0.1);
+        float32 y = g.rotation().y;
+        found.add(name: "Euler: read after a quaternion write, a node's rotation is the one nearest its last (3.1 turned by 0.1 reads 3.2, not -3.08)",
+                  why: close(a: y, b: 3.2) ? "" : "it reads ${y}");
+        g.rotateY(rad: 0.1);
+        g.rotationMut().y += 0.0;
+        float32 y2 = g.rotation().y;
+        found.add(name: "Euler: written after a quaternion write, a node's rotation starts from the one nearest its last (3.2 turned by 0.1 is 3.3)",
+                  why: close(a: y2, b: 3.3) ? "" : "it reads ${y2}");
+        // a node whose angles are the other of the two triples that make its turn keeps them
+        Shared<Group> h = new Group.make();
+        h.rotationMut() = Euler.make(xRad: 3.0, yRad: 0.1, zRad: 3.0, order: EulerOrder::XYZ);
+        h.rotateX(rad: 0.0);
+        Euler kept = h.rotation();
+        bool same = close(a: kept.x, b: 3.0) && close(a: kept.y, b: 0.1) && close(a: kept.z, b: 3.0);
+        found.add(name: "Euler: read after a quaternion write, a node keeps its own triple of the two that make its turn",
+                  why: same ? "" : "it reads ${kept.x} ${kept.y} ${kept.z}");
+        // the order a node's rotation was given stays its order
+        h.rotationMut() = Euler.make(xRad: 0.2, yRad: 0.3, zRad: 0.4, order: EulerOrder::YXZ);
+        h.rotateZ(rad: 0.0);
+        Euler own = h.rotation();
+        string named = orderName(o: own.order());
+        found.add(name: "Euler: a node's rotation keeps the order it was given through a quaternion write, its angles read in that order",
+                  why: named == "YXZ" && close(a: own.x, b: 0.2) && close(a: own.y, b: 0.3) && close(a: own.z, b: 0.4) ? ""
+                       : "it reads " + named + " ${own.x} ${own.y} ${own.z}");
+    }
+    {
+        Shared<BoxGeometry> geo = new BoxGeometry.make(width: 1.0, height: 1.0, depth: 1.0);
+        Shared<MeshBasicMaterial> look = new MeshBasicMaterial.make();
+        Shared<Mesh> m = new Mesh.make(geometry: geo, material: look);
+        m.rotationMut().y += 0.5;
+        float32 quarter = 0.25;
+        Quat q = m.quaternion();
+        bool ok = close(a: q.x, b: 0.0) && close(a: q.y, b: sin(x: quarter)) && close(a: q.z, b: 0.0) && close(a: q.w, b: cos(x: quarter));
+        found.add(name: "Euler: a node's quaternion follows its rotation, rotation.y += 0.5 giving (0, sin 0.25, 0, cos 0.25)",
+                  why: ok ? "" : "it is ${q.x} ${q.y} ${q.z} ${q.w}");
+        Shared<Group> part = new Group.make();
+        part.rotationMut().y = 0.5;
+        part.quaternionMut().x += 0.0;
+        Quat pq = part.quaternion();
+        bool started = close(a: pq.y, b: sin(x: quarter)) && close(a: pq.w, b: cos(x: quarter));
+        found.add(name: "Euler: a quaternion written in part right after a rotation write starts from the rotation's turn",
+                  why: started ? "" : "it is ${pq.x} ${pq.y} ${pq.z} ${pq.w}");
+        m.rotateOnAxis(axis: Vec3.of(x: 0.0, y: 2.0, z: 0.0), rad: 0.5);
+        float32 y = m.rotation().y;
+        found.add(name: "Euler: rotateOnAxis turns about the axis given, any length, through the quaternion",
+                  why: close(a: y, b: 1.0) ? "" : "rotation y reads ${y}, not 1");
+    }
+}
+
+// The box's vertex `i` against three.js's, worked by hand from `buildPlane`.
+fn string vertexIs(const ref BufferGeometry g, isize i, Vec3 p, Vec3 n, Vec2 uv) {
+    Vec3 gp = g.positionAt(vertex: i);
+    Vec3 gn = g.normalAt(vertex: i);
+    Vec2 guv = g.uvAt(vertex: i);
+    if (!closeVec(a: gp, b: p) || !closeVec(a: gn, b: n) || !close(a: guv.x, b: uv.x) || !close(a: guv.y, b: uv.y)) {
+        return " vertex ${i} is (${gp.x} ${gp.y} ${gp.z}) n (${gn.x} ${gn.y} ${gn.z}) uv (${guv.x} ${guv.y});";
+    }
+    return "";
+}
+
+// Every triangle turns counter-clockwise seen from outside: its winding's normal agrees with its vertices' normal.
+fn string windsOut(const ref BufferGeometry g) {
+    isize bad = 0;
+    for (isize t = 0; t < g.indexCount(); t = t + 3) {
+        isize a = cast<isize>(g.indexAt(at: t));
+        isize b = cast<isize>(g.indexAt(at: t + 1));
+        isize c = cast<isize>(g.indexAt(at: t + 2));
+        Vec3 pa = g.positionAt(vertex: a);
+        Vec3 wound = (g.positionAt(vertex: b) - pa).cross(r: g.positionAt(vertex: c) - pa);
+        if (wound.dot(r: g.normalAt(vertex: a)) <= 0.0) { bad = bad + 1; }
+    }
+    return bad == 0 ? "" : "${bad} triangles wind the other way";
+}
+
+unsafe fn void boxCases(ref Verdicts found) {
+    {
+        BoxGeometry box = BoxGeometry.make(width: 1.0, height: 1.0, depth: 1.0);
+        isize v = box.buffers().vertexCount();
+        isize n = box.buffers().indexCount();
+        string bad = "";
+        if (box.buffers().groupCount() != 6) { isize k = box.buffers().groupCount(); bad = bad + " ${k} groups;"; }
+        for (isize i = 0; i < box.buffers().groupCount(); i = i + 1) {
+            GeometryGroup gr = box.buffers().groupAt(at: i);
+            if (gr.start != i * 6 || gr.count != 6 || gr.materialIndex != cast<uint32>(i)) {
+                bad = bad + " group ${i} is ${gr.start} ${gr.count} ${gr.materialIndex};";
+            }
+        }
+        found.add(name: "BoxGeometry: a box is 24 vertices and 36 indices, a group of 6 a face, material indices 0 to 5 in face order",
+                  why: v == 24 && n == 36 && bad.isEmpty() ? "" : "${v} vertices, ${n} indices;" + bad);
+        found.add(name: "BoxGeometry: its index fits 16 bits, as three.js chooses", why: box.buffers().shortIndex() ? "" : "it does not");
+        found.add(name: "BoxGeometry: every triangle winds counter-clockwise seen from outside", why: windsOut(g: box.buffers()));
+    }
+    {
+        BoxGeometry box = BoxGeometry.make(width: 2.0, height: 3.0, depth: 4.0);
+        string bad = vertexIs(g: box.buffers(), i: 0, p: Vec3.of(x: 1.0, y: 1.5, z: 2.0), n: Vec3.unitX(), uv: Vec2.of(x: 0.0, y: 1.0))
+            + vertexIs(g: box.buffers(), i: 1, p: Vec3.of(x: 1.0, y: 1.5, z: -2.0), n: Vec3.unitX(), uv: Vec2.of(x: 1.0, y: 1.0))
+            + vertexIs(g: box.buffers(), i: 2, p: Vec3.of(x: 1.0, y: -1.5, z: 2.0), n: Vec3.unitX(), uv: Vec2.of(x: 0.0, y: 0.0))
+            + vertexIs(g: box.buffers(), i: 4, p: Vec3.of(x: -1.0, y: 1.5, z: -2.0), n: Vec3.of(x: -1.0, y: 0.0, z: 0.0), uv: Vec2.of(x: 0.0, y: 1.0))
+            + vertexIs(g: box.buffers(), i: 8, p: Vec3.of(x: -1.0, y: 1.5, z: -2.0), n: Vec3.unitY(), uv: Vec2.of(x: 0.0, y: 1.0))
+            + vertexIs(g: box.buffers(), i: 16, p: Vec3.of(x: -1.0, y: 1.5, z: 2.0), n: Vec3.unitZ(), uv: Vec2.of(x: 0.0, y: 1.0))
+            + vertexIs(g: box.buffers(), i: 20, p: Vec3.of(x: 1.0, y: 1.5, z: -2.0), n: Vec3.of(x: 0.0, y: 0.0, z: -1.0), uv: Vec2.of(x: 0.0, y: 1.0));
+        uint32 a = box.buffers().indexAt(at: 0);
+        uint32 b = box.buffers().indexAt(at: 1);
+        uint32 c = box.buffers().indexAt(at: 2);
+        uint32 d = box.buffers().indexAt(at: 3);
+        uint32 e = box.buffers().indexAt(at: 4);
+        uint32 f = box.buffers().indexAt(at: 5);
+        if (a != 0 || b != 2 || c != 1 || d != 2 || e != 3 || f != 1) { bad = bad + " the first face's triangles are ${a} ${b} ${c}, ${d} ${e} ${f};"; }
+        found.add(name: "BoxGeometry: 2 by 3 by 4, each face's first vertex, normal and UV, and the first face's triangles (0 2 1, 2 3 1), are three.js's",
+                  why: give bad);
+    }
+    {
+        BoxGeometry box = BoxGeometry.withSegments(width: 2.0, height: 3.0, depth: 4.0, widthSegments: 2, heightSegments: 3,
+                                                   depthSegments: 4);
+        isize v = box.buffers().vertexCount();
+        isize n = box.buffers().indexCount();
+        GeometryGroup px = box.buffers().groupAt(at: 0);
+        GeometryGroup pz = box.buffers().groupAt(at: 4);
+        bool parameters = box.width() == 2.0 && box.height() == 3.0 && box.depth() == 4.0 && box.widthSegments() == 2
+            && box.heightSegments() == 3 && box.depthSegments() == 4;
+        found.add(name: "BoxGeometry: withSegments(2, 3, 4) cuts each face into its grid: 94 vertices, 312 indices, +X 72 and +Z 36, its parameters kept",
+                  why: v == 94 && n == 312 && px.count == 72 && pz.count == 36 && parameters ? ""
+                       : "${v} vertices, ${n} indices, +X ${px.count}, +Z ${pz.count}");
+        found.add(name: "BoxGeometry: a segmented box's every triangle winds counter-clockwise seen from outside", why: windsOut(g: box.buffers()));
+        string grid = vertexIs(g: box.buffers(), i: 1, p: Vec3.of(x: 1.0, y: 1.5, z: 1.0), n: Vec3.unitX(), uv: Vec2.of(x: 0.25, y: 1.0))
+            + vertexIs(g: box.buffers(), i: 5, p: Vec3.of(x: 1.0, y: 0.5, z: 2.0), n: Vec3.unitX(), uv: Vec2.of(x: 0.0, y: 0.6666667));
+        found.add(name: "BoxGeometry: a segmented box's +X face is a grid of its depth segments across and height segments down",
+                  why: give grid);
+        BoxGeometry low = BoxGeometry.withSegments(width: 1.0, height: 1.0, depth: 1.0, widthSegments: 0, heightSegments: -2,
+                                                   depthSegments: 1);
+        isize lv = low.buffers().vertexCount();
+        found.add(name: "BoxGeometry: a segment count below 1 is taken as 1", why: lv == 24 ? "" : "${lv} vertices");
+    }
+}
+
+// Where a point `distance` in front of the camera lands in depth.
+fn float32 depthAt(const ref Mat4 p, float32 distance) {
+    Vec4 clip = p.transform(v: Vec4.of(x: 0.0, y: 0.0, z: 0.0 - distance, w: 1.0));
+    return clip.z / clip.w;
+}
+
+unsafe fn void cameraCases(ref Verdicts found) {
+    {
+        PerspectiveCamera cam = PerspectiveCamera.make(fovRad: radians(deg: 90.0), aspect: 2.0, near: 1.0, far: 101.0);
+        Mat4 p = cam.projectionMatrix();
+        Mat4 want = Mat4.fromCols(c0: Vec4.of(x: 0.5, y: 0.0, z: 0.0, w: 0.0), c1: Vec4.of(x: 0.0, y: 1.0, z: 0.0, w: 0.0),
+                                  c2: Vec4.of(x: 0.0, y: 0.0, z: 0.01, w: -1.0), c3: Vec4.of(x: 0.0, y: 0.0, z: 1.01, w: 0.0));
+        found.add(name: "PerspectiveCamera: its projection is three.js r187's with reversedDepth (90 degrees, aspect 2, near 1, far 101)",
+                  why: closeMat(a: p, b: want) ? "" : "it differs");
+        float32 n = depthAt(p: p, distance: 1.0);
+        float32 f = depthAt(p: p, distance: 101.0);
+        float32 mid = depthAt(p: p, distance: 10.0);
+        found.add(name: "PerspectiveCamera: reversed depth: the near plane is 1, the far plane 0, and nearer is greater",
+                  why: close(a: n, b: 1.0) && close(a: f, b: 0.0) && mid > f && mid < n ? "" : "near ${n}, far ${f}, at 10 ${mid}");
+        cam.fovRadMut() = radians(deg: 60.0);
+        float32 sy = cam.projectionMatrix().get(c: 1, r: 1);
+        found.add(name: "PerspectiveCamera: its projection follows a changed field of view with no update call",
+                  why: close(a: sy, b: 1.0 / 0.57735027) ? "" : "y scale ${sy}");
+    }
+    {
+        PerspectiveCamera cam = PerspectiveCamera.withInfiniteFar(fovRad: radians(deg: 90.0), aspect: 1.0, near: 0.5);
+        Mat4 p = cam.projectionMatrix();
+        float32 c = p.get(c: 2, r: 2);
+        float32 d = p.get(c: 3, r: 2);
+        float32 n = depthAt(p: p, distance: 0.5);
+        float32 far = depthAt(p: p, distance: 1000000.0);
+        bool infinite = cam.far() > 3.40282347e38;
+        found.add(name: "PerspectiveCamera: withInfiniteFar is the projection's limit, near 1 and depth falling toward 0 forever",
+                  why: c == 0.0 && close(a: d, b: 0.5) && close(a: n, b: 1.0) && far > 0.0 && far < 0.000001 && infinite ? ""
+                       : "c ${c}, d ${d}, near ${n}, at a million ${far}");
+    }
+}
+
+unsafe fn void materialCases(ref Verdicts found) {
+    MeshBasicMaterial m = MeshBasicMaterial.make();
+    uint32 hex = m.color().hex();
+    uint32 v0 = m.version();
+    found.add(name: "MeshBasicMaterial: white by default, as three.js's", why: hex == 0xffffff ? "" : "its colour is ${hex}");
+    m.colorMut() = Color.fromHex(hex: 0x336699);
+    uint32 v1 = m.version();
+    DynamicArray<uint8> bytes = m.settingBytes();
+    isize nb = bytes.length();
+    found.add(name: "MeshBasicMaterial: a colour set through colorMut moves its version, and its settings are the linear colour and an alpha of 1, 16 bytes",
+              why: v1 != v0 && nb == 16 ? "" : "version ${v0} then ${v1}, settings of ${nb} bytes");
+}
+
+unsafe fn void treeCases(ref Verdicts found) {
+    Shared<Scene> scene = new Scene.make();
+    Shared<Group> group = new Group.make();
+    Optional<Weak<Mesh>> held = Optional::None;
+    {
+        Shared<BoxGeometry> geo = new BoxGeometry.make(width: 1.0, height: 1.0, depth: 1.0);
+        Shared<MeshBasicMaterial> look = new MeshBasicMaterial.make();
+        Shared<Mesh> cube = new Mesh.make(geometry: geo, material: look);
+        scene.add(object: cube);
+        scene.add(object: group);
+        isize first = scene.childCount();
+        found.add(name: "tree: add puts a node among a scene's children", why: first == 2 ? "" : "the scene has ${first}");
+        group.add(object: cube);
+        isize left = scene.childCount();
+        isize took = group.childCount();
+        found.add(name: "tree: adding a node elsewhere takes it from its parent, as three.js's add",
+                  why: left == 1 && took == 1 ? "" : "the scene keeps ${left}, the group has ${took}");
+        scene.remove(object: cube);
+        isize stays = group.childCount();
+        isize kept = scene.childCount();
+        found.add(name: "tree: remove leaves a node that is not a child where it is, and the parent's own children",
+                  why: stays == 1 && kept == 1 ? "" : "the group has ${stays}, the scene ${kept}");
+        group.remove(object: cube);
+        isize gone = group.childCount();
+        found.add(name: "tree: remove takes a child out", why: gone == 0 ? "" : "the group has ${gone}");
+        group.add(object: cube);
+        held = Optional::Some(value: cube.downgrade());
+    }
+    bool alive = match (held) {
+        case Some(value: w): { Weak<Mesh> mine = copy w; := mine.tryUpgrade().isSome(); }
+        case None: false;
+    };
+    found.add(name: "tree: a node the program let go of lives while the tree holds it", why: alive ? "" : "it was freed");
+    group.remove(object: group.child(index: 0));
+    bool freed = match (held) {
+        case Some(value: w): { Weak<Mesh> mine = copy w; := mine.tryUpgrade().isNone(); }
+        case None: false;
+    };
+    found.add(name: "tree: a node is freed once nothing holds it, the tree's handle the last", why: freed ? "" : "it is still alive");
+}
+
+unsafe fn void partCases(ref Verdicts found) {
+    eulerCases(found: ref found);
+    boxCases(found: ref found);
+    cameraCases(found: ref found);
+    materialCases(found: ref found);
+    treeCases(found: ref found);
+}

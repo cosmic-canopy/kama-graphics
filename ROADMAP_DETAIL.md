@@ -77,6 +77,15 @@ natively. The library's own `examples/cube` is the same scene without an engine.
   - every object the library shares is a `Shared<T>` made with `new`, `RenderTarget` included; measured, not a
     performance cost (a handle holding one `Shared` is the same pointer and count), and with change marks an unchanged
     scene costs nothing to walk.
+- **Built, part 2** (2026-11-15, [SPEC.md](SPEC.md)): the scene graph on the flat core (`Scene`, `Group`, `Mesh`,
+  `PerspectiveCamera` behind `Object3D`, change marks, each mesh's record in its scene's storage buffer), `Euler` with
+  its five safeguards, `BufferGeometry` and `BoxGeometry` as three.js's, `MeshBasicMaterial`, reversed depth with an
+  infinite far, `Renderer.render(scene:, camera:)` and `info()`; `RenderTarget` is a `Shared` made with `new`. Its golden,
+  two boxes crossing in depth, is `boxes/warp.png` and `boxes/swiftshader.png` (9 of 3,072 texels differ between them).
+  82 cases on each golden leg, 77 in Edge on its GPU; 49 of 51 mutations caught, the other two only slower (a mark kept,
+  a record made again in its own slot). Part 2's question 4, what a misuse does, is asked: until it is answered, a
+  camera naming no target on a renderer with no window draws nothing, and a node added under itself ends the program.
+  Part 3, typed nodes and the lit box, is next.
 - **Done:**
   - `examples/cube` draws from one source on both legs;
   - its golden passes on a software GPU on each leg CI has, and perceptually on the reference machines present;

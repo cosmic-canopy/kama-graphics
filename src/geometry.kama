@@ -1,0 +1,234 @@
+// What a mesh is shaped as. `BufferGeometry` holds the vertices (a position, a normal and a UV each) and the order the
+// triangles take them in; `BoxGeometry` builds one as three.js's does. A geometry is an asset, shared (kyoten's
+// rendering.md § Decided, area 1, item 2; GFX-1's part 2, question 3): a program makes it with `new` and hands the
+// `Shared` to every mesh drawn with it, and the last drop frees it.
+
+import {
+    std::collections::DynamicArray,
+    std::math::Vec2, std::math::Vec3,
+    gpu::Device, gpu::Queue, gpu::Buffer, gpu::BufferDescriptor, gpu::BufferUsage, gpu::IndexFormat,
+    Renderer,
+};
+export { Geometry, BufferGeometry, BoxGeometry, GeometryGroup };
+
+// What every geometry is to the renderer: its buffers.
+type contract Geometry for resource {
+    const fn const ref BufferGeometry buffers();
+    fn ref BufferGeometry buffersMut();
+}
+
+// A buffer holding `bytes`, padded to the 4 bytes WebGPU writes in.
+unsafe fn Buffer holding(ref Device device, ref Queue queue, DynamicArray<uint8> bytes, BufferUsage usage, string name) {
+    while (bytes.length() % 4 != 0) { bytes.add(item: 0); }
+    BufferDescriptor described = BufferDescriptor.make(size: cast<uint64>(bytes.length()), usage: usage | BufferUsage::CopyDst);
+    described.label(text: give name);
+    Buffer made = device.createBuffer(descriptor: give described);
+    queue.writeBuffer(buffer: made, offset: 0, data: bytes.view());
+    return made;
+}
+
+fn void putWord(ref DynamicArray<uint8> into, uint32 bits) {
+    into.add(item: truncate<uint8>(bits));
+    into.add(item: truncate<uint8>(bits >> 8));
+    into.add(item: truncate<uint8>(bits >> 16));
+    into.add(item: truncate<uint8>(bits >> 24));
+}
+
+// A run of the index drawn with one material, as three.js's `geometry.groups`: a box has one a face.
+@generate(of)
+type value GeometryGroup {
+    public isize start;            // the first index of the run
+    public isize count;            // how many indices
+    public uint32 materialIndex;   // which of a mesh's materials draws it
+}
+
+type resource BufferGeometry implements Geometry {
+    DynamicArray<float32> positionList;   // x, y, z a vertex
+    DynamicArray<float32> normalList;     // x, y, z a vertex
+    DynamicArray<float32> uvList;         // u, v a vertex
+    DynamicArray<uint32> indexList;
+    DynamicArray<GeometryGroup> groupList;
+    DynamicArray<UnsafePtr> devices;      // each device that drew it, and its buffers there
+    DynamicArray<Buffer> positionBuffers;
+    DynamicArray<Buffer> indexBuffers;
+
+    friend BoxGeometry[empty];
+    friend buildPlane[vertex, triangle, group];
+    friend Renderer::render[entryOn, positionsOn, indicesOn, indexFormat];
+
+    unsafe ctor empty() {
+        this.positionList = DynamicArray.empty();
+        this.normalList = DynamicArray.empty();
+        this.uvList = DynamicArray.empty();
+        this.indexList = DynamicArray.empty();
+        this.groupList = DynamicArray.empty();
+        this.devices = DynamicArray.empty();
+        this.positionBuffers = DynamicArray.empty();
+        this.indexBuffers = DynamicArray.empty();
+    }
+    fn void vertex(Vec3 position, Vec3 normal, Vec2 uv) {
+        this.positionList.add(item: position.x); this.positionList.add(item: position.y); this.positionList.add(item: position.z);
+        this.normalList.add(item: normal.x); this.normalList.add(item: normal.y); this.normalList.add(item: normal.z);
+        this.uvList.add(item: uv.x); this.uvList.add(item: uv.y);
+    }
+    fn void triangle(uint32 a, uint32 b, uint32 c) {
+        this.indexList.add(item: a); this.indexList.add(item: b); this.indexList.add(item: c);
+    }
+    fn void group(isize start, isize count, uint32 materialIndex) {
+        this.groupList.add(item: GeometryGroup.of(start: start, count: count, materialIndex: materialIndex));
+    }
+
+    public const fn const ref BufferGeometry buffers() { return this; }
+    public fn ref BufferGeometry buffersMut() { return this; }
+
+    // Its buffers on `device`, made the first time: the positions, and the index at 16 bits where it fits.
+    unsafe fn isize entryOn(ref Device device, ref Queue queue) {
+        UnsafePtr at = device.raw();
+        for (isize i = 0; i < this.devices.length(); i = i + 1) { if (this.devices[i] == at) { return i; } }
+        DynamicArray<uint8> positions = DynamicArray.empty();
+        for (isize i = 0; i < this.positionList.length(); i = i + 1) {
+            putWord(into: ref positions, bits: bitcast<uint32>(this.positionList[i]));
+        }
+        DynamicArray<uint8> indices = DynamicArray.empty();
+        bool short16 = this.shortIndex();
+        for (isize i = 0; i < this.indexList.length(); i = i + 1) {
+            uint32 v = this.indexList[i];
+            indices.add(item: truncate<uint8>(v));
+            indices.add(item: truncate<uint8>(v >> 8));
+            if (!short16) { indices.add(item: truncate<uint8>(v >> 16)); indices.add(item: truncate<uint8>(v >> 24)); }
+        }
+        Buffer p = holding(device: ref device, queue: ref queue, bytes: give positions, usage: BufferUsage::Vertex,
+                           name: "a geometry's positions");
+        Buffer x = holding(device: ref device, queue: ref queue, bytes: give indices, usage: BufferUsage::Index,
+                           name: "a geometry's index");
+        this.devices.add(item: at);
+        this.positionBuffers.add(item: give p);
+        this.indexBuffers.add(item: give x);
+        return this.devices.length() - 1;
+    }
+    unsafe fn Buffer positionsOn(ref Device device, ref Queue queue) {
+        isize i = this.entryOn(device: ref device, queue: ref queue);
+        return copy this.positionBuffers[i];
+    }
+    unsafe fn Buffer indicesOn(ref Device device, ref Queue queue) {
+        isize i = this.entryOn(device: ref device, queue: ref queue);
+        return copy this.indexBuffers[i];
+    }
+    const fn IndexFormat indexFormat() { return this.shortIndex() ? IndexFormat::Uint16 : IndexFormat::Uint32; }
+
+    public const fn isize vertexCount() { return this.positionList.length() / 3; }
+    public const fn isize indexCount() { return this.indexList.length(); }
+    public const fn Vec3 positionAt(isize vertex) {
+        return Vec3.of(x: this.positionList[vertex * 3], y: this.positionList[vertex * 3 + 1], z: this.positionList[vertex * 3 + 2]);
+    }
+    public const fn Vec3 normalAt(isize vertex) {
+        return Vec3.of(x: this.normalList[vertex * 3], y: this.normalList[vertex * 3 + 1], z: this.normalList[vertex * 3 + 2]);
+    }
+    public const fn Vec2 uvAt(isize vertex) { return Vec2.of(x: this.uvList[vertex * 2], y: this.uvList[vertex * 2 + 1]); }
+    public const fn uint32 indexAt(isize at) { return this.indexList[at]; }
+    public const fn isize groupCount() { return this.groupList.length(); }
+    public const fn GeometryGroup groupAt(isize at) { return this.groupList[at]; }
+    // Whether the index fits 16 bits, as three.js chooses: every vertex numbered below 65536.
+    public const fn bool shortIndex() { return this.vertexCount() <= 65536; }
+}
+
+// One component of a vector by its axis, 0 x, 1 y, 2 z.
+fn Vec3 withAxis(Vec3 v, int32 axis, float32 value) {
+    if (axis == 0) { return Vec3.of(x: value, y: v.y, z: v.z); }
+    if (axis == 1) { return Vec3.of(x: v.x, y: value, z: v.z); }
+    return Vec3.of(x: v.x, y: v.y, z: value);
+}
+
+// three.js's BoxGeometry's buildPlane (r187), one face: a grid of `gridX` by `gridY` cells on the axes `u` and `v`, at
+// `depth / 2` along `w`, its normal along `w`'s sign of `depth`, its UV 0 to 1 across the face with v = 1 on the first
+// row, and two counter-clockwise triangles a cell.
+fn void buildPlane(ref BufferGeometry into, int32 u, int32 v, int32 w, float32 udir, float32 vdir, float32 width,
+                   float32 height, float32 depth, int32 gridX, int32 gridY, uint32 materialIndex) {
+    float32 segmentWidth = width / cast<float32>(gridX);
+    float32 segmentHeight = height / cast<float32>(gridY);
+    float32 widthHalf = width / 2.0;
+    float32 heightHalf = height / 2.0;
+    float32 depthHalf = depth / 2.0;
+    int32 gridX1 = gridX + 1;
+    int32 gridY1 = gridY + 1;
+    uint32 first = cast<uint32>(into.vertexCount());
+    isize groupStart = into.indexCount();
+    for (int32 iy = 0; iy < gridY1; iy = iy + 1) {
+        float32 y = cast<float32>(iy) * segmentHeight - heightHalf;
+        for (int32 ix = 0; ix < gridX1; ix = ix + 1) {
+            float32 x = cast<float32>(ix) * segmentWidth - widthHalf;
+            Vec3 p = withAxis(v: withAxis(v: withAxis(v: Vec3.zero(), axis: u, value: x * udir), axis: v, value: y * vdir),
+                              axis: w, value: depthHalf);
+            Vec3 n = withAxis(v: Vec3.zero(), axis: w, value: depth > 0.0 ? 1.0 : -1.0);
+            Vec2 uv = Vec2.of(x: cast<float32>(ix) / cast<float32>(gridX), y: 1.0 - cast<float32>(iy) / cast<float32>(gridY));
+            into.vertex(position: p, normal: n, uv: uv);
+        }
+    }
+    for (int32 iy = 0; iy < gridY; iy = iy + 1) {
+        for (int32 ix = 0; ix < gridX; ix = ix + 1) {
+            uint32 a = first + cast<uint32>(ix + gridX1 * iy);
+            uint32 b = first + cast<uint32>(ix + gridX1 * (iy + 1));
+            uint32 c = first + cast<uint32>((ix + 1) + gridX1 * (iy + 1));
+            uint32 d = first + cast<uint32>((ix + 1) + gridX1 * iy);
+            into.triangle(a: a, b: b, c: d);
+            into.triangle(a: b, b: c, c: d);
+        }
+    }
+    into.group(start: groupStart, count: into.indexCount() - groupStart, materialIndex: materialIndex);
+}
+
+fn int32 atLeastOne(int32 n) { return n < 1 ? 1 : n; }
+
+// A box centred on the origin, as three.js's `BoxGeometry`: its faces +X, -X, +Y, -Y, +Z, -Z in that order, each a
+// group (material indices 0 to 5), wound counter-clockwise seen from outside. A segment count below 1 is taken as 1.
+type resource BoxGeometry implements Geometry {
+    BufferGeometry data;
+    float32 w;
+    float32 h;
+    float32 d;
+    int32 ws;
+    int32 hs;
+    int32 dsegs;
+
+    // A box `width` by `height` by `depth`, one segment a side.
+    public ctor make(float32 width, float32 height, float32 depth) {
+        this.w = width; this.h = height; this.d = depth;
+        this.ws = 1; this.hs = 1; this.dsegs = 1;
+        this.data = BufferGeometry.empty();
+        this.build();
+    }
+    // A box with its faces cut into segments, as three.js's last three parameters.
+    public ctor withSegments(float32 width, float32 height, float32 depth, int32 widthSegments, int32 heightSegments,
+                             int32 depthSegments) {
+        this.w = width; this.h = height; this.d = depth;
+        this.ws = atLeastOne(n: widthSegments); this.hs = atLeastOne(n: heightSegments); this.dsegs = atLeastOne(n: depthSegments);
+        this.data = BufferGeometry.empty();
+        this.build();
+    }
+
+    fn void build() {
+        buildPlane(into: ref this.data, u: 2, v: 1, w: 0, udir: -1.0, vdir: -1.0, width: this.d, height: this.h, depth: this.w,
+                   gridX: this.dsegs, gridY: this.hs, materialIndex: 0);   // +X
+        buildPlane(into: ref this.data, u: 2, v: 1, w: 0, udir: 1.0, vdir: -1.0, width: this.d, height: this.h, depth: 0.0 - this.w,
+                   gridX: this.dsegs, gridY: this.hs, materialIndex: 1);   // -X
+        buildPlane(into: ref this.data, u: 0, v: 2, w: 1, udir: 1.0, vdir: 1.0, width: this.w, height: this.d, depth: this.h,
+                   gridX: this.ws, gridY: this.dsegs, materialIndex: 2);   // +Y
+        buildPlane(into: ref this.data, u: 0, v: 2, w: 1, udir: 1.0, vdir: -1.0, width: this.w, height: this.d, depth: 0.0 - this.h,
+                   gridX: this.ws, gridY: this.dsegs, materialIndex: 3);   // -Y
+        buildPlane(into: ref this.data, u: 0, v: 1, w: 2, udir: 1.0, vdir: -1.0, width: this.w, height: this.h, depth: this.d,
+                   gridX: this.ws, gridY: this.hs, materialIndex: 4);      // +Z
+        buildPlane(into: ref this.data, u: 0, v: 1, w: 2, udir: -1.0, vdir: -1.0, width: this.w, height: this.h, depth: 0.0 - this.d,
+                   gridX: this.ws, gridY: this.hs, materialIndex: 5);      // -Z
+    }
+
+    public const fn const ref BufferGeometry buffers() { return this.data; }
+    public fn ref BufferGeometry buffersMut() { return this.data; }
+
+    // What made it, as three.js's `parameters`.
+    public const fn float32 width() { return this.w; }
+    public const fn float32 height() { return this.h; }
+    public const fn float32 depth() { return this.d; }
+    public const fn int32 widthSegments() { return this.ws; }
+    public const fn int32 heightSegments() { return this.hs; }
+    public const fn int32 depthSegments() { return this.dsegs; }
+}

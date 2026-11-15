@@ -2,68 +2,66 @@
 // rendering.md § Decided, GFX-1's part 1, questions 4 to 6). Its format decides what it holds. The default, made here,
 // is 8-bit sRGB and holds what the window would show, so it reads back as a picture.
 //
-// It is an asset, so a shared handle (area 1, item 2): `copy` is the same target, and the last drop frees it. It is made
-// with no device, as three.js's `new RenderTarget(width, height)` is, and a renderer makes its texture on its device the
-// first time it uses it. A target used by renderers on two devices has a texture on each, as three.js keeps one per
-// renderer.
+// It is an asset, shared (area 1, item 2; part 2, question 3): a program makes it with `new`, every holder of its
+// `Shared` names the same target, and the last drop frees it. It is made with no device, as three.js's
+// `new RenderTarget(width, height)` is, and a renderer makes its textures on its device the first time it uses it: the
+// colour, and the depth a render draws against, 32-bit float with reversed depth (GFX-1's question 1). A target used by
+// renderers on two devices has textures on each, as three.js keeps one per renderer.
 
 import {
     std::collections::DynamicArray,
-    std::memory::Shared,
     gpu::Device, gpu::Texture, gpu::TextureDescriptor, gpu::TextureFormat, gpu::TextureUsage,
     Renderer,
 };
 export { RenderTarget };
 
-// What every copy of a target shares: its size, and its texture on each device that has used it.
-type resource TargetState {
+type resource RenderTarget {
     uint32 w;
     uint32 h;
     DynamicArray<UnsafePtr> devices;   // the device each texture below was made on, by its handle
-    DynamicArray<Texture> textures;
+    DynamicArray<Texture> colours;
+    DynamicArray<Texture> depths;
 
+    friend Renderer::clear[textureOn, entryOn];
+    friend Renderer::readRenderTargetPixels[textureOn, entryOn];
+    friend Renderer::render[textureOn, depthOn, entryOn];
+
+    // A target `width` by `height` texels, 8-bit sRGB.
     public unsafe ctor make(uint32 width, uint32 height) {
         this.w = width;
         this.h = height;
         this.devices = DynamicArray.empty();
-        this.textures = DynamicArray.empty();
+        this.colours = DynamicArray.empty();
+        this.depths = DynamicArray.empty();
     }
+
     public const fn uint32 width() { return this.w; }
     public const fn uint32 height() { return this.h; }
 
-    // The target's texture on `device`, made the first time: a handle of its own to the one texture. A texture holds its
-    // device, so a device's handle is never reused while its texture is kept here.
-    public unsafe fn Texture textureOn(ref Device device) {
+    // Which entry `device` has, made the first time: a texture holds its device, so a device's handle is never reused
+    // while its textures are kept here.
+    unsafe fn isize entryOn(ref Device device) {
         UnsafePtr at = device.raw();
         for (isize i = 0; i < this.devices.length(); i = i + 1) {
-            if (this.devices[i] == at) { return copy this.textures[i]; }
+            if (this.devices[i] == at) { return i; }
         }
-        TextureDescriptor d = TextureDescriptor.make(width: this.w, height: this.h, format: TextureFormat::RGBA8UnormSrgb,
+        TextureDescriptor c = TextureDescriptor.make(width: this.w, height: this.h, format: TextureFormat::RGBA8UnormSrgb,
                                                      usage: TextureUsage::RenderAttachment | TextureUsage::CopySrc | TextureUsage::TextureBinding);
-        d.label(text: "a render target");
-        Texture made = device.createTexture(descriptor: give d);
+        c.label(text: "a render target");
+        Texture colour = device.createTexture(descriptor: give c);
+        // TextureBinding too: on wgpu-native v29's D3D12 a depth texture that is only a RenderAttachment loses the
+        // device in a read-only depth pass (@kama/gpu's AGENTS.gpu.md item 13).
+        TextureDescriptor d = TextureDescriptor.make(width: this.w, height: this.h, format: TextureFormat::Depth32Float,
+                                                     usage: TextureUsage::RenderAttachment | TextureUsage::TextureBinding);
+        d.label(text: "a render target's depth");
+        Texture depth = device.createTexture(descriptor: give d);
         this.devices.add(item: at);
-        this.textures.add(item: copy made);
-        return made;
+        this.colours.add(item: give colour);
+        this.depths.add(item: give depth);
+        return this.devices.length() - 1;
     }
-}
 
-type resource RenderTarget implements Copyable<This>(bare: give) {
-    Shared<TargetState> state;
-
-    friend Renderer::clear[textureOn];
-    friend Renderer::readRenderTargetPixels[textureOn];
-
-    // A target `width` by `height` texels, 8-bit sRGB.
-    public unsafe ctor make(uint32 width, uint32 height) {
-        Shared<TargetState> s = new TargetState.make(width: width, height: height);
-        this.state = give s;
-    }
-    // Another handle to the same target.
-    public ctor copy(ref RenderTarget source) { this.state = copy source.state; }
-
-    public const fn uint32 width() { return this.state.width(); }
-    public const fn uint32 height() { return this.state.height(); }
-
-    unsafe fn Texture textureOn(ref Device device) { return this.state.textureOn(device: ref device); }
+    // The target's colour and depth textures on `device`: each a handle of its own to the one texture.
+    unsafe fn Texture textureOn(ref Device device) { isize i = this.entryOn(device: ref device); return copy this.colours[i]; }
+    unsafe fn Texture depthOn(ref Device device) { isize i = this.entryOn(device: ref device); return copy this.depths[i]; }
 }

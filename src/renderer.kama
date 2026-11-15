@@ -7,35 +7,102 @@
 // read on its own: `clear(target:)` fills it with the clear colour, and `readRenderTargetPixels(target:)` starts a read
 // that hands back an @kama/image `Image` (question 6). kama has no promises, so a read is a request the program polls, as
 // @kama/gpu's are, and the poll moves the device on itself, so a program never polls the device.
+//
+// `render(scene:, camera:)` draws a scene as three.js's does (part 2): the scene's walk makes the world matrices that
+// changed and writes its meshes' records; the camera's target is cleared to the clear colour and its depth to 0, since
+// depth is reversed (GFX-1's question 1: near 1, far 0, the test Greater); and each mesh is one draw, reading its record
+// by its instance index. Sorting draws and drawing a mesh and material in common as one instanced draw come with
+// automatic instancing (GFX-2). `info()` says what the last render did, as three.js's `renderer.info`.
 
 import {
     std::collections::DynamicArray, std::collections::FixedArray,
-    gpu::Device, gpu::Queue, gpu::GpuError, gpu::Texture, gpu::TextureView, gpu::TextureViewDescriptor,
-    gpu::Buffer, gpu::BufferDescriptor, gpu::BufferUsage, gpu::BufferRead, gpu::ReadStatus,
+    std::math::Mat4,
+    gpu::Device, gpu::Queue, gpu::GpuError, gpu::Texture, gpu::TextureView, gpu::TextureViewDescriptor, gpu::TextureFormat,
+    gpu::Buffer, gpu::BufferDescriptor, gpu::BufferUsage, gpu::BufferRead, gpu::ReadStatus, gpu::BufferBinding,
     gpu::CommandEncoder, gpu::CommandBuffer, gpu::RenderPass, gpu::RenderPassDescriptor, gpu::ColorAttachment,
-    gpu::Color as GpuColor,
+    gpu::DepthStencilAttachment, gpu::Color as GpuColor,
+    gpu::ShaderModule, gpu::ShaderModuleDescriptor, gpu::ShaderStage,
+    gpu::BindGroupLayout, gpu::BindGroupLayoutDescriptor, gpu::BindingLayout, gpu::BufferBindingLayout,
+    gpu::BufferBindingType, gpu::BindGroup, gpu::BindGroupDescriptor, gpu::BindingResource,
+    gpu::PipelineLayout, gpu::PipelineLayoutDescriptor, gpu::Layout,
+    gpu::RenderPipeline, gpu::RenderPipelineDescriptor, gpu::VertexState, gpu::VertexBufferLayout, gpu::VertexFormat,
+    gpu::FragmentState, gpu::ColorTargetState, gpu::CullMode, gpu::DepthStencilState, gpu::CompareFunction,
     image::Image, image::ImageError, image::PixelFormat, image::AlphaMode, image::ColorSpace,
-    Color, RenderTarget,
+    Color, RenderTarget, Scene, PerspectiveCamera, Geometry, BufferGeometry, Material,
 };
-export { Renderer, PixelRead, PixelStatus };
+export { Renderer, RenderInfo, PixelRead, PixelStatus };
 
 // A copied row's bytes: WebGPU aligns them to 256.
 fn uint32 rowBytes(uint32 width) { return (width * 4 + 255) / 256 * 256; }
+
+// What every material's WGSL is given in group 0: the frame (the camera's view and projection) and the object records,
+// a world matrix each, indexed by the draw's instance.
+fn string prelude() {
+    return "struct Frame { viewProjection: mat4x4f };\n"
+        + "@group(0) @binding(0) var<uniform> frame: Frame;\n"
+        + "@group(0) @binding(1) var<storage, read> objects: array<mat4x4f>;\n";
+}
+
+fn void putFloat(ref DynamicArray<uint8> into, float32 value) {
+    uint32 bits = bitcast<uint32>(value);
+    into.add(item: truncate<uint8>(bits));
+    into.add(item: truncate<uint8>(bits >> 8));
+    into.add(item: truncate<uint8>(bits >> 16));
+    into.add(item: truncate<uint8>(bits >> 24));
+}
+
+// What the last render did, as three.js's `renderer.info`: its draw calls and triangles, the meshes its scene holds a
+// record for, and the world matrices its walk made (none, when nothing in the scene changed).
+@generate(of)
+type value RenderInfo {
+    public int32 calls;
+    public int32 triangles;
+    public int32 objects;
+    public int32 matrices;
+}
 
 type resource Renderer {
     Device device;
     Queue queue;
     Color clearTo = Color.fromHex(hex: 0x000000);
     float32 alpha = 1.0;
+    BindGroupLayout frameLayout;      // group 0: the frame, and the object records
+    BindGroupLayout materialLayout;   // group 1: a material's settings
+    PipelineLayout layout;
+    Buffer frame;                     // the frame's uniform: the view-projection
+    DynamicArray<string> sources;     // the pipelines made, by the WGSL they run
+    DynamicArray<RenderPipeline> pipelines;
+    RenderInfo last = RenderInfo.of(calls: 0, triangles: 0, objects: 0, matrices: 0);
 
     // A renderer on a device the program already has, with its queue: each a handle of its own, so the program keeps
     // its own (`copy device`) and several renderers share one device.
-    public ctor withDevice(Device device, Queue queue) {
+    public unsafe ctor withDevice(Device device, Queue queue) {
+        BindGroupLayoutDescriptor g0 = BindGroupLayoutDescriptor.make();
+        g0.entry(binding: 0, visibility: ShaderStage::Vertex, layout: BindingLayout::Buffer(layout: BufferBindingLayout.make()));
+        BufferBindingLayout records = BufferBindingLayout.make();
+        records.kind = BufferBindingType::ReadOnlyStorage;
+        g0.entry(binding: 1, visibility: ShaderStage::Vertex, layout: BindingLayout::Buffer(layout: records));
+        g0.label(text: "the frame and the object records");
+        this.frameLayout = device.createBindGroupLayout(descriptor: give g0);
+        BindGroupLayoutDescriptor g1 = BindGroupLayoutDescriptor.make();
+        g1.entry(binding: 0, visibility: ShaderStage::Fragment, layout: BindingLayout::Buffer(layout: BufferBindingLayout.make()));
+        g1.label(text: "a material's settings");
+        this.materialLayout = device.createBindGroupLayout(descriptor: give g1);
+        PipelineLayoutDescriptor groups = PipelineLayoutDescriptor.make();
+        groups.group(layout: copy this.frameLayout);
+        groups.group(layout: copy this.materialLayout);
+        groups.label(text: "a mesh's groups");
+        this.layout = device.createPipelineLayout(descriptor: give groups);
+        BufferDescriptor described = BufferDescriptor.make(size: 64, usage: BufferUsage::Uniform | BufferUsage::CopyDst);
+        described.label(text: "the frame");
+        this.frame = device.createBuffer(descriptor: give described);
+        this.sources = DynamicArray.empty();
+        this.pipelines = DynamicArray.empty();
         this.device = give device;
         this.queue = give queue;
     }
 
-    // The colour `clear` fills a target with, written in sRGB: black, as three.js's.
+    // The colour `clear` and `render` fill a target with, written in sRGB: black, as three.js's.
     public const fn Color clearColor() { return this.clearTo; }
     public fn ref Color clearColorMut() { return this.clearTo; }
 
@@ -43,15 +110,21 @@ type resource Renderer {
     public const fn float32 clearAlpha() { return this.alpha; }
     public fn ref float32 clearAlphaMut() { return this.alpha; }
 
+    // What the last render did.
+    public const fn RenderInfo info() { return this.last; }
+
+    fn GpuColor clearing() {
+        return GpuColor.of(r: cast<float64>(this.clearTo.linearR()), g: cast<float64>(this.clearTo.linearG()),
+                           b: cast<float64>(this.clearTo.linearB()), a: cast<float64>(this.alpha));
+    }
+
     // Fill the target with the clear colour. On the default 8-bit sRGB target it reads back as written: a target
     // cleared to #336699 reads 0x33 0x66 0x99.
-    public unsafe fn void clear(ref RenderTarget target) {
+    public unsafe fn void clear(Shared<RenderTarget> target) {
         Texture texture = target.textureOn(device: ref this.device);
         TextureView view = texture.createView(descriptor: TextureViewDescriptor.make());
-        GpuColor linear = GpuColor.of(r: cast<float64>(this.clearTo.linearR()), g: cast<float64>(this.clearTo.linearG()),
-                                      b: cast<float64>(this.clearTo.linearB()), a: cast<float64>(this.alpha));
         RenderPassDescriptor pass = RenderPassDescriptor.make();
-        pass.color(attachment: ColorAttachment.clearing(view: give view, color: linear));
+        pass.color(attachment: ColorAttachment.clearing(view: give view, color: this.clearing()));
         pass.label(text: "a render target cleared");
         CommandEncoder encoder = this.device.createCommandEncoder();
         RenderPass rp = encoder.beginRenderPass(descriptor: give pass);
@@ -60,9 +133,100 @@ type resource Renderer {
         this.queue.submit(commands: give commands);
     }
 
+    // The pipeline that runs `source`, a material's WGSL, made the first time.
+    unsafe fn isize pipelineFor(const ref string source) {
+        for (isize i = 0; i < this.sources.length(); i = i + 1) { if (this.sources[i] == source) { return i; } }
+        ShaderModuleDescriptor described = ShaderModuleDescriptor.make(wgsl: prelude() + source);
+        described.label(text: "a material's shader");
+        ShaderModule shader = this.device.createShaderModule(descriptor: give described);
+        VertexBufferLayout positions = VertexBufferLayout.make(arrayStride: 12);
+        positions.attribute(format: VertexFormat::Float32x3, offset: 0, shaderLocation: 0);
+        VertexState vertex = VertexState.make(module: copy shader, entryPoint: "vs");
+        vertex.buffer(layout: give positions);
+        FragmentState fragment = FragmentState.make(module: copy shader, entryPoint: "fs");
+        fragment.target(state: ColorTargetState.make(format: TextureFormat::RGBA8UnormSrgb));
+        RenderPipelineDescriptor pipeline = RenderPipelineDescriptor.make(layout: Layout::Explicit(layout: copy this.layout),
+                                                                          vertex: give vertex);
+        pipeline.fragment(state: give fragment);
+        pipeline.primitiveMut().cullMode = CullMode::Back;   // three.js's FrontSide: front faces wind counter-clockwise
+        pipeline.depthStencil(state: DepthStencilState.make(format: TextureFormat::Depth32Float, depthWriteEnabled: true,
+                                                            depthCompare: CompareFunction::Greater));
+        pipeline.label(text: "a mesh");
+        this.sources.add(item: copy source);
+        this.pipelines.add(item: this.device.createRenderPipeline(descriptor: give pipeline));
+        return this.pipelines.length() - 1;
+    }
+
+    // Draw `scene` as `camera` sees it, into the target the camera names.
+    public unsafe fn void render(Shared<Scene> scene, Shared<PerspectiveCamera> camera) {
+        int32 made = scene.walkAll();
+        camera.placeAlone();
+        int32 objects = cast<int32>(scene.objects());
+        Optional<Shared<RenderTarget>> named = camera.target();
+        if (named.isNone()) {
+            this.last = RenderInfo.of(calls: 0, triangles: 0, objects: objects, matrices: made);
+            return;
+        }
+        Shared<RenderTarget> target = match (give named) { case Some(value: t): give t; case None: { panic(msg: "checked above"); } };
+        Texture colour = target.textureOn(device: ref this.device);
+        Texture depth = target.depthOn(device: ref this.device);
+
+        DynamicArray<uint8> frameBytes = DynamicArray.empty();
+        Mat4 vp = camera.viewProjection();
+        for (int32 c = 0; c < 4; c = c + 1) {
+            for (int32 r = 0; r < 4; r = r + 1) { putFloat(into: ref frameBytes, value: vp.get(c: c, r: r)); }
+        }
+        this.queue.writeBuffer(buffer: this.frame, offset: 0, data: frameBytes.view());
+        Buffer records = scene.recordsOn(device: ref this.device, queue: ref this.queue);
+        BindGroupDescriptor bound = BindGroupDescriptor.make(layout: copy this.frameLayout);
+        bound.entry(binding: 0, resource: BindingResource::Buffer(binding: BufferBinding.whole(buffer: copy this.frame)));
+        bound.entry(binding: 1, resource: BindingResource::Buffer(binding: BufferBinding.whole(buffer: give records)));
+        bound.label(text: "the frame and the object records");
+        BindGroup frameGroup = this.device.createBindGroup(descriptor: give bound);
+
+        RenderPassDescriptor pass = RenderPassDescriptor.make();
+        pass.color(attachment: ColorAttachment.clearing(view: colour.createView(descriptor: TextureViewDescriptor.make()),
+                                                        color: this.clearing()));
+        pass.depthStencil(attachment: DepthStencilAttachment.clearingDepth(view: depth.createView(descriptor: TextureViewDescriptor.make()),
+                                                                          value: 0.0));
+        pass.label(text: "a scene");
+        CommandEncoder encoder = this.device.createCommandEncoder();
+        RenderPass rp = encoder.beginRenderPass(descriptor: give pass);
+        rp.setBindGroup(index: 0, group: frameGroup);
+        int32 calls = 0;
+        int32 triangles = 0;
+        isize bound2 = -1;
+        DynamicArray<isize> slots = scene.drawSlots();
+        for (isize i = 0; i < slots.length(); i = i + 1) {
+            isize slot = slots[i];
+            Shared<Material> material = scene.materialAt(slot: slot);
+            Shared<Geometry> geometry = scene.geometryAt(slot: slot);
+            string source = material.shaderSource();
+            isize p = this.pipelineFor(source: source);
+            if (p != bound2) { rp.setPipeline(pipeline: this.pipelines[p]); bound2 = p; }
+            DynamicArray<uint8> settings = material.settingBytes();
+            BindGroup look = material.gpuMut().groupOn(device: ref this.device, queue: ref this.queue, layout: this.materialLayout,
+                                                       settings: settings, version: material.version());
+            rp.setBindGroup(index: 1, group: look);
+            Buffer positions = geometry.buffersMut().positionsOn(device: ref this.device, queue: ref this.queue);
+            Buffer indices = geometry.buffersMut().indicesOn(device: ref this.device, queue: ref this.queue);
+            rp.setVertexBuffer(slot: 0, binding: BufferBinding.whole(buffer: give positions));
+            rp.setIndexBuffer(binding: BufferBinding.whole(buffer: give indices), format: geometry.buffers().indexFormat());
+            isize count = geometry.buffers().indexCount();
+            rp.drawIndexed(indexCount: cast<uint32>(count), instanceCount: 1, firstIndex: 0, baseVertex: 0,
+                           firstInstance: cast<uint32>(slot));
+            calls = calls + 1;
+            triangles = triangles + cast<int32>(count / 3);
+        }
+        give rp.end();
+        CommandBuffer commands = give encoder.finish();
+        this.queue.submit(commands: give commands);
+        this.last = RenderInfo.of(calls: calls, triangles: triangles, objects: objects, matrices: made);
+    }
+
     // Start reading the target back, as three.js's `readRenderTargetPixelsAsync`: poll the read until it hands back its
     // image, the target's size in 8-bit RGBA, sRGB, top row first.
-    public unsafe fn PixelRead readRenderTargetPixels(ref RenderTarget target) {
+    public unsafe fn PixelRead readRenderTargetPixels(Shared<RenderTarget> target) {
         Texture texture = target.textureOn(device: ref this.device);
         uint32 width = target.width();
         uint32 height = target.height();

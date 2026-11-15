@@ -1,0 +1,162 @@
+// A rotation as three angles, three.js's `Euler`, beside the quaternion a node also holds (kyoten's rendering.md §
+// Decided, GFX-1's part 2, question 1). std::math has a `Quat` and no Euler type, so this one is the library's own.
+//
+// Its five safeguards against Euler angles' traps, each decided with the owner:
+// 1. The order is part of what the numbers mean, so `make` takes it, `reordered` keeps the turn, and no `orderMut()`
+//    reinterprets the numbers.
+// 2. Turns go through the quaternion (a node's `rotateX/Y/Z`, `rotateOnAxis`, `rotateOnWorldAxis`, `lookAt`), so no
+//    turn meets gimbal lock.
+// 3. No Euler is blended: there is no Euler interpolation here.
+// 4. An Euler made from a quaternion for a node is the one nearest the angles the node last held (`nearest`), so a read
+//    after a quaternion write never jumps by 2π or to the other equivalent triple.
+// 5. Degrees enter only through `fromDegrees`; every other angle is in radians and labelled so.
+//
+// An order names the axes in the order three.js's do: XYZ is the matrix Rx * Ry * Rz, so a point turns about Z first.
+
+import {
+    std::math::Quat, std::math::Mat4, std::math::Vec3, std::math::sin, std::math::cos, std::math::asin,
+    std::math::atan2, std::math::abs, std::math::radians, std::math::floor,
+};
+export { Euler, EulerOrder };
+
+type enum EulerOrder { XYZ, YXZ, ZXY, ZYX, YZX, XZY }
+
+comptime float64 PI = 3.141592653589793;
+
+// `a` moved by whole turns to within half a turn of `to`.
+fn float32 within(float32 a, float32 to) {
+    float64 d = cast<float64>(a) - cast<float64>(to);
+    d = d - 2.0 * PI * floor(x: (d + PI) / (2.0 * PI));
+    return cast<float32>(cast<float64>(to) + d);
+}
+
+fn Quat about(Vec3 axis, float32 rad) { return Quat.fromAxisAngle(axis: axis, rad: rad); }
+
+// m(r, c) of a rotation's matrix, 1-based as three.js names them (m11 … m33).
+fn float32 at(const ref Mat4 m, int32 r, int32 c) { return m.get(c: c - 1, r: r - 1); }
+
+fn float32 clamped(float32 v) { return v < -1.0 ? -1.0 : (v > 1.0 ? 1.0 : v); }
+
+type value Euler {
+    public float32 x;   // radians, about X
+    public float32 y;   // radians, about Y
+    public float32 z;   // radians, about Z
+    EulerOrder ord;
+
+    // Three angles in radians, and the order that gives them their meaning.
+    public ctor make(float32 xRad, float32 yRad, float32 zRad, EulerOrder order) {
+        this.x = xRad;
+        this.y = yRad;
+        this.z = zRad;
+        this.ord = order;
+    }
+
+    // The one way degrees come in: each turned to radians.
+    public ctor fromDegrees(float32 x, float32 y, float32 z, EulerOrder order) {
+        this.x = radians(deg: x);
+        this.y = radians(deg: y);
+        this.z = radians(deg: z);
+        this.ord = order;
+    }
+
+    // The angles that make `q` in `order`, as three.js's `setFromQuaternion`: the middle angle from -π/2 to π/2.
+    public ctor fromQuaternion(Quat q, EulerOrder order) {
+        Mat4 m = q.normalized().toMat4();
+        float32 m11 = at(m: m, r: 1, c: 1); float32 m12 = at(m: m, r: 1, c: 2); float32 m13 = at(m: m, r: 1, c: 3);
+        float32 m21 = at(m: m, r: 2, c: 1); float32 m22 = at(m: m, r: 2, c: 2); float32 m23 = at(m: m, r: 2, c: 3);
+        float32 m31 = at(m: m, r: 3, c: 1); float32 m32 = at(m: m, r: 3, c: 2); float32 m33 = at(m: m, r: 3, c: 3);
+        float32 locked = 0.9999999;
+        float32 ex = 0.0;
+        float32 ey = 0.0;
+        float32 ez = 0.0;
+        match (order) {
+            case XYZ: {
+                ey = asin(x: clamped(v: m13));
+                if (abs(x: m13) < locked) { ex = atan2(y: 0.0 - m23, x: m33); ez = atan2(y: 0.0 - m12, x: m11); }
+                else { ex = atan2(y: m32, x: m22); }
+            }
+            case YXZ: {
+                ex = asin(x: 0.0 - clamped(v: m23));
+                if (abs(x: m23) < locked) { ey = atan2(y: m13, x: m33); ez = atan2(y: m21, x: m22); }
+                else { ey = atan2(y: 0.0 - m31, x: m11); }
+            }
+            case ZXY: {
+                ex = asin(x: clamped(v: m32));
+                if (abs(x: m32) < locked) { ey = atan2(y: 0.0 - m31, x: m33); ez = atan2(y: 0.0 - m12, x: m22); }
+                else { ez = atan2(y: m21, x: m11); }
+            }
+            case ZYX: {
+                ey = asin(x: 0.0 - clamped(v: m31));
+                if (abs(x: m31) < locked) { ex = atan2(y: m32, x: m33); ez = atan2(y: m21, x: m11); }
+                else { ez = atan2(y: 0.0 - m12, x: m22); }
+            }
+            case YZX: {
+                ez = asin(x: clamped(v: m21));
+                if (abs(x: m21) < locked) { ex = atan2(y: 0.0 - m23, x: m22); ey = atan2(y: 0.0 - m31, x: m11); }
+                else { ey = atan2(y: m13, x: m33); }
+            }
+            case XZY: {
+                ez = asin(x: 0.0 - clamped(v: m12));
+                if (abs(x: m12) < locked) { ex = atan2(y: m32, x: m22); ey = atan2(y: m13, x: m11); }
+                else { ex = atan2(y: 0.0 - m23, x: m33); }
+            }
+        };
+        this.x = ex;
+        this.y = ey;
+        this.z = ez;
+        this.ord = order;
+    }
+
+    // The angles that make `q` in `near`'s order nearest `near` (safeguard 4): of the two triples that make any turn,
+    // (a, b, c) and (a + π, π - b, c + π) for the order's first, middle and last angle, each moved by whole turns to
+    // within half a turn of `near`'s, the one with the smaller sum of differences.
+    public ctor nearest(Quat q, Euler near) {
+        Euler one = Euler.fromQuaternion(q: q, order: near.ord);
+        Euler other = one.otherTriple();
+        Euler a = Euler.make(xRad: within(a: one.x, to: near.x), yRad: within(a: one.y, to: near.y),
+                             zRad: within(a: one.z, to: near.z), order: near.ord);
+        Euler b = Euler.make(xRad: within(a: other.x, to: near.x), yRad: within(a: other.y, to: near.y),
+                             zRad: within(a: other.z, to: near.z), order: near.ord);
+        float32 da = abs(x: a.x - near.x) + abs(x: a.y - near.y) + abs(x: a.z - near.z);
+        float32 db = abs(x: b.x - near.x) + abs(x: b.y - near.y) + abs(x: b.z - near.z);
+        Euler pick = db < da ? b : a;
+        this.x = pick.x;
+        this.y = pick.y;
+        this.z = pick.z;
+        this.ord = near.ord;
+    }
+
+    // What gives the numbers their meaning. There is no way to change it in place (safeguard 1).
+    public const fn EulerOrder order() { return this.ord; }
+
+    // The same turn in another order, as three.js's `reorder`.
+    public const fn Euler reordered(EulerOrder order) { return Euler.fromQuaternion(q: this.quaternion(), order: order); }
+
+    // The turn as a quaternion: the three axes' turns composed in the order's sequence.
+    public const fn Quat quaternion() {
+        Quat qx = about(axis: Vec3.unitX(), rad: this.x);
+        Quat qy = about(axis: Vec3.unitY(), rad: this.y);
+        Quat qz = about(axis: Vec3.unitZ(), rad: this.z);
+        return match (this.ord) {
+            case XYZ: qx * qy * qz;
+            case YXZ: qy * qx * qz;
+            case ZXY: qz * qx * qy;
+            case ZYX: qz * qy * qx;
+            case YZX: qy * qz * qx;
+            case XZY: qx * qz * qy;
+        };
+    }
+
+    // The other triple that makes the same turn: the first and last angles a half turn on, the middle one reflected.
+    const fn Euler otherTriple() {
+        float32 half = cast<float32>(PI);
+        return match (this.ord) {
+            case XYZ: Euler.make(xRad: this.x + half, yRad: half - this.y, zRad: this.z + half, order: this.ord);
+            case XZY: Euler.make(xRad: this.x + half, yRad: this.y + half, zRad: half - this.z, order: this.ord);
+            case YXZ: Euler.make(xRad: half - this.x, yRad: this.y + half, zRad: this.z + half, order: this.ord);
+            case YZX: Euler.make(xRad: this.x + half, yRad: this.y + half, zRad: half - this.z, order: this.ord);
+            case ZXY: Euler.make(xRad: half - this.x, yRad: this.y + half, zRad: this.z + half, order: this.ord);
+            case ZYX: Euler.make(xRad: this.x + half, yRad: half - this.y, zRad: this.z + half, order: this.ord);
+        };
+    }
+}

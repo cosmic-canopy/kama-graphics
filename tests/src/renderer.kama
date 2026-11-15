@@ -33,7 +33,7 @@ fn float64 srgbToLinear(float64 c) {
     return pow(x: c * 0.9478672986 + 0.0521327014, y: 2.4);
 }
 
-fn void colorCases(ref Verdicts found) {
+unsafe fn void colorCases(ref Verdicts found) {
     {
         string bad = "";
         for (uint32 v = 0; v < 256; v = v + 1) {
@@ -77,13 +77,13 @@ fn void colorCases(ref Verdicts found) {
                   why: made == 0x336699 ? "" : "make(r: 0.2, g: 0.4, b: 0.6) reads back ${made}, not 0x336699 (3368601)");
     }
     {
-        RenderTarget t = RenderTarget.make(width: 37, height: 23);
+        Shared<RenderTarget> t = new RenderTarget.make(width: 37, height: 23);
         uint32 w = t.width();
         uint32 h = t.height();
-        RenderTarget alias = copy t;
+        Shared<RenderTarget> alias = t;
         uint32 aw = alias.width();
-        found.add(name: "RenderTarget: made by its size, a copy the same target",
-                  why: w == 37 && h == 23 && aw == 37 ? "" : "${w}x${h}, its copy ${aw} wide");
+        found.add(name: "RenderTarget: made by its size, and shared: another holder names the same target",
+                  why: w == 37 && h == 23 && aw == 37 ? "" : "${w}x${h}, the other holder's ${aw} wide");
     }
 }
 
@@ -130,7 +130,7 @@ type resource RendererRun {
     Device device;                            // the test's own handle, for its error channel
     Queue queue;
     Optional<Renderer> renderer = Optional::None;
-    Optional<RenderTarget> target = Optional::None;
+    Optional<Shared<RenderTarget>> target = Optional::None;
     Optional<PixelRead> reading = Optional::None;
     Optional<Image> image = Optional::None;   // the last read's image
     string failed = "";                       // or why the last read failed
@@ -176,7 +176,7 @@ type resource RendererRun {
         };
     }
 
-    unsafe fn void clearAndRead(ref Renderer renderer, ref RenderTarget target) {
+    unsafe fn void clearAndRead(ref Renderer renderer, Shared<RenderTarget> target) {
         renderer.clear(target: target);
         this.reading = Optional::Some(value: renderer.readRenderTargetPixels(target: target));
     }
@@ -186,7 +186,7 @@ type resource RendererRun {
         if (this.stage == 0) {
             // a target cleared to #336699 reads back as written
             Renderer r = Renderer.withDevice(device: copy this.device, queue: copy this.queue);
-            RenderTarget t = RenderTarget.make(width: 37, height: 23);
+            Shared<RenderTarget> t = new RenderTarget.make(width: 37, height: 23);
             r.clearColorMut() = Color.fromHex(hex: 0x336699);
             this.clearAndRead(renderer: r, target: t);
             this.renderer = Optional::Some(value: give r);
@@ -232,9 +232,9 @@ type resource RendererRun {
                     r.clearAlphaMut() = 0.4;
                     match (this.target) {
                         case Some(value: t): {
-                            RenderTarget alias = copy t;
+                            Shared<RenderTarget> alias = copy t;
                             r.clear(target: alias);
-                            this.reading = Optional::Some(value: r.readRenderTargetPixels(target: t));
+                            this.reading = Optional::Some(value: r.readRenderTargetPixels(target: copy t));
                         }
                         case None: { }
                     };
@@ -244,13 +244,13 @@ type resource RendererRun {
             this.next(to: 3);
         } else if (this.stage == 3) {
             if (!this.settled()) { return false; }
-            this.found.add(name: "readback: the clear colour is the one set when clearing, its alpha 0.4 is 102 and not sRGB-encoded, and a copy of a target clears the target",
+            this.found.add(name: "readback: the clear colour is the one set when clearing, its alpha 0.4 is 102 and not sRGB-encoded, and another holder of a target clears the target",
                            why: this.read(width: 37, height: 23, r: 0xff, g: 0x80, b: 0x00, a: 102));
             this.reading = Optional::None;
             // a target never cleared
             match (this.renderer) {
                 case Some(value: r): {
-                    RenderTarget fresh = RenderTarget.make(width: 1, height: 1);
+                    Shared<RenderTarget> fresh = new RenderTarget.make(width: 1, height: 1);
                     this.reading = Optional::Some(value: r.readRenderTargetPixels(target: fresh));
                 }
                 case None: { }
@@ -265,8 +265,8 @@ type resource RendererRun {
                 case Some(value: r): {
                     match (this.target) {
                         case Some(value: t): {
-                            PixelRead dropped = r.readRenderTargetPixels(target: t);
-                            this.reading = Optional::Some(value: r.readRenderTargetPixels(target: t));
+                            PixelRead dropped = r.readRenderTargetPixels(target: copy t);
+                            this.reading = Optional::Some(value: r.readRenderTargetPixels(target: copy t));
                         }
                         case None: { }
                     };
@@ -284,7 +284,7 @@ type resource RendererRun {
             float32 alpha = second.clearAlpha();
             this.found.add(name: "Renderer: its clear colour is black and its alpha 1, as three.js's",
                            why: hex == 0 && alpha == 1.0 ? "" : "the colour ${hex}, the alpha ${alpha}");
-            RenderTarget small = RenderTarget.make(width: 3, height: 2);
+            Shared<RenderTarget> small = new RenderTarget.make(width: 3, height: 2);
             this.clearAndRead(renderer: second, target: small);
             this.next(to: 6);
         } else if (this.stage == 6) {

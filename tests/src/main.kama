@@ -1,7 +1,9 @@
 // @kama/graphics' tests, one program (AGENTS.package.md). First, on every leg and with no GPU, the golden harness's own
-// cases (tests/src/harness.kama) and `Color`'s (tests/src/renderer.kama). Then, a step a tick on the leg's GPU, opened
-// once (tests/src/open.kama): the harness end to end (tests/src/scene.kama), and the `Renderer` that clears a target and
-// reads it back (tests/src/renderer.kama), each on its own handle to the one device.
+// cases (tests/src/harness.kama), `Color`'s (tests/src/renderer.kama), and part 2's: `Euler`, `BoxGeometry`, the camera,
+// `MeshBasicMaterial` and the tree (tests/src/parts.kama). Then, a step a tick on the leg's GPU, opened once
+// (tests/src/open.kama): the harness end to end (tests/src/scene.kama), the `Renderer` that clears a target and reads it
+// back (tests/src/renderer.kama), and scenes rendered and read back (tests/src/boxes.kama), each on its own handle to the
+// one device.
 //
 // A leg names its software GPU with `--golden warp` or `--golden swiftshader` (kyoten's rendering.md § Decided, GFX-1's
 // part 1, question 3). There every frame is held to its golden, `tests/goldens/<test>/<gpu>.png`, byte for byte. A leg
@@ -20,7 +22,7 @@ import {
     std::app::App, std::app::Lifecycle, std::app::run, std::app::quit,
     std::memory::Owned, std::memory::replace,
     gpu::Device, gpu::Queue,
-    Verdicts, harnessCases, colorCases, GpuOpen, GoldenRun, RendererRun,
+    Verdicts, harnessCases, colorCases, partCases, GpuOpen, GoldenRun, RendererRun, BoxesRun,
 };
 
 // The software GPUs a leg can name: WARP, natively on Windows and as Firefox's fallback adapter, and SwiftShader, as
@@ -49,18 +51,20 @@ type resource Check implements App {
     string gpu;
     int32 declared = 0;
     int32 matched = 0;
-    int32 stage = 0;     // 0 the device, 1 the scene, 2 the renderer, 3 done
+    int32 stage = 0;     // 0 the device, 1 the scene, 2 the renderer, 3 the boxes, 4 done
     Optional<GpuOpen> opening = Optional::None;
     Optional<Device> device = Optional::None;
     Optional<Queue> queue = Optional::None;
     bool software = false;
     Optional<GoldenRun> scene = Optional::None;
     Optional<RendererRun> rendering = Optional::None;
+    Optional<BoxesRun> boxes = Optional::None;
 
     public unsafe ctor make() {
         Verdicts found = Verdicts.make();
         harnessCases(found: ref found);
         colorCases(found: ref found);
+        partCases(found: ref found);
         this.report(found: found);
         string named = goldenArgument();
         if (named.isEmpty() || knownGpu(gpu: named)) {
@@ -100,7 +104,8 @@ type resource Check implements App {
         if (this.stage == 0) { this.openStep(); }
         if (this.stage == 1) { this.sceneStep(); }
         if (this.stage == 2) { this.rendererStep(); }
-        if (this.stage == 3) { return this.finish(); }
+        if (this.stage == 3) { this.boxesStep(); }
+        if (this.stage == 4) { return this.finish(); }
         return 1;
     }
 
@@ -118,7 +123,7 @@ type resource Check implements App {
         this.queue = pending.takeQueue();
         if (this.device.isNone() || this.queue.isNone()) {
             this.verdict(name: "a device for the GPU cases", why: "none was opened, so no GPU case ran");
-            this.stage = 3;
+            this.stage = 4;
             return;
         }
         this.stage = 1;
@@ -153,10 +158,26 @@ type resource Check implements App {
         if (!done) { this.rendering = Optional::Some(value: give pending); return; }
         this.declared = this.declared + pending.declared();
         this.matched = this.matched + pending.matched();
+        this.stage = 3;
+    }
+
+    // Scenes rendered and read back (tests/src/boxes.kama), a step this tick.
+    unsafe fn void boxesStep() {
+        Optional<BoxesRun> taken = replace(place: this.boxes, with: Optional::None);
+        BoxesRun pending = match (give taken) {
+            case Some(value: r): give r;
+            case None: BoxesRun.make(gpu: copy this.gpu, software: this.software, device: this.deviceCopy(), queue: this.queueCopy());
+        };
+        bool done = pending.step();
+        this.report(found: pending.verdicts());
+        pending.verdicts().clear();
+        if (!done) { this.boxes = Optional::Some(value: give pending); return; }
+        this.declared = this.declared + pending.declared();
+        this.matched = this.matched + pending.matched();
         this.queue = Optional::None;
         this.device = Optional::None;
         println(s: "gpu cases: all run");
-        this.stage = 3;
+        this.stage = 4;
     }
 
     // A handle of its own to the one device, and to its queue: a copy is another reference to the same one.

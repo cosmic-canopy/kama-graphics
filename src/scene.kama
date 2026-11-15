@@ -1,0 +1,768 @@
+// The scene graph on the flat core (kyoten's rendering.md § Decided: the design pass's area 1, and GFX-1's part 2).
+//
+// - **Typed kinds behind one contract:** `Scene`, `Group`, `Mesh` and `PerspectiveCamera` each embed a `NodePart` (the
+//   transform, three.js's API over it, and the node's place in the tree) and implement `Object3D`, which the tree holds.
+//   A program keeps a typed `Shared<Mesh>` to the same object (area 1, item 4).
+// - **Held through `Shared`, with a `Weak` link up** (area 1, item 3). Nothing reaches the `Shared` holding `this`
+//   (kyoten's KY-58), so each node owns a small shared `Anchor` (its children, its world matrix, its marks), and a child
+//   links to its parent's anchor. `add` stays a method; `parent()` waits on KY-58.
+// - **The transform is inline in the node,** since a `ref` handed out must point into `this`: `positionMut()` and the
+//   rest mark the node changed, so a program never sets a needs-update flag (area 2, item 3).
+// - **Rotation both ways** (part 2, question 1): `rotation` an `Euler`, `quaternion` a std::math `Quat`, the last written
+//   winning; the Euler made from a quaternion is the one nearest the node's last (`Euler.nearest`), and every turn goes
+//   through the quaternion.
+// - **Change marks:** a write marks the node and each ancestor's anchor up to the first already marked, and the render
+//   walk enters only a subtree that moved or holds a mark, so an unchanged scene costs nothing to walk (measured,
+//   part 2's question 3). three.js remakes every node's world matrix every frame.
+// - **The flat core** (area 1, item 1; area 3, item 4): each mesh in a scene owns a record in the scene's table, its world
+//   matrix, geometry and material, written when it changed and freed when the mesh leaves the scene. The table reaches
+//   the GPU as one storage buffer, written where it changed. It stays internal until an engine first drives it.
+//
+// World-space helpers (`rotateOnWorldAxis`, `lookAt`) read a parent's world matrix as of the last render.
+
+import {
+    std::collections::DynamicArray,
+    std::math::Vec3, std::math::Vec4, std::math::Quat, std::math::Mat4, std::math::sqrt, std::math::tan,
+    gpu::Device, gpu::Queue, gpu::Buffer, gpu::BufferDescriptor, gpu::BufferUsage,
+    Euler, EulerOrder, Geometry, Material, RenderTarget, Renderer,
+};
+export { Object3D, NodePart, Walk, Scene, Group, Mesh, PerspectiveCamera };
+
+comptime isize RECORD_BYTES = 64;   // an object's record: its world matrix, as WGSL's mat4x4f
+
+fn void putFloat(ref DynamicArray<uint8> into, float32 value) {
+    uint32 bits = bitcast<uint32>(value);
+    into.add(item: truncate<uint8>(bits));
+    into.add(item: truncate<uint8>(bits >> 8));
+    into.add(item: truncate<uint8>(bits >> 16));
+    into.add(item: truncate<uint8>(bits >> 24));
+}
+
+fn void putMatrix(ref DynamicArray<uint8> into, const ref Mat4 m) {
+    for (int32 c = 0; c < 4; c = c + 1) {
+        for (int32 r = 0; r < 4; r = r + 1) { putFloat(into: ref into, value: m.get(c: c, r: r)); }
+    }
+}
+
+// The local matrix of a position, a rotation and a scale, as three.js's `compose`.
+fn Mat4 composed(Vec3 position, Quat rotation, Vec3 scale) {
+    return Mat4.translation(t: position) * rotation.toMat4() * Mat4.scale(s: scale);
+}
+
+// A rotation from three orthonormal axes, as three.js's `setFromRotationMatrix`.
+fn Quat fromAxes(Vec3 x, Vec3 y, Vec3 z) {
+    float32 m11 = x.x; float32 m12 = y.x; float32 m13 = z.x;
+    float32 m21 = x.y; float32 m22 = y.y; float32 m23 = z.y;
+    float32 m31 = x.z; float32 m32 = y.z; float32 m33 = z.z;
+    float32 trace = m11 + m22 + m33;
+    if (trace > 0.0) {
+        float32 s = 0.5 / sqrt(x: trace + 1.0);
+        return Quat.of(x: (m32 - m23) * s, y: (m13 - m31) * s, z: (m21 - m12) * s, w: 0.25 / s);
+    }
+    if (m11 > m22 && m11 > m33) {
+        float32 s = 2.0 * sqrt(x: 1.0 + m11 - m22 - m33);
+        return Quat.of(x: 0.25 * s, y: (m12 + m21) / s, z: (m13 + m31) / s, w: (m32 - m23) / s);
+    }
+    if (m22 > m33) {
+        float32 s = 2.0 * sqrt(x: 1.0 + m22 - m11 - m33);
+        return Quat.of(x: (m12 + m21) / s, y: 0.25 * s, z: (m23 + m32) / s, w: (m13 - m31) / s);
+    }
+    float32 s = 2.0 * sqrt(x: 1.0 + m33 - m11 - m22);
+    return Quat.of(x: (m13 + m31) / s, y: (m23 + m32) / s, z: 0.25 * s, w: (m21 - m12) / s);
+}
+
+// A matrix's rotation as a quaternion, its scale taken out.
+fn Quat rotationOf(const ref Mat4 m) {
+    Vec3 x = Vec3.of(x: m.get(c: 0, r: 0), y: m.get(c: 0, r: 1), z: m.get(c: 0, r: 2)).normalized();
+    Vec3 y = Vec3.of(x: m.get(c: 1, r: 0), y: m.get(c: 1, r: 1), z: m.get(c: 1, r: 2)).normalized();
+    Vec3 z = Vec3.of(x: m.get(c: 2, r: 0), y: m.get(c: 2, r: 1), z: m.get(c: 2, r: 2)).normalized();
+    return fromAxes(x: x, y: y, z: z);
+}
+
+// ---- the flat core ----
+
+// A scene's records on one device: its storage buffer and which records changed since it was last written.
+type resource TableGpu {
+    UnsafePtr device;
+    Buffer buffer;
+    isize capacity;
+    public unsafe ctor make(UnsafePtr device, Buffer buffer, isize capacity) {
+        this.device = device;
+        this.buffer = give buffer;
+        this.capacity = capacity;
+    }
+    public unsafe const fn UnsafePtr on() { return this.device; }
+    public const fn isize room() { return this.capacity; }
+    public unsafe fn Buffer records() { return copy this.buffer; }
+}
+
+// The packed records under a scene: a mesh's slot is its own while it is in the scene.
+type resource CoreTable {
+    DynamicArray<Mat4> worlds;
+    DynamicArray<Optional<Shared<Geometry>>> geometries;
+    DynamicArray<Optional<Shared<Material>>> materials;
+    DynamicArray<isize> free;
+    DynamicArray<isize> dirty;   // records written since the GPU's copy was
+    bool rewrite = true;         // the GPU's copy is to be written whole
+    Optional<TableGpu> gpu = Optional::None;
+
+    public ctor make() {
+        this.worlds = DynamicArray.empty();
+        this.geometries = DynamicArray.empty();
+        this.materials = DynamicArray.empty();
+        this.free = DynamicArray.empty();
+        this.dirty = DynamicArray.empty();
+    }
+
+    public unsafe fn isize take() {
+        Optional<isize> reused = this.free.pop();
+        isize slot = match (reused) { case Some(value: s): s; case None: -1; };
+        if (slot >= 0) { return slot; }
+        this.worlds.add(item: Mat4.identity());
+        this.geometries.add(item: Optional::None);
+        this.materials.add(item: Optional::None);
+        return this.worlds.length() - 1;
+    }
+    public unsafe fn void release(isize slot) {
+        Optional<Shared<Geometry>> noShape = Optional::None;
+        Optional<Shared<Material>> noLook = Optional::None;
+        this.geometries[slot] = give noShape;
+        this.materials[slot] = give noLook;
+        this.free.add(item: slot);
+    }
+    public unsafe fn void write(isize slot, Mat4 world, Shared<Geometry> geometry, Shared<Material> material) {
+        Optional<Shared<Geometry>> shape = Optional::Some(value: give geometry);
+        Optional<Shared<Material>> look = Optional::Some(value: give material);
+        this.worlds[slot] = world;
+        this.geometries[slot] = give shape;
+        this.materials[slot] = give look;
+        this.dirty.add(item: slot);
+    }
+
+    public const fn isize slots() { return this.worlds.length(); }
+    public const fn bool live(isize slot) { return this.geometries[slot].isSome(); }
+    public const fn isize liveCount() { return this.worlds.length() - this.free.length(); }
+    public unsafe fn Shared<Geometry> geometryAt(isize slot) {
+        return match (this.geometries[slot]) { case Some(value: g): copy g; case None: { panic(msg: "no geometry in a free slot"); } };
+    }
+    public unsafe fn Shared<Material> materialAt(isize slot) {
+        return match (this.materials[slot]) { case Some(value: m): copy m; case None: { panic(msg: "no material in a free slot"); } };
+    }
+
+    // The records on `device`, written where they changed: whole when the buffer is new, grown or another device's.
+    public unsafe fn Buffer recordsOn(ref Device device, ref Queue queue) {
+        isize need = this.worlds.length() < 64 ? 64 : this.worlds.length();
+        bool fresh = match (this.gpu) {
+            case Some(value: g): g.on() != device.raw() || g.room() < need;
+            case None: true;
+        };
+        if (fresh) {
+            isize capacity = 64;
+            while (capacity < need) { capacity = capacity * 2; }
+            BufferDescriptor described = BufferDescriptor.make(size: cast<uint64>(capacity * RECORD_BYTES),
+                                                               usage: BufferUsage::Storage | BufferUsage::CopyDst);
+            described.label(text: "a scene's object records");
+            Buffer made = device.createBuffer(descriptor: give described);
+            this.gpu = Optional::Some(value: TableGpu.make(device: device.raw(), buffer: give made, capacity: capacity));
+            this.rewrite = true;
+        }
+        Buffer target = match (this.gpu) { case Some(value: g): g.records(); case None: { panic(msg: "the records were just made"); } };
+        if (this.rewrite) {
+            DynamicArray<uint8> all = DynamicArray.empty();
+            for (isize s = 0; s < this.worlds.length(); s = s + 1) { putMatrix(into: ref all, m: this.worlds[s]); }
+            if (all.length() > 0) { queue.writeBuffer(buffer: target, offset: 0, data: all.view()); }
+        } else {
+            for (isize i = 0; i < this.dirty.length(); i = i + 1) {
+                isize s = this.dirty[i];
+                DynamicArray<uint8> one = DynamicArray.empty();
+                putMatrix(into: ref one, m: this.worlds[s]);
+                queue.writeBuffer(buffer: target, offset: cast<uint64>(s * RECORD_BYTES), data: one.view());
+            }
+        }
+        this.rewrite = false;
+        this.dirty.clear();
+        return target;
+    }
+}
+
+// A mesh's record in a scene's table, freed when it is dropped: when the mesh leaves the scene, or is dropped itself.
+type resource Instance {
+    Shared<CoreTable> table;
+    isize slot;
+    public unsafe ctor make(Shared<CoreTable> table) {
+        this.slot = table.take();
+        this.table = give table;
+    }
+    ~Instance() { this.table.release(slot: this.slot); }
+    public const fn isize at() { return this.slot; }
+    public unsafe const fn bool inTable(const ref CoreTable other) { return addr(of: this.table.deref()) == addr(of: other); }
+}
+
+// What one render's walk carries: the scene's table, and how many world matrices it made. Only a renderer makes one.
+type resource Walk {
+    Shared<CoreTable> table;
+    int32 made = 0;
+
+    friend Scene[make, matrices];
+    friend NodePart[counted];
+    friend Mesh[push];
+
+    ctor make(Shared<CoreTable> table) { this.table = give table; }
+    const fn int32 matrices() { return this.made; }
+    fn void counted() { this.made = this.made + 1; }
+
+    // A mesh's record written: in its instance, made the first time and again when the mesh came from another scene.
+    unsafe fn void push(ref Optional<Instance> instance, Mat4 world, Shared<Geometry> geometry, Shared<Material> material) {
+        bool fresh = match (instance) {
+            case Some(value: i): !i.inTable(other: this.table.deref());
+            case None: true;
+        };
+        if (fresh) {
+            instance = Optional::None;
+            instance = Optional::Some(value: Instance.make(table: copy this.table));
+        }
+        isize slot = match (instance) { case Some(value: i): i.at(); case None: -1; };
+        this.table.write(slot: slot, world: world, geometry: give geometry, material: give material);
+    }
+}
+
+// ---- the tree ----
+
+// What a node's children reach through a `Weak`: its children, its world matrix as of the last render, and whether a
+// node below it changed since.
+type resource Anchor {
+    DynamicArray<Shared<Object3D>> kids;
+    Optional<Weak<Anchor>> up;
+    Mat4 world;
+    bool below = false;
+
+    public ctor make() {
+        this.kids = DynamicArray.empty();
+        this.up = Optional::None;
+        this.world = Mat4.identity();
+    }
+    public const fn isize count() { return this.kids.length(); }
+    public unsafe const fn Shared<Object3D> at(isize i) { return copy this.kids[i]; }
+    public unsafe fn void push(Shared<Object3D> o) { this.kids.add(item: o); }
+    public unsafe fn void dropAt(isize i) { Shared<Object3D> gone = this.kids.remove(index: i); }
+    public fn void link(Optional<Weak<Anchor>> w) { this.up = give w; }
+    public unsafe const fn Optional<Weak<Anchor>> upLink() { return copy this.up; }
+    public const fn bool linked() { return this.up.isSome(); }
+    public const fn bool hasBelow() { return this.below; }
+    public fn void setBelow(bool on) { this.below = on; }
+    public const fn Mat4 worldMatrix() { return this.world; }
+    public fn void setWorld(Mat4 m) { this.world = m; }
+}
+
+// Marks each anchor from `start` up as having a change below it, stopping at the first already marked.
+unsafe fn void markAbove(Optional<Weak<Anchor>> start) {
+    Optional<Weak<Anchor>> at = give start;
+    bool going = true;
+    while (going) {
+        going = false;
+        Optional<Weak<Anchor>> next = Optional::None;
+        match (at) {
+            case Some(value: w): {
+                Weak<Anchor> mine = copy w;
+                match (mine.tryUpgrade()) {
+                    case Some(value: a): {
+                        if (!a.hasBelow()) { a.setBelow(on: true); next = a.upLink(); going = true; }
+                    }
+                    case None: { }
+                };
+            }
+            case None: { }
+        };
+        at = give next;
+    }
+}
+
+// The parent's world matrix as of the last render, or the identity with no parent.
+unsafe fn Mat4 parentWorldOf(Optional<Weak<Anchor>> up) {
+    Mat4 world = Mat4.identity();
+    match (up) {
+        case Some(value: w): {
+            Weak<Anchor> mine = copy w;
+            match (mine.tryUpgrade()) { case Some(value: a): { world = a.worldMatrix(); } case None: { } };
+        }
+        case None: { }
+    };
+    return world;
+}
+
+// Every kind of node, as the tree holds it: its node part, and what the render walk does at it. A program reaches a
+// node's transform through its typed handle, or through `node()`/`nodeMut()` here.
+type contract Object3D for resource {
+    const fn const ref NodePart node();
+    fn ref NodePart nodeMut();
+    fn void place(ref Walk walk, Mat4 parentWorld, bool parentMoved);
+}
+
+// What every kind of node embeds: its transform, three.js's API over it, and its place in the tree.
+type resource NodePart {
+    Vec3 pos;
+    Euler rot;
+    Quat quat;
+    Vec3 scl;
+    int8 written = 0;            // 0 rotation and quaternion agree, 1 the Euler was handed out last, 2 the quaternion
+    bool changed = true;         // the local transform changed since the world matrix was last made
+    bool looksBack = false;      // a camera: `lookAt` aims its -Z at the target, as three.js's cameras do
+    Shared<Anchor> anch;
+    Optional<Instance> drawn = Optional::None;   // a mesh's record in its scene's table, while it has one
+
+    friend Scene[...];
+    friend Group[...];
+    friend Mesh[...];
+    friend PerspectiveCamera[...];
+    friend Renderer::render[...];
+
+    unsafe ctor make() {
+        this.pos = Vec3.zero();
+        this.rot = Euler.make(xRad: 0.0, yRad: 0.0, zRad: 0.0, order: EulerOrder::XYZ);
+        this.quat = Quat.identity();
+        this.scl = Vec3.one();
+        Shared<Anchor> a = new Anchor.make();
+        this.anch = give a;
+    }
+
+    // ---- three.js's API ----
+
+    public const fn Vec3 position() { return this.pos; }
+    public unsafe fn ref Vec3 positionMut() { this.touched(); return this.pos; }
+    public const fn Vec3 scale() { return this.scl; }
+    public unsafe fn ref Vec3 scaleMut() { this.touched(); return this.scl; }
+
+    // The Euler, nearest the node's last when it is made from a quaternion written since.
+    public const fn Euler rotation() {
+        if (this.written == 2) { return Euler.nearest(q: this.quat, near: this.rot); }
+        return this.rot;
+    }
+    public unsafe fn ref Euler rotationMut() {
+        if (this.written == 2) { this.rot = Euler.nearest(q: this.quat, near: this.rot); }
+        this.written = 1;
+        this.touched();
+        return this.rot;
+    }
+    public const fn Quat quaternion() {
+        if (this.written == 1) { return this.rot.quaternion(); }
+        return this.quat;
+    }
+    public unsafe fn ref Quat quaternionMut() {
+        if (this.written == 1) { this.quat = this.rot.quaternion(); }
+        this.written = 2;
+        this.touched();
+        return this.quat;
+    }
+
+    // Turns about the node's own axes, through the quaternion.
+    public unsafe fn void rotateOnAxis(Vec3 axis, float32 rad) {
+        Quat now = this.quaternion();
+        this.quaternionMut() = now * Quat.fromAxisAngle(axis: axis.normalized(), rad: rad);
+    }
+    public unsafe fn void rotateX(float32 rad) { this.rotateOnAxis(axis: Vec3.unitX(), rad: rad); }
+    public unsafe fn void rotateY(float32 rad) { this.rotateOnAxis(axis: Vec3.unitY(), rad: rad); }
+    public unsafe fn void rotateZ(float32 rad) { this.rotateOnAxis(axis: Vec3.unitZ(), rad: rad); }
+
+    // A turn about an axis in world space, through the parent's world rotation as of the last render.
+    public unsafe fn void rotateOnWorldAxis(Vec3 axis, float32 rad) {
+        Mat4 parent = parentWorldOf(up: this.anch.upLink());
+        Quat inParent = rotationOf(m: parent);
+        Vec3 local = inParent.conjugate().rotate(v: axis.normalized());
+        Quat now = this.quaternion();
+        this.quaternionMut() = Quat.fromAxisAngle(axis: local, rad: rad) * now;
+    }
+
+    // Turns the node to face `target`, a point in world space, as three.js's `lookAt`: its +Z at the target, or a
+    // camera's -Z, with world +Y up.
+    public unsafe fn void lookAt(Vec3 target) {
+        Mat4 parent = parentWorldOf(up: this.anch.upLink());
+        Vec3 here = parent.transformPoint(p: this.pos);
+        Vec3 z = this.looksBack ? here - target : target - here;
+        if (z.lengthSq() == 0.0) { z = Vec3.unitZ(); }
+        z = z.normalized();
+        Vec3 up = Vec3.unitY();
+        Vec3 x = up.cross(r: z);
+        if (x.lengthSq() == 0.0) {
+            // looking straight up or down: nudge, as three.js does
+            z = Vec3.of(x: z.x + 0.0001, y: z.y, z: z.z).normalized();
+            x = up.cross(r: z);
+        }
+        x = x.normalized();
+        Vec3 y = z.cross(r: x);
+        Quat world = fromAxes(x: x, y: y, z: z);
+        this.quaternionMut() = rotationOf(m: parent).conjugate() * world;
+    }
+
+    // Adds a child, taking it from any parent it had, as three.js's `add`. A node is never added under itself or under
+    // one of its own children: that would make a loop the scene could never walk or free.
+    public unsafe fn void add(Shared<Object3D> object) {
+        if (this.inside(other: object.node())) {
+            panic(msg: "@kama/graphics: a node cannot be added under itself or one of its children");
+        }
+        object.nodeMut().detach();
+        object.nodeMut().linkTo(up: this.anch.downgrade());
+        this.anch.push(o: object);
+        this.anch.setBelow(on: true);
+        markAbove(start: this.anch.upLink());
+    }
+
+    // Removes a child, as three.js's `remove`; a node that is not a child is left alone.
+    public unsafe fn void remove(Shared<Object3D> object) {
+        for (isize i = 0; i < this.anch.count(); i = i + 1) {
+            Shared<Object3D> k = this.anch.at(i: i);
+            if (addr(of: k.node().anch.deref()) == addr(of: object.node().anch.deref())) {
+                object.nodeMut().detach();
+                return;
+            }
+        }
+    }
+
+    public const fn isize childCount() { return this.anch.count(); }
+    public unsafe const fn Shared<Object3D> child(isize index) { return this.anch.at(i: index); }
+
+    // The world matrix as of the last render.
+    public const fn Mat4 matrixWorld() { return this.anch.worldMatrix(); }
+
+    // ---- the walk ----
+
+    // Marks this node changed, and each ancestor as having a change below it.
+    unsafe fn void touched() {
+        if (this.changed) { return; }
+        this.changed = true;
+        markAbove(start: this.anch.upLink());
+    }
+
+    // Whether `other`'s node is this one, or an ancestor of it.
+    unsafe fn bool inside(const ref NodePart other) {
+        if (addr(of: this.anch.deref()) == addr(of: other.anch.deref())) { return true; }
+        Optional<Weak<Anchor>> at = this.anch.upLink();
+        bool going = true;
+        while (going) {
+            going = false;
+            Optional<Weak<Anchor>> next = Optional::None;
+            match (at) {
+                case Some(value: w): {
+                    Weak<Anchor> mine = copy w;
+                    match (mine.tryUpgrade()) {
+                        case Some(value: a): {
+                            if (addr(of: a.deref()) == addr(of: other.anch.deref())) { return true; }
+                            next = a.upLink();
+                            going = true;
+                        }
+                        case None: { }
+                    };
+                }
+                case None: { }
+            };
+            at = give next;
+        }
+        return false;
+    }
+
+    // Leaves the parent, if any, and gives up every record this node and those below it hold in a scene.
+    unsafe fn void detach() {
+        Optional<Weak<Anchor>> up = this.anch.upLink();
+        match (up) {
+            case Some(value: w): {
+                Weak<Anchor> mine = copy w;
+                match (mine.tryUpgrade()) {
+                    case Some(value: parent): {
+                        for (isize i = 0; i < parent.count(); i = i + 1) {
+                            Shared<Object3D> k = parent.at(i: i);
+                            if (addr(of: k.node().anch.deref()) == addr(of: this.anch.deref())) { parent.dropAt(i: i); break; }
+                        }
+                    }
+                    case None: { }
+                };
+            }
+            case None: { }
+        };
+        this.anch.link(w: Optional::None);
+        this.changed = true;
+        this.dropDraws();
+    }
+
+    unsafe fn void linkTo(Weak<Anchor> up) {
+        this.anch.link(w: Optional::Some(value: give up));
+        this.changed = true;
+    }
+
+    unsafe fn void dropDraws() {
+        this.drawn = Optional::None;
+        for (isize i = 0; i < this.anch.count(); i = i + 1) {
+            Shared<Object3D> k = this.anch.at(i: i);
+            k.nodeMut().dropDraws();
+        }
+    }
+
+    // The world matrix made again where this node or one above it changed: true when it was.
+    unsafe fn bool placeSelf(ref Walk walk, Mat4 parentWorld, bool parentMoved) {
+        bool moved = parentMoved || this.changed;
+        if (moved) {
+            this.anch.setWorld(m: parentWorld * composed(position: this.pos, rotation: this.quaternion(), scale: this.scl));
+            this.changed = false;
+            walk.counted();
+        }
+        return moved;
+    }
+
+    // The children, entered only when this node moved or one below it changed.
+    unsafe fn void placeKids(ref Walk walk, bool moved) {
+        if (!moved && !this.anch.hasBelow()) { return; }
+        this.anch.setBelow(on: false);
+        Mat4 w = this.anch.worldMatrix();
+        for (isize i = 0; i < this.anch.count(); i = i + 1) {
+            Shared<Object3D> k = this.anch.at(i: i);
+            k.place(walk: ref walk, parentWorld: w, parentMoved: moved);
+        }
+    }
+
+    // The world matrix of a node in no scene, made now from its own transform.
+    unsafe fn void placeAlone() {
+        if (this.anch.linked()) { return; }
+        this.anch.setWorld(m: composed(position: this.pos, rotation: this.quaternion(), scale: this.scl));
+        this.changed = false;
+    }
+}
+
+// ---- the kinds ----
+
+// The root a renderer draws: its tree, and the flat core of its meshes' records.
+type resource Scene implements Object3D {
+    NodePart part;
+    Shared<CoreTable> table;
+
+    friend Renderer::render[walkAll, recordsOn, drawSlots, geometryAt, materialAt, objects];
+
+    public unsafe ctor make() {
+        this.part = NodePart.make();
+        Shared<CoreTable> t = new CoreTable.make();
+        this.table = give t;
+    }
+
+    public const fn const ref NodePart node() { return this.part; }
+    public fn ref NodePart nodeMut() { return this.part; }
+    public unsafe fn void place(ref Walk walk, Mat4 parentWorld, bool parentMoved) {
+        bool moved = this.part.placeSelf(walk: ref walk, parentWorld: parentWorld, parentMoved: parentMoved);
+        this.part.placeKids(walk: ref walk, moved: moved);
+    }
+
+    // The walk, as a render runs it: the world matrices made, and the meshes' records written, where they changed.
+    unsafe fn int32 walkAll() {
+        Walk walk = Walk.make(table: copy this.table);
+        this.place(walk: ref walk, parentWorld: Mat4.identity(), parentMoved: false);
+        return walk.matrices();
+    }
+    unsafe fn Buffer recordsOn(ref Device device, ref Queue queue) { return this.table.recordsOn(device: ref device, queue: ref queue); }
+    // The slots that hold a record, in order.
+    unsafe fn DynamicArray<isize> drawSlots() {
+        DynamicArray<isize> slots = DynamicArray.empty();
+        for (isize s = 0; s < this.table.slots(); s = s + 1) { if (this.table.live(slot: s)) { slots.add(item: s); } }
+        return slots;
+    }
+    unsafe fn Shared<Geometry> geometryAt(isize slot) { return this.table.geometryAt(slot: slot); }
+    unsafe fn Shared<Material> materialAt(isize slot) { return this.table.materialAt(slot: slot); }
+    const fn isize objects() { return this.table.liveCount(); }
+
+    public const fn Vec3 position() { return this.part.position(); }
+    public unsafe fn ref Vec3 positionMut() { return this.part.positionMut(); }
+    public const fn Euler rotation() { return this.part.rotation(); }
+    public unsafe fn ref Euler rotationMut() { return this.part.rotationMut(); }
+    public const fn Quat quaternion() { return this.part.quaternion(); }
+    public unsafe fn ref Quat quaternionMut() { return this.part.quaternionMut(); }
+    public const fn Vec3 scale() { return this.part.scale(); }
+    public unsafe fn ref Vec3 scaleMut() { return this.part.scaleMut(); }
+    public unsafe fn void rotateX(float32 rad) { this.part.rotateX(rad: rad); }
+    public unsafe fn void rotateY(float32 rad) { this.part.rotateY(rad: rad); }
+    public unsafe fn void rotateZ(float32 rad) { this.part.rotateZ(rad: rad); }
+    public unsafe fn void rotateOnAxis(Vec3 axis, float32 rad) { this.part.rotateOnAxis(axis: axis, rad: rad); }
+    public unsafe fn void rotateOnWorldAxis(Vec3 axis, float32 rad) { this.part.rotateOnWorldAxis(axis: axis, rad: rad); }
+    public unsafe fn void lookAt(Vec3 target) { this.part.lookAt(target: target); }
+    public unsafe fn void add(Shared<Object3D> object) { this.part.add(object: object); }
+    public unsafe fn void remove(Shared<Object3D> object) { this.part.remove(object: object); }
+    public const fn isize childCount() { return this.part.childCount(); }
+    public unsafe const fn Shared<Object3D> child(isize index) { return this.part.child(index: index); }
+    public const fn Mat4 matrixWorld() { return this.part.matrixWorld(); }
+}
+
+// A node that only holds others, as three.js's `Group`.
+type resource Group implements Object3D {
+    NodePart part;
+
+    public unsafe ctor make() { this.part = NodePart.make(); }
+
+    public const fn const ref NodePart node() { return this.part; }
+    public fn ref NodePart nodeMut() { return this.part; }
+    public unsafe fn void place(ref Walk walk, Mat4 parentWorld, bool parentMoved) {
+        bool moved = this.part.placeSelf(walk: ref walk, parentWorld: parentWorld, parentMoved: parentMoved);
+        this.part.placeKids(walk: ref walk, moved: moved);
+    }
+
+    public const fn Vec3 position() { return this.part.position(); }
+    public unsafe fn ref Vec3 positionMut() { return this.part.positionMut(); }
+    public const fn Euler rotation() { return this.part.rotation(); }
+    public unsafe fn ref Euler rotationMut() { return this.part.rotationMut(); }
+    public const fn Quat quaternion() { return this.part.quaternion(); }
+    public unsafe fn ref Quat quaternionMut() { return this.part.quaternionMut(); }
+    public const fn Vec3 scale() { return this.part.scale(); }
+    public unsafe fn ref Vec3 scaleMut() { return this.part.scaleMut(); }
+    public unsafe fn void rotateX(float32 rad) { this.part.rotateX(rad: rad); }
+    public unsafe fn void rotateY(float32 rad) { this.part.rotateY(rad: rad); }
+    public unsafe fn void rotateZ(float32 rad) { this.part.rotateZ(rad: rad); }
+    public unsafe fn void rotateOnAxis(Vec3 axis, float32 rad) { this.part.rotateOnAxis(axis: axis, rad: rad); }
+    public unsafe fn void rotateOnWorldAxis(Vec3 axis, float32 rad) { this.part.rotateOnWorldAxis(axis: axis, rad: rad); }
+    public unsafe fn void lookAt(Vec3 target) { this.part.lookAt(target: target); }
+    public unsafe fn void add(Shared<Object3D> object) { this.part.add(object: object); }
+    public unsafe fn void remove(Shared<Object3D> object) { this.part.remove(object: object); }
+    public const fn isize childCount() { return this.part.childCount(); }
+    public unsafe const fn Shared<Object3D> child(isize index) { return this.part.child(index: index); }
+    public const fn Mat4 matrixWorld() { return this.part.matrixWorld(); }
+}
+
+// A geometry drawn with a material, as three.js's `Mesh`. Its record in a scene is written whenever it moved or its
+// geometry or material changed.
+type resource Mesh implements Object3D {
+    NodePart part;
+    Shared<Geometry> shape;
+    Shared<Material> look;
+
+    public unsafe ctor make(Shared<Geometry> geometry, Shared<Material> material) {
+        this.part = NodePart.make();
+        this.shape = geometry;
+        this.look = material;
+    }
+
+    public unsafe const fn Shared<Geometry> geometry() { return copy this.shape; }
+    public unsafe fn ref Shared<Geometry> geometryMut() { this.part.touched(); return this.shape; }
+    public unsafe const fn Shared<Material> material() { return copy this.look; }
+    public unsafe fn ref Shared<Material> materialMut() { this.part.touched(); return this.look; }
+
+    public const fn const ref NodePart node() { return this.part; }
+    public fn ref NodePart nodeMut() { return this.part; }
+    public unsafe fn void place(ref Walk walk, Mat4 parentWorld, bool parentMoved) {
+        bool moved = this.part.placeSelf(walk: ref walk, parentWorld: parentWorld, parentMoved: parentMoved);
+        if (moved) {
+            walk.push(instance: ref this.part.drawn, world: this.part.anch.worldMatrix(), geometry: copy this.shape,
+                      material: copy this.look);
+        }
+        this.part.placeKids(walk: ref walk, moved: moved);
+    }
+
+    public const fn Vec3 position() { return this.part.position(); }
+    public unsafe fn ref Vec3 positionMut() { return this.part.positionMut(); }
+    public const fn Euler rotation() { return this.part.rotation(); }
+    public unsafe fn ref Euler rotationMut() { return this.part.rotationMut(); }
+    public const fn Quat quaternion() { return this.part.quaternion(); }
+    public unsafe fn ref Quat quaternionMut() { return this.part.quaternionMut(); }
+    public const fn Vec3 scale() { return this.part.scale(); }
+    public unsafe fn ref Vec3 scaleMut() { return this.part.scaleMut(); }
+    public unsafe fn void rotateX(float32 rad) { this.part.rotateX(rad: rad); }
+    public unsafe fn void rotateY(float32 rad) { this.part.rotateY(rad: rad); }
+    public unsafe fn void rotateZ(float32 rad) { this.part.rotateZ(rad: rad); }
+    public unsafe fn void rotateOnAxis(Vec3 axis, float32 rad) { this.part.rotateOnAxis(axis: axis, rad: rad); }
+    public unsafe fn void rotateOnWorldAxis(Vec3 axis, float32 rad) { this.part.rotateOnWorldAxis(axis: axis, rad: rad); }
+    public unsafe fn void lookAt(Vec3 target) { this.part.lookAt(target: target); }
+    public unsafe fn void add(Shared<Object3D> object) { this.part.add(object: object); }
+    public unsafe fn void remove(Shared<Object3D> object) { this.part.remove(object: object); }
+    public const fn isize childCount() { return this.part.childCount(); }
+    public unsafe const fn Shared<Object3D> child(isize index) { return this.part.child(index: index); }
+    public const fn Mat4 matrixWorld() { return this.part.matrixWorld(); }
+}
+
+// A camera with perspective, as three.js's `PerspectiveCamera`, its field of view in radians (area 2, item 4), and
+// reversed depth always (GFX-1's question 1): near maps to 1 and far to 0, as three.js r187's `makePerspective` with
+// `reversedDepth`. A far of +infinity is the projection's limit (`withInfiniteFar`). It names the target it draws
+// into, and with none the renderer's window (part 1's question 4). It looks down its -Z.
+type resource PerspectiveCamera implements Object3D {
+    NodePart part;
+    float32 fovValue;
+    float32 aspectValue;
+    float32 nearValue;
+    float32 farValue;
+    Optional<Shared<RenderTarget>> into = Optional::None;
+
+    friend Renderer::render[placeAlone, viewProjection];
+
+    // three.js's four: the vertical field of view in radians, width over height, and the near and far planes.
+    public unsafe ctor make(float32 fovRad, float32 aspect, float32 near, float32 far) {
+        this.part = NodePart.make();
+        this.part.looksBack = true;
+        this.fovValue = fovRad;
+        this.aspectValue = aspect;
+        this.nearValue = near;
+        this.farValue = far;
+    }
+    // A camera that sees to infinity: its far plane is +infinity.
+    public unsafe ctor withInfiniteFar(float32 fovRad, float32 aspect, float32 near) {
+        this.part = NodePart.make();
+        this.part.looksBack = true;
+        this.fovValue = fovRad;
+        this.aspectValue = aspect;
+        this.nearValue = near;
+        this.farValue = bitcast<float32>(0x7f800000);
+    }
+
+    public const fn float32 fovRad() { return this.fovValue; }
+    public fn ref float32 fovRadMut() { return this.fovValue; }
+    public const fn float32 aspect() { return this.aspectValue; }
+    public fn ref float32 aspectMut() { return this.aspectValue; }
+    public const fn float32 near() { return this.nearValue; }
+    public fn ref float32 nearMut() { return this.nearValue; }
+    public const fn float32 far() { return this.farValue; }
+    public fn ref float32 farMut() { return this.farValue; }
+    public unsafe const fn Optional<Shared<RenderTarget>> target() { return copy this.into; }
+    public fn ref Optional<Shared<RenderTarget>> targetMut() { return this.into; }
+
+    // The projection, remade from the camera's settings whenever it is asked for, so there is no
+    // `updateProjectionMatrix()`.
+    public const fn Mat4 projectionMatrix() {
+        float32 f = 1.0 / tan(x: this.fovValue / 2.0);
+        float32 c = 0.0;
+        float32 d = this.nearValue;
+        if (this.farValue <= 3.40282347e38) {
+            c = this.nearValue / (this.farValue - this.nearValue);
+            d = this.farValue * this.nearValue / (this.farValue - this.nearValue);
+        }
+        return Mat4.fromCols(c0: Vec4.of(x: f / this.aspectValue, y: 0.0, z: 0.0, w: 0.0),
+                             c1: Vec4.of(x: 0.0, y: f, z: 0.0, w: 0.0),
+                             c2: Vec4.of(x: 0.0, y: 0.0, z: c, w: -1.0),
+                             c3: Vec4.of(x: 0.0, y: 0.0, z: d, w: 0.0));
+    }
+
+    unsafe fn void placeAlone() { this.part.placeAlone(); }
+
+    // The projection times the view: the inverse of the camera's world matrix, its scale taken out, as three.js's.
+    const fn Mat4 viewProjection() {
+        Mat4 w = this.part.matrixWorld();
+        Vec3 at = Vec3.of(x: w.get(c: 3, r: 0), y: w.get(c: 3, r: 1), z: w.get(c: 3, r: 2));
+        Mat4 view = composed(position: at, rotation: rotationOf(m: w), scale: Vec3.one()).inverse();
+        return this.projectionMatrix() * view;
+    }
+
+    public const fn const ref NodePart node() { return this.part; }
+    public fn ref NodePart nodeMut() { return this.part; }
+    public unsafe fn void place(ref Walk walk, Mat4 parentWorld, bool parentMoved) {
+        bool moved = this.part.placeSelf(walk: ref walk, parentWorld: parentWorld, parentMoved: parentMoved);
+        this.part.placeKids(walk: ref walk, moved: moved);
+    }
+
+    public const fn Vec3 position() { return this.part.position(); }
+    public unsafe fn ref Vec3 positionMut() { return this.part.positionMut(); }
+    public const fn Euler rotation() { return this.part.rotation(); }
+    public unsafe fn ref Euler rotationMut() { return this.part.rotationMut(); }
+    public const fn Quat quaternion() { return this.part.quaternion(); }
+    public unsafe fn ref Quat quaternionMut() { return this.part.quaternionMut(); }
+    public const fn Vec3 scale() { return this.part.scale(); }
+    public unsafe fn ref Vec3 scaleMut() { return this.part.scaleMut(); }
+    public unsafe fn void rotateX(float32 rad) { this.part.rotateX(rad: rad); }
+    public unsafe fn void rotateY(float32 rad) { this.part.rotateY(rad: rad); }
+    public unsafe fn void rotateZ(float32 rad) { this.part.rotateZ(rad: rad); }
+    public unsafe fn void rotateOnAxis(Vec3 axis, float32 rad) { this.part.rotateOnAxis(axis: axis, rad: rad); }
+    public unsafe fn void rotateOnWorldAxis(Vec3 axis, float32 rad) { this.part.rotateOnWorldAxis(axis: axis, rad: rad); }
+    public unsafe fn void lookAt(Vec3 target) { this.part.lookAt(target: target); }
+    public unsafe fn void add(Shared<Object3D> object) { this.part.add(object: object); }
+    public unsafe fn void remove(Shared<Object3D> object) { this.part.remove(object: object); }
+    public const fn isize childCount() { return this.part.childCount(); }
+    public unsafe const fn Shared<Object3D> child(isize index) { return this.part.child(index: index); }
+    public const fn Mat4 matrixWorld() { return this.part.matrixWorld(); }
+}

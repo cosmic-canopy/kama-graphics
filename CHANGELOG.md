@@ -40,3 +40,7 @@ package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The gate runs every browser under `kama run`, the pinned Chrome for Testing among them, started as
   `tools/browsers.mjs` says, so its DevTools driver, `tools/webtest.mjs`, is retired. The gate needs kama 0.9.956
   (`--chromium-arg`) or later.
+- The tests program states its pace, `run(app:, pace: Pace::EveryRefresh)`, as kama 0.9.958's `std::app` asks
+  (KR-281 4g), ticking as it did; its manifest needs kama 0.9.958 or later. Green on kama 0.9.960 at the same
+  counts (2026-11-15), which also fixes kyoten's KY-59, an operator releasing a node passed to it by value
+  twice, which part 3's typed nodes need.

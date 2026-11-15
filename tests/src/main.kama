@@ -19,7 +19,7 @@
 import {
     core::println,
     core::env::args, core::env::Args,
-    std::app::App, std::app::Lifecycle, std::app::run, std::app::quit,
+    std::app::App, std::app::Lifecycle, std::app::run, std::app::Pace, std::app::quit,
     std::memory::Owned, std::memory::replace,
     gpu::Device, gpu::Queue,
     Verdicts, harnessCases, colorCases, partCases, GpuOpen, GoldenRun, RendererRun, BoxesRun,
@@ -213,7 +213,7 @@ fn void endOnTheWeb(bool failed) { }
 
 unsafe fn void runChecks() {
     Owned<App> app = new Check.make();
-    run(app: give app);
+    run(app: give app, pace: Pace::EveryRefresh);
 }
 
 fn uint8 main() {

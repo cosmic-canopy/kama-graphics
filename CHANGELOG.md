@@ -65,3 +65,5 @@ package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     `GraphicsErrorKind::Material`, which joins the enum.
   - `MeshBasicMaterial` is built from nodes behind the same API, its frames the same bytes.
   - A material's settings (group 1) are visible to the vertex stage too, so a material's vertex stage may read them.
+- **Fixed:** a mirrored mesh (a world matrix with a negative determinant) drew inside out. Its winding is flipped, as
+  three.js r187's is, so a camera inside a mirrored box sees the backdrop.

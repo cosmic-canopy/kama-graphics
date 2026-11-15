@@ -32,7 +32,7 @@ import {
     gpu::BufferBindingType, gpu::BindGroup, gpu::BindGroupDescriptor, gpu::BindingResource,
     gpu::PipelineLayout, gpu::PipelineLayoutDescriptor, gpu::Layout,
     gpu::RenderPipeline, gpu::RenderPipelineDescriptor, gpu::VertexState, gpu::VertexBufferLayout, gpu::VertexFormat,
-    gpu::FragmentState, gpu::ColorTargetState, gpu::CullMode, gpu::DepthStencilState, gpu::CompareFunction,
+    gpu::FragmentState, gpu::ColorTargetState, gpu::CullMode, gpu::FrontFace, gpu::DepthStencilState, gpu::CompareFunction,
     image::Image, image::ImageError, image::PixelFormat, image::AlphaMode, image::ColorSpace,
     Color, RenderTarget, Scene, PerspectiveCamera, Geometry, BufferGeometry, Material, MaterialSettings, NodeBuilder,
 };
@@ -117,6 +117,7 @@ type resource Renderer {
     PipelineLayout layout;
     Buffer frame;                     // the frame's uniform: the view-projection
     DynamicArray<string> sources;     // the pipelines made, by the WGSL they run
+    DynamicArray<bool> flipped;       // ...and whether they draw mirrored meshes, whose front faces wind clockwise
     DynamicArray<RenderPipeline> pipelines;
     RenderInfo last = RenderInfo.of(calls: 0, triangles: 0, objects: 0, matrices: 0);
     bool printing = true;                       // printErrors
@@ -148,6 +149,7 @@ type resource Renderer {
         described.label(text: "the frame");
         this.frame = device.createBuffer(descriptor: give described);
         this.sources = DynamicArray.empty();
+        this.flipped = DynamicArray.empty();
         this.pipelines = DynamicArray.empty();
         this.errors = DynamicArray.empty();
         this.device = give device;
@@ -211,9 +213,11 @@ type resource Renderer {
         this.queue.submit(commands: give commands);
     }
 
-    // The pipeline that runs `source`, a material's WGSL, made the first time.
-    unsafe fn isize pipelineFor(const ref string source) {
-        for (isize i = 0; i < this.sources.length(); i = i + 1) { if (this.sources[i] == source) { return i; } }
+    // The pipeline that runs `source`, a material's WGSL, for a mirrored mesh or not, made the first time.
+    unsafe fn isize pipelineFor(const ref string source, bool mirrored) {
+        for (isize i = 0; i < this.sources.length(); i = i + 1) {
+            if (this.sources[i] == source && this.flipped[i] == mirrored) { return i; }
+        }
         ShaderModuleDescriptor described = ShaderModuleDescriptor.make(wgsl: copy source);
         described.label(text: "a material's shader");
         ShaderModule shader = this.device.createShaderModule(descriptor: give described);
@@ -226,11 +230,13 @@ type resource Renderer {
         RenderPipelineDescriptor pipeline = RenderPipelineDescriptor.make(layout: Layout::Explicit(layout: copy this.layout),
                                                                           vertex: give vertex);
         pipeline.fragment(state: give fragment);
-        pipeline.primitiveMut().cullMode = CullMode::Back;   // three.js's FrontSide: front faces wind counter-clockwise
+        pipeline.primitiveMut().cullMode = CullMode::Back;   // three.js's FrontSide: front faces wind counter-clockwise,
+        if (mirrored) { pipeline.primitiveMut().frontFace = FrontFace::CW; }   // and clockwise on a mirrored mesh
         pipeline.depthStencil(state: DepthStencilState.make(format: TextureFormat::Depth32Float, depthWriteEnabled: true,
                                                             depthCompare: CompareFunction::Greater));
         pipeline.label(text: "a mesh");
         this.sources.add(item: copy source);
+        this.flipped.add(item: mirrored);
         this.pipelines.add(item: this.device.createRenderPipeline(descriptor: give pipeline));
         return this.pipelines.length() - 1;
     }
@@ -305,7 +311,7 @@ type resource Renderer {
             DynamicArray<string> refused = material.gpuMut().refused();
             if (refused.length() > 0) { continue; }
             string source = material.gpuMut().source();
-            isize p = this.pipelineFor(source: source);
+            isize p = this.pipelineFor(source: source, mirrored: scene.mirroredAt(slot: slot));
             if (p != bound2) { rp.setPipeline(pipeline: this.pipelines[p]); bound2 = p; }
             DynamicArray<uint8> settings = DynamicArray.empty();
             if (material.gpuMut().staleOn(device: this.device, version: material.version())) {

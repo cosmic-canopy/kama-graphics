@@ -28,7 +28,7 @@
 import {
     std::collections::DynamicArray,
     std::io::stderr, std::io::StdErr,
-    std::math::Vec3, std::math::Vec4, std::math::Quat, std::math::Mat4, std::math::sqrt, std::math::tan,
+    std::math::Vec3, std::math::Vec4, std::math::Quat, std::math::Mat3, std::math::Mat4, std::math::sqrt, std::math::tan,
     gpu::Device, gpu::Queue, gpu::Buffer, gpu::BufferDescriptor, gpu::BufferUsage,
     Euler, EulerOrder, Geometry, Material, RenderTarget, Renderer,
 };
@@ -48,6 +48,13 @@ fn void putMatrix(ref DynamicArray<uint8> into, const ref Mat4 m) {
     for (int32 c = 0; c < 4; c = c + 1) {
         for (int32 r = 0; r < 4; r = r + 1) { putFloat(into: ref into, value: m.get(c: c, r: r)); }
     }
+}
+
+// A matrix's upper-left 3x3: its rotation and scale, without its translation.
+fn Mat3 upperLeft(const ref Mat4 m) {
+    return Mat3.fromCols(c0: Vec3.of(x: m.get(c: 0, r: 0), y: m.get(c: 0, r: 1), z: m.get(c: 0, r: 2)),
+                         c1: Vec3.of(x: m.get(c: 1, r: 0), y: m.get(c: 1, r: 1), z: m.get(c: 1, r: 2)),
+                         c2: Vec3.of(x: m.get(c: 2, r: 0), y: m.get(c: 2, r: 1), z: m.get(c: 2, r: 2)));
 }
 
 // The local matrix of a position, a rotation and a scale, as three.js's `compose`.
@@ -146,6 +153,12 @@ type resource CoreTable {
     }
 
     public const fn isize slots() { return this.worlds.length(); }
+    // Whether the mesh in `slot` is mirrored: its world matrix's 3x3 has a negative determinant, as three.js's
+    // `determinantAffine() < 0`, so its triangles wind the other way on screen.
+    public const fn bool mirroredAt(isize slot) {
+        Mat3 turn = upperLeft(m: this.worlds[slot]);
+        return turn.determinant() < 0.0;
+    }
     public const fn bool live(isize slot) { return this.geometries[slot].isSome(); }
     public const fn isize liveCount() { return this.worlds.length() - this.free.length(); }
     public unsafe fn Shared<Geometry> geometryAt(isize slot) {
@@ -557,7 +570,7 @@ type resource Scene implements Object3D {
     NodePart part;
     Shared<CoreTable> table;
 
-    friend Renderer::render[walkAll, recordsOn, drawSlots, geometryAt, materialAt, objects];
+    friend Renderer::render[walkAll, recordsOn, drawSlots, geometryAt, materialAt, mirroredAt, objects];
 
     public unsafe ctor make() {
         this.part = NodePart.make();
@@ -587,6 +600,7 @@ type resource Scene implements Object3D {
     }
     unsafe fn Shared<Geometry> geometryAt(isize slot) { return this.table.geometryAt(slot: slot); }
     unsafe fn Shared<Material> materialAt(isize slot) { return this.table.materialAt(slot: slot); }
+    unsafe fn bool mirroredAt(isize slot) { return this.table.mirroredAt(slot: slot); }
     const fn isize objects() { return this.table.liveCount(); }
 
     public const fn Vec3 position() { return this.part.position(); }

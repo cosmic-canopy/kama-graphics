@@ -74,6 +74,9 @@ a resource the program owns.
     fragment is kept where it is greater (GFX-1's question 1);
   - each mesh is one draw, of its geometry's triangles, with back faces not drawn (three.js's `FrontSide`), its vertex
     shader reading its world matrix from the scene's records by its instance index;
+  - a mirrored mesh, whose world matrix's 3x3 has a negative determinant, is drawn with its winding flipped, as three.js
+    r187 flips it (`WebGPUPipelineUtils.js`), so its front faces stay its front. Its pipeline is its material's
+    other one;
   - sorting draws, and drawing a geometry and material in common as one instanced draw, come with automatic instancing
     (GFX-2).
 - **`info()` says what the last render did,** as three.js's `renderer.info`: `calls`, `triangles`, `objects` (the meshes
@@ -298,7 +301,7 @@ WGSL's reserved words beyond its keywords are refused by the GPU's own compile, 
 - then `tests/`, one program, built debug and release and run natively, and built for the web and run under `kama run`
   in Edge, Firefox and the pinned Chrome for Testing, each started as `tools/browsers.mjs` says.
 
-It is 142 cases on each leg that names a software GPU, and 137 in Edge, whose leg names none.
+It is 144 cases on each leg that names a software GPU, and 139 in Edge, whose leg names none.
 
 - **The goldens** (kyoten's rendering.md § Decided, GFX-1's part 1, questions 2 and 3):
   - Each leg names its software GPU: `--golden warp` natively on Windows and in Firefox, `--golden swiftshader` in the
@@ -386,7 +389,9 @@ It is 142 cases on each leg that names a software GPU, and 137 in Edge, whose le
   - a mesh whose material is refused drawing nothing beside one that draws, reported once as `Material` in the compile's
     words, and neither compiled nor reported again on a second render;
   - the mesh that draws has a material whose vertex stage reads one of its settings, and it draws with no WebGPU
-    error.
+    error;
+  - a mirrored box drawn from outside only: a camera inside it sees the backdrop, and a box not mirrored beside it,
+    drawn first by the same renderer with the same WGSL, needs a pipeline of its own; seen from outside, it shows.
 - **Part 2's golden holds part 3's compiler:** `boxes/<gpu>.png` is matched byte for byte with `MeshBasicMaterial`'s
   nodes, as it was with its WGSL by hand.
 - **Printed from outside the program:** the gate counts each leg's printed lines: one for the render refused by the

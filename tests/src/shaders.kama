@@ -3,13 +3,16 @@
 // - **every module the node cases compiled** (tests/src/nodes.kama) is compiled by the leg's own WGSL compiler, naga
 //   natively and in Firefox and Tint in Chromium, and has no compilation message: not an error, not a warning;
 // - **a material whose compile is refused** draws nothing, beside a mesh that draws: the renderer reports it once, as
-//   `GraphicsErrorKind::Material`, printed, and never compiles it again.
+//   `GraphicsErrorKind::Material`, printed, and never compiles it again;
+// - **a mirrored mesh** (a world matrix with a negative determinant) is drawn from outside only, as three.js r187 flips
+//   its winding (`WebGPUPipelineUtils.js`): a camera inside a mirrored box sees the backdrop, one outside sees the box.
 
 import {
     core::println,
     std::collections::DynamicArray,
     std::math::Vec3, std::math::radians,
     std::time::Instant, std::time::monotonicNow,
+    image::Image, graphics::PixelRead, graphics::PixelStatus,
     gpu::Device, gpu::Queue, gpu::ShaderModuleDescriptor, gpu::ShaderModule, gpu::CompilationRequest,
     gpu::CompilationStatus, gpu::CompilationMessage, gpu::DeviceErrors,
     graphics::Color, graphics::Renderer, graphics::RenderInfo, graphics::RenderTarget, graphics::Scene, graphics::Mesh,
@@ -63,6 +66,8 @@ type resource ShaderRun {
     DynamicArray<ShaderCase> cases;
     DynamicArray<CompilationRequest> asked;
     DynamicArray<bool> answered;
+    Optional<Renderer> mirrorRenderer = Optional::None;
+    Optional<PixelRead> reading = Optional::None;
 
     public ctor make(Device device, Queue queue) {
         this.found = Verdicts.make();
@@ -162,6 +167,63 @@ type resource ShaderRun {
                        why: quiet && still.isEmpty() ? "" : "a second report, or " + still);
     }
 
+    // A box mirrored on x, its colour #cc3333, seen by a 32x24 camera at the origin looking down -z: from inside when the
+    // box is 4 metres across around the camera, with a blue box not mirrored in front, drawn first; from outside when it
+    // is 1 metre across, 3 metres ahead.
+    unsafe fn void renderMirrored(bool inside) {
+        Renderer r = Renderer.withDevice(device: copy this.device, queue: copy this.queue);
+        r.clearColorMut() = Color.fromHex(hex: 0x202020);
+        Shared<RenderTarget> t = new RenderTarget.make(width: 32, height: 24);
+        Shared<PerspectiveCamera> cam = new PerspectiveCamera.make(fovRad: radians(deg: 50.0), aspect: 32.0 / 24.0, near: 0.1, far: 100.0);
+        cam.targetMut() = Optional::Some(value: copy t);
+        Shared<Scene> s = new Scene.make();
+        float32 size = inside ? 4.0 : 1.0;
+        Shared<BoxGeometry> box = new BoxGeometry.make(width: size, height: size, depth: size);
+        Shared<MeshBasicMaterial> look = new MeshBasicMaterial.make();
+        look.colorMut() = Color.fromHex(hex: 0xcc3333);
+        Shared<Mesh> m = new Mesh.make(geometry: box, material: look);
+        m.scaleMut() = Vec3.of(x: -1.0, y: 1.0, z: 1.0);
+        if (!inside) { m.positionMut() = Vec3.of(x: 0.0, y: 0.0, z: -3.0); }
+        if (inside) {
+            // a box not mirrored, its WGSL the same, drawn first by the same renderer: the room needs a pipeline of its own
+            Shared<BoxGeometry> small = new BoxGeometry.make(width: 0.5, height: 0.5, depth: 0.5);
+            Shared<MeshBasicMaterial> blue = new MeshBasicMaterial.make();
+            blue.colorMut() = Color.fromHex(hex: 0x3366cc);
+            Shared<Mesh> plain = new Mesh.make(geometry: small, material: blue);
+            plain.positionMut() = Vec3.of(x: 0.0, y: 0.0, z: -1.5);
+            s.add(object: plain);
+        }
+        s.add(object: m);
+        r.render(scene: copy s, camera: copy cam);
+        this.reading = Optional::Some(value: r.readRenderTargetPixels(target: copy t));
+        this.mirrorRenderer = Optional::Some(value: give r);
+        this.began = monotonicNow();
+    }
+
+    // The read's texels that are the box's colour, once it answers: -1 while pending, -2 when it failed.
+    unsafe fn isize boxTexels() {
+        PixelStatus s = match (this.reading) {
+            case Some(value: r): r.poll();
+            case None: PixelStatus::Pending;
+        };
+        bool pending = match (s) { case Pending: true; case _: false; };
+        if (pending && this.began.elapsed().asMillis() < SETTLE_MS) { return -1; }
+        this.reading = Optional::None;
+        isize shown = -2;
+        match (give s) {
+            case Ready(image: img): {
+                shown = 0;
+                borrow img.samples8() as px {
+                    for (isize i = 0; i + 3 < px.length(); i = i + 4) {
+                        if (px[i] == 0xcc && px[i + 1] == 0x33 && px[i + 2] == 0x33) { shown = shown + 1; }
+                    }
+                }
+            }
+            case _: { }
+        };
+        return shown;
+    }
+
     public unsafe fn bool step() {
         if (this.stage == 0) {
             this.compileAll();
@@ -172,7 +234,25 @@ type resource ShaderRun {
         if (this.stage == 1) {
             if (!this.pollAll()) { return false; }
             this.refusedMaterial();
+            this.renderMirrored(inside: true);
             this.stage = 2;
+            return false;
+        }
+        if (this.stage == 2) {
+            isize shown = this.boxTexels();
+            if (shown == -1) { return false; }
+            this.found.add(name: "render: a mirrored box is drawn from outside only: a camera inside it sees the backdrop",
+                           why: shown == 0 ? "" : shown == -2 ? "the read failed" : "${shown} texels show its walls");
+            this.renderMirrored(inside: false);
+            this.stage = 3;
+            return false;
+        }
+        if (this.stage == 3) {
+            isize shown = this.boxTexels();
+            if (shown == -1) { return false; }
+            this.found.add(name: "render: a mirrored box seen from outside shows",
+                           why: shown > 20 ? "" : shown == -2 ? "the read failed" : "${shown} texels show it");
+            this.stage = 4;
         }
         return true;
     }

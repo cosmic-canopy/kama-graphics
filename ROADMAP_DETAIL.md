@@ -120,9 +120,11 @@ natively. The library's own `examples/cube` is the same scene without an engine.
   mutations caught (kyoten's `.scratch/gfx1-part3/tools/`), after one case was sharpened (`pow`'s two arguments the
   same) and one mutation corrected. Next, part 3's second part: `MeshStandardMaterial`'s values and slots, and normals reaching the
   fragment stage.
-- **Found while building part 3's first part:** a mirrored mesh (a world matrix with a negative determinant) draws inside
-  out, since the renderer culls back faces with one winding. three.js r187 flips the winding per object
-  (`WebGPUPipelineUtils.js`). Fixed test-first as part 3's second part begins.
+- **Found while building part 3's first part, and fixed test-first** (2026-11-15): a mirrored mesh (a world matrix with
+  a negative determinant) drew inside out, since the renderer culled back faces with one winding. Its winding is now
+  flipped, as three.js r187 flips it (`WebGPUPipelineUtils.js`), with a pipeline per material and winding. Red first,
+  768 texels of a mirrored room's walls seen from inside it; 144 cases on each golden leg, 139 in Edge; 3 of 3 mutations
+  caught, the third after the test drew a box not mirrored with the same renderer first.
 - **Decided on 2026-11-15, part 3's second part, question 1** (kyoten's `docs/design/rendering.md` § Decided): each
   mesh's record carries its normal matrix, the inverse transpose of its world matrix's 3x3, computed on the CPU when the
   world matrix changes. That is three.js's `modelNormalMatrix`, and Bevy's record carries one too. The record grows from

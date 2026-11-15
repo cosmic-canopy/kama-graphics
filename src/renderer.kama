@@ -34,20 +34,12 @@ import {
     gpu::RenderPipeline, gpu::RenderPipelineDescriptor, gpu::VertexState, gpu::VertexBufferLayout, gpu::VertexFormat,
     gpu::FragmentState, gpu::ColorTargetState, gpu::CullMode, gpu::DepthStencilState, gpu::CompareFunction,
     image::Image, image::ImageError, image::PixelFormat, image::AlphaMode, image::ColorSpace,
-    Color, RenderTarget, Scene, PerspectiveCamera, Geometry, BufferGeometry, Material,
+    Color, RenderTarget, Scene, PerspectiveCamera, Geometry, BufferGeometry, Material, MaterialSettings, NodeBuilder,
 };
 export { Renderer, RenderInfo, PixelRead, PixelStatus, GraphicsErrorKind, GraphicsErrorReport, RendererErrors };
 
 // A copied row's bytes: WebGPU aligns them to 256.
 fn uint32 rowBytes(uint32 width) { return (width * 4 + 255) / 256 * 256; }
-
-// What every material's WGSL is given in group 0: the frame (the camera's view and projection) and the object records,
-// a world matrix each, indexed by the draw's instance.
-fn string prelude() {
-    return "struct Frame { viewProjection: mat4x4f };\n"
-        + "@group(0) @binding(0) var<uniform> frame: Frame;\n"
-        + "@group(0) @binding(1) var<storage, read> objects: array<mat4x4f>;\n";
-}
 
 // A refused misuse, printed to stderr as one line, as @kama/gpu prints a device's errors (`@kama/gpu: …`); scene.kama's
 // `add` prints its own the same way. A write that fails is let go: there is nowhere left to report it.
@@ -69,9 +61,10 @@ fn void putFloat(ref DynamicArray<uint8> into, float32 value) {
 comptime isize KEPT = 64;
 
 // What kind of misuse a renderer refused. `NoTarget`: a camera naming no render target was rendered by a renderer with
-// no window to draw into. A later misuse joins the list, so a program's `match` on it has a `case _:`.
+// no window to draw into. `Material`: a material's nodes were refused by its compile (node_builder.kama), so no mesh
+// draws with it. A later misuse joins the list, so a program's `match` on it has a `case _:`.
 @nonExhaustive
-type enum GraphicsErrorKind { NoTarget }
+type enum GraphicsErrorKind { NoTarget, Material }
 
 // One misuse a renderer refused, in its words, whole, as @kama/gpu's `GpuErrorReport`.
 type resource GraphicsErrorReport {
@@ -141,7 +134,9 @@ type resource Renderer {
         g0.label(text: "the frame and the object records");
         this.frameLayout = device.createBindGroupLayout(descriptor: give g0);
         BindGroupLayoutDescriptor g1 = BindGroupLayoutDescriptor.make();
-        g1.entry(binding: 0, visibility: ShaderStage::Fragment, layout: BindingLayout::Buffer(layout: BufferBindingLayout.make()));
+        // both stages, since a material's vertex stage may read its settings as well as its fragment stage
+        g1.entry(binding: 0, visibility: ShaderStage::Vertex | ShaderStage::Fragment,
+                 layout: BindingLayout::Buffer(layout: BufferBindingLayout.make()));
         g1.label(text: "a material's settings");
         this.materialLayout = device.createBindGroupLayout(descriptor: give g1);
         PipelineLayoutDescriptor groups = PipelineLayoutDescriptor.make();
@@ -219,7 +214,7 @@ type resource Renderer {
     // The pipeline that runs `source`, a material's WGSL, made the first time.
     unsafe fn isize pipelineFor(const ref string source) {
         for (isize i = 0; i < this.sources.length(); i = i + 1) { if (this.sources[i] == source) { return i; } }
-        ShaderModuleDescriptor described = ShaderModuleDescriptor.make(wgsl: prelude() + source);
+        ShaderModuleDescriptor described = ShaderModuleDescriptor.make(wgsl: copy source);
         described.label(text: "a material's shader");
         ShaderModule shader = this.device.createShaderModule(descriptor: give described);
         VertexBufferLayout positions = VertexBufferLayout.make(arrayStride: 12);
@@ -238,6 +233,25 @@ type resource Renderer {
         this.sources.add(item: copy source);
         this.pipelines.add(item: this.device.createRenderPipeline(descriptor: give pipeline));
         return this.pipelines.length() - 1;
+    }
+
+    // Compile `material`'s nodes to WGSL, once: what its compile refuses is reported, and no mesh draws with it.
+    unsafe fn void compile(Shared<Material> material) {
+        MaterialSettings declared = MaterialSettings.make();
+        material.settings(into: ref declared);
+        NodeBuilder builder = NodeBuilder.make(settings: give declared);
+        material.shade(builder: ref builder);
+        string wgsl = builder.wgsl();
+        DynamicArray<string> problems = builder.problems();
+        if (problems.length() > 0) {
+            string words = "a material was refused, so nothing draws with it: ";
+            for (isize i = 0; i < problems.length(); i = i + 1) {
+                if (i > 0) { words = words + "; "; }
+                words = words + problems[i];
+            }
+            this.refuse(kind: GraphicsErrorKind::Material, message: give words);
+        }
+        material.gpuMut().store(wgsl: give wgsl, problems: give problems);
     }
 
     // Draw `scene` as `camera` sees it, into the target the camera names.
@@ -287,10 +301,18 @@ type resource Renderer {
             isize slot = slots[i];
             Shared<Material> material = scene.materialAt(slot: slot);
             Shared<Geometry> geometry = scene.geometryAt(slot: slot);
-            string source = material.shaderSource();
+            if (!material.gpuMut().isCompiled()) { this.compile(material: copy material); }
+            DynamicArray<string> refused = material.gpuMut().refused();
+            if (refused.length() > 0) { continue; }
+            string source = material.gpuMut().source();
             isize p = this.pipelineFor(source: source);
             if (p != bound2) { rp.setPipeline(pipeline: this.pipelines[p]); bound2 = p; }
-            DynamicArray<uint8> settings = material.settingBytes();
+            DynamicArray<uint8> settings = DynamicArray.empty();
+            if (material.gpuMut().staleOn(device: this.device, version: material.version())) {
+                MaterialSettings declared = MaterialSettings.make();
+                material.settings(into: ref declared);
+                settings = declared.bytes();
+            }
             BindGroup look = material.gpuMut().groupOn(device: ref this.device, queue: ref this.queue, layout: this.materialLayout,
                                                        settings: settings, version: material.version());
             rp.setBindGroup(index: 1, group: look);

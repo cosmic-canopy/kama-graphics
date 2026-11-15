@@ -3,43 +3,64 @@
 // material is an asset, shared: a program makes it with `new`, every mesh holding its `Shared` draws with it, and changing
 // a setting changes them all, as in three.js. A setting is a value, so changing one never compiles a shader.
 //
-// **Stopgap until part 3:** `MeshBasicMaterial`'s WGSL is written by hand here. Part 3 builds it from typed nodes behind
-// the same API, and part 2's golden holds that to the same bytes.
+// A material's shader is its typed nodes, compiled to WGSL by the renderer once (node_builder.kama, GFX-1's part 3), and
+// its settings are declared apart from its nodes, so writing them after a change builds no node.
 
 import {
     std::collections::DynamicArray,
     gpu::Device, gpu::Queue, gpu::Buffer, gpu::BufferDescriptor, gpu::BufferUsage, gpu::BufferBinding,
     gpu::BindGroup, gpu::BindGroupDescriptor, gpu::BindGroupLayout, gpu::BindingResource,
-    Color, Renderer,
+    Color, Renderer, MaterialSettings, NodeBuilder, Vec3Node, vec4, constant,
 };
 export { Material, MaterialGpu, MeshBasicMaterial };
 
-// What every material is to the renderer: the WGSL its draws run, its settings as the shader reads them, and a number
-// that moves whenever a setting changes, so the renderer writes them again only then. The WGSL takes the renderer's
-// frame and object records in group 0 (`frame.viewProjection`, `objects[instance]`) and the material's settings in
-// group 1, binding 0.
+// What every material is to the renderer: its settings with their values now, its typed nodes, and a number that moves
+// whenever a setting changes, so the renderer writes them again only then. Its nodes read its settings by name through
+// the builder, which writes them as group 1's uniform block, after the renderer's frame and object records in group 0.
 type contract Material for resource {
-    const fn string shaderSource();
-    const fn DynamicArray<uint8> settingBytes();
+    const fn void settings(ref MaterialSettings into);
+    fn void shade(ref NodeBuilder builder);
     const fn uint32 version();
     fn ref MaterialGpu gpuMut();
 }
 
-// A material's settings on each device that drew it: a uniform buffer and its bind group, written again when the
-// material's version moved. Only a renderer reaches it.
+// What a renderer keeps of a material: its WGSL, compiled once, or what its compile refused; and its settings on each
+// device that drew it, a uniform buffer and its bind group, written again when the material's version moved. Only a
+// renderer reaches it.
 type resource MaterialGpu {
     DynamicArray<UnsafePtr> devices;
     DynamicArray<Buffer> uniforms;
     DynamicArray<BindGroup> groups;
     DynamicArray<uint32> versions;
+    Optional<string> compiled = Optional::None;
+    DynamicArray<string> refusals;
 
-    friend Renderer::render[groupOn];
+    friend Renderer::render[groupOn, staleOn, isCompiled, source, refused];
+    friend Renderer::compile[store];
 
     public unsafe ctor make() {
         this.devices = DynamicArray.empty();
         this.uniforms = DynamicArray.empty();
         this.groups = DynamicArray.empty();
         this.versions = DynamicArray.empty();
+        this.refusals = DynamicArray.empty();
+    }
+
+    const fn bool isCompiled() { return this.compiled.isSome(); }
+    fn void store(string wgsl, DynamicArray<string> problems) {
+        this.compiled = Optional::Some(value: give wgsl);
+        this.refusals = give problems;
+    }
+    const fn string source() { return match (this.compiled) { case Some(value: s): copy s; case None: ""; }; }
+    const fn DynamicArray<string> refused() { return copy this.refusals; }
+
+    // Whether `device` has no settings of this material's `version` yet, so they are to be written.
+    unsafe const fn bool staleOn(const ref Device device, uint32 version) {
+        UnsafePtr at = device.raw();
+        for (isize i = 0; i < this.devices.length(); i = i + 1) {
+            if (this.devices[i] == at) { return this.versions[i] != version; }
+        }
+        return true;
     }
 
     // The bind group of `settings` on `device`, made with `layout` the first time, and its buffer written whenever
@@ -73,15 +94,6 @@ type resource MaterialGpu {
     }
 }
 
-// A float's four bytes, little-endian, as WGSL reads them on every leg.
-fn void putFloat(ref DynamicArray<uint8> into, float32 value) {
-    uint32 bits = bitcast<uint32>(value);
-    into.add(item: truncate<uint8>(bits));
-    into.add(item: truncate<uint8>(bits >> 8));
-    into.add(item: truncate<uint8>(bits >> 16));
-    into.add(item: truncate<uint8>(bits >> 24));
-}
-
 // Unlit: every fragment its colour, as three.js's `MeshBasicMaterial`, white by default.
 type resource MeshBasicMaterial implements Material {
     Color tint = Color.fromHex(hex: 0xffffff);
@@ -97,20 +109,11 @@ type resource MeshBasicMaterial implements Material {
     public fn ref Color colorMut() { this.changes = this.changes + 1; return this.tint; }
 
     public const fn uint32 version() { return this.changes; }
-    public const fn DynamicArray<uint8> settingBytes() {
-        DynamicArray<uint8> bytes = DynamicArray.empty();
-        putFloat(into: ref bytes, value: this.tint.linearR());
-        putFloat(into: ref bytes, value: this.tint.linearG());
-        putFloat(into: ref bytes, value: this.tint.linearB());
-        putFloat(into: ref bytes, value: 1.0);
-        return bytes;
-    }
-    public const fn string shaderSource() {
-        return "struct Basic { color: vec4f };\n"
-            + "@group(1) @binding(0) var<uniform> basic: Basic;\n"
-            + "@vertex fn vs(@builtin(instance_index) object: u32, @location(0) position: vec3f) -> @builtin(position) vec4f {\n"
-            + "  return frame.viewProjection * objects[object] * vec4f(position, 1.0);\n"
-            + "}\n"
-            + "@fragment fn fs() -> @location(0) vec4f { return basic.color; }\n";
+    // Its one setting, its colour, linear.
+    public const fn void settings(ref MaterialSettings into) { into.addColor(name: "color", value: this.tint); }
+    // As three.js's: the colour, opaque, on every mesh's vertex stage.
+    public fn void shade(ref NodeBuilder builder) {
+        Vec3Node colour = builder.uniformVec3(name: "color");
+        builder.fragmentColor(node: vec4(xyz: colour, w: constant(value: 1.0)));
     }
 }

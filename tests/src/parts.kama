@@ -291,10 +291,8 @@ unsafe fn void materialCases(ref Verdicts found) {
     found.add(name: "MeshBasicMaterial: white by default, as three.js's", why: hex == 0xffffff ? "" : "its colour is ${hex}");
     m.colorMut() = Color.fromHex(hex: 0x336699);
     uint32 v1 = m.version();
-    DynamicArray<uint8> bytes = m.settingBytes();
-    isize nb = bytes.length();
-    found.add(name: "MeshBasicMaterial: a colour set through colorMut moves its version, and its settings are the linear colour and an alpha of 1, 16 bytes",
-              why: v1 != v0 && nb == 16 ? "" : "version ${v0} then ${v1}, settings of ${nb} bytes");
+    found.add(name: "MeshBasicMaterial: a colour set through colorMut moves its version",
+              why: v1 != v0 ? "" : "version ${v0} then ${v1}");
 }
 
 unsafe fn void treeCases(ref Verdicts found) {

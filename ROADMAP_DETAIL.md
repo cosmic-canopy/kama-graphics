@@ -97,6 +97,36 @@ natively. The library's own `examples/cube` is the same scene without an engine.
   twice; a WGSL function as text with its includes (`wgslFn`) is the escape, a program's or the library's; no WESL linker
   at run time, WESL staying a build-time format for a program's files. Part 3 needed kyoten's KY-59 fixed, and kama
   fixed it the same day (0.9.960, kyoten's pin since 2026-11-15).
+- **Built, part 3's first part** (2026-11-15, [SPEC.md](SPEC.md) § Typed nodes and § The compiler):
+  - **typed nodes:** `FloatNode`, `Vec3Node`, `Vec4Node` and `Mat4Node` behind the public `Node` contract, WGSL's
+    operators and built-ins, `varying`, what the renderer gives every material, and typed functions (`ShaderFunction`,
+    `param`, `called`), each parameter declared with its argument;
+  - **the compiler, `NodeBuilder`:** each function once, callees first; a `let` for a node used twice; the varyings;
+    the material's settings as one uniform block (`MaterialSettings`); and its refusals, a refused material drawing
+    nothing and reported once;
+  - **`MeshBasicMaterial` rebuilt on them** behind the same API, `boxes/<gpu>.png` matched byte for byte on WARP and
+    SwiftShader.
+
+  Settled while building, under the owner's word:
+  - a material's settings are declared apart from its nodes, so writing them after a change builds no node;
+  - programs write nodes in safe kama;
+  - a float literal is written so a compiler reading it through a float64 gets it back. One float32 in all 2,139,095,040
+    positive finite ones needs its float64 digits for that, measured over every one.
+
+  Found while building, and fixed test-first: a material's settings were visible to the fragment stage alone, so a
+  material whose vertex stage read one would have had its pipeline refused.
+
+  142 cases on each golden leg, 137 in Edge. Red first against a stubbed compiler, 33 of the first 136 failing. 65 of 65
+  mutations caught (kyoten's `.scratch/gfx1-part3/tools/`), after one case was sharpened (`pow`'s two arguments the
+  same) and one mutation corrected. Next, part 3's second part: `MeshStandardMaterial`'s values and slots, and normals reaching the
+  fragment stage.
+- **Found while building part 3's first part:** a mirrored mesh (a world matrix with a negative determinant) draws inside
+  out, since the renderer culls back faces with one winding. three.js r187 flips the winding per object
+  (`WebGPUPipelineUtils.js`). Fixed test-first as part 3's second part begins.
+- **Decided on 2026-11-15, part 3's second part, question 1** (kyoten's `docs/design/rendering.md` § Decided): each
+  mesh's record carries its normal matrix, the inverse transpose of its world matrix's 3x3, computed on the CPU when the
+  world matrix changes. That is three.js's `modelNormalMatrix`, and Bevy's record carries one too. The record grows from
+  64 bytes to 112.
 - **Done:**
   - `examples/cube` draws from one source on both legs;
   - its golden passes on a software GPU on each leg CI has, and perceptually on the reference machines present;

@@ -1,0 +1,473 @@
+// The material compiler: a material's typed nodes in, its WGSL out (kyoten's rendering.md § Decided, GFX-1's part 3).
+// It writes what the renderer gives every material (group 0: the frame and the object records), the material's settings
+// as one uniform block (group 1), each typed function a stage reaches once, its callees first, a `let` for a node a
+// function or a stage uses more than once, the varyings, and the two entry points, `vs` and `fs`.
+//
+// A material's settings are declared apart from its nodes (`MaterialSettings`), with their values, so writing them again
+// after a change builds no node. Its nodes read them by name through the builder.
+//
+// A misuse the node types cannot refuse is refused and reported in `problems()`, never ending the program, as
+// `@kama/gpu`'s decision 9: a vertex-only value read in the fragment stage, a parameter read outside its function, two
+// different functions of one name, a name WGSL or the compiler already uses, a setting read that the material never
+// declared, a number WGSL cannot write. The renderer draws nothing with a material whose compile found one.
+
+import {
+    std::collections::DynamicArray, std::memory::Shared, std::fmt::ParseError, std::fmt::Parseable,
+    Expr, ExprKind, ShaderFunction, FloatNode, Vec3Node, Vec4Node, Mat4Node, Color,
+    vec3, vec4, constant, positionLocal, modelWorldMatrix, cameraViewProjectionMatrix,
+};
+export { MaterialSettings, NodeBuilder, wgslNumber };
+
+// Digits as a WGSL float literal: a whole number gains its `.0`.
+fn string withPoint(string digits) {
+    if (digits.contains(substring: ".") || digits.contains(substring: "e")) { return digits; }
+    return digits + ".0";
+}
+
+// A float32 as a WGSL literal that reads back as the same float32: kama's shortest float32 digits. A WGSL compiler reads
+// a literal as an abstract float, a float64, and then rounds it to f32, two roundings, which for one float32 in all
+// 2,139,095,040 positive finite ones, 7.038531e-26 (and its negative), land on its neighbour. That one is written with
+// its float64 digits, which a float64 holds exactly (measured over every float32, kyoten's .scratch/gfx1-part3/numbers/).
+// "" for a number WGSL cannot write (an infinity or a NaN).
+fn string wgslNumber(float32 v) {
+    if (v != v || v > 3.4028234663852886e38 || v < -3.4028234663852886e38) { return ""; }
+    string t = withPoint(digits: "${v}");
+    Result<float64, ParseError> wide = Parseable::<float64>.parse(text: t);
+    bool back = match (wide) { case Ok(value: w): bitcast<uint32>(cast<float32>(w)) == bitcast<uint32>(v); case Err(error: e): false; };
+    if (back) { return t; }
+    float64 whole = cast<float64>(v);
+    return withPoint(digits: "${whole}");
+}
+
+// What a material's shader reads of its settings: one uniform block, each setting a member with its value now, laid
+// out by WGSL's rules for the uniform address space (an f32 on 4 bytes, a vec3f on 16, the block's size a multiple of
+// 16). Declared by the material (`Material.settings`), read by its nodes through `NodeBuilder.uniformFloat` and
+// `uniformVec3`.
+type resource MaterialSettings {
+    DynamicArray<string> names;
+    DynamicArray<string> types;
+    DynamicArray<uint32> offsets;
+    DynamicArray<uint8> written;
+    uint32 end = 0;
+
+    public ctor make() {
+        this.names = DynamicArray.empty(); this.types = DynamicArray.empty(); this.offsets = DynamicArray.empty();
+        this.written = DynamicArray.empty();
+    }
+
+    fn void put(float32 value) {
+        uint32 bits = bitcast<uint32>(value);
+        this.written.add(item: truncate<uint8>(bits));
+        this.written.add(item: truncate<uint8>(bits >> 8));
+        this.written.add(item: truncate<uint8>(bits >> 16));
+        this.written.add(item: truncate<uint8>(bits >> 24));
+    }
+    // A member of `align` and `size` bytes, after the padding WGSL's layout puts before it.
+    fn void place(string name, string wgslType, uint32 align, uint32 size) {
+        uint32 at = (this.end + align - 1) / align * align;
+        while (cast<uint32>(this.written.length()) < at) { this.written.add(item: 0); }
+        this.names.add(item: give name);
+        this.types.add(item: give wgslType);
+        this.offsets.add(item: at);
+        this.end = at + size;
+    }
+
+    // A float setting.
+    public fn void addFloat(string name, float32 value) {
+        this.place(name: give name, wgslType: "f32", align: 4, size: 4);
+        this.put(value: value);
+    }
+    // A vector setting.
+    public fn void addVec3(string name, float32 x, float32 y, float32 z) {
+        this.place(name: give name, wgslType: "vec3f", align: 16, size: 12);
+        this.put(value: x); this.put(value: y); this.put(value: z);
+    }
+    // A colour setting, linear, as the shader computes in.
+    public fn void addColor(string name, Color value) {
+        this.addVec3(name: give name, x: value.linearR(), y: value.linearG(), z: value.linearB());
+    }
+
+    public const fn isize count() { return this.names.length(); }
+    public const fn string nameAt(isize i) { return copy this.names[i]; }
+    public const fn string typeAt(isize i) { return copy this.types[i]; }
+    public const fn uint32 offsetAt(isize i) { return this.offsets[i]; }
+    // The block as the shader reads it: its size a multiple of 16, and 16 bytes when it holds nothing, since a binding
+    // takes no empty buffer.
+    public const fn DynamicArray<uint8> bytes() {
+        DynamicArray<uint8> all = copy this.written;
+        uint32 size = (this.end + 15) / 16 * 16;
+        if (size == 0) { size = 16; }
+        while (cast<uint32>(all.length()) < size) { all.add(item: 0); }
+        return all;
+    }
+}
+
+// One scope's uses of each node, a function's body or a stage: a node used twice gets a `let`.
+type resource Uses {
+    DynamicArray<usize> seen;
+    DynamicArray<int32> counts;
+    DynamicArray<string> names;
+    public ctor make() { this.seen = DynamicArray.empty(); this.counts = DynamicArray.empty(); this.names = DynamicArray.empty(); }
+    public const fn isize find(usize at) {
+        for (isize i = 0; i < this.seen.length(); i = i + 1) { if (this.seen[i] == at) { return i; } }
+        return -1;
+    }
+    // Counts a use of the node at `at`: true the first time, when its arguments are to be counted.
+    public fn bool count(usize at) {
+        isize i = this.find(at: at);
+        if (i >= 0) { this.counts[i] = this.counts[i] + 1; return false; }
+        this.seen.add(item: at); this.counts.add(item: 1); this.names.add(item: "");
+        return true;
+    }
+    public const fn int32 usesOf(isize i) { return this.counts[i]; }
+    public const fn string nameOf(isize i) { return copy this.names[i]; }
+    public fn void nameAt(isize i, string name) { this.names[i] = give name; }
+}
+
+// A node's identity: where its expression lives, as a number. Two nodes are one when they share an expression.
+unsafe fn usize identity(const ref Expr e) { return cast<usize>(addr(of: e)); }
+
+// Where an expression is written: a stage, or a function's body.
+type enum Scope { Vertex, Fragment, Function }
+
+// The names the compiler writes: no function or parameter may take one. A let is `n` and a number.
+fn bool compilerName(const ref string name) {
+    return name == "vs" || name == "fs" || name == "v" || name == "object" || name == "position" || name == "frame"
+        || name == "objects" || name == "material" || name == "Frame" || name == "Material" || name == "Varyings";
+}
+fn bool isLetName(const ref string name) {
+    if (name.length() < 2 || name[0] != 110) { return false; }   // 'n'
+    for (isize i = 1; i < name.length(); i = i + 1) { if (name[i] < 48 || name[i] > 57) { return false; } }
+    return true;
+}
+// WGSL's keywords (the WGSL spec, § Keyword Summary). Its reserved words beyond them are refused by the GPU's compile,
+// reported as every WGSL error is.
+fn bool wgslKeyword(const ref string name) {
+    return name == "alias" || name == "break" || name == "case" || name == "const" || name == "const_assert"
+        || name == "continue" || name == "continuing" || name == "default" || name == "diagnostic" || name == "discard"
+        || name == "else" || name == "enable" || name == "false" || name == "fn" || name == "for" || name == "if"
+        || name == "let" || name == "loop" || name == "override" || name == "requires" || name == "return"
+        || name == "struct" || name == "switch" || name == "true" || name == "var" || name == "while";
+}
+// WGSL's predeclared types the compiler writes, which a function's name would hide.
+fn bool wgslTypeName(const ref string name) {
+    return name == "f32" || name == "i32" || name == "u32" || name == "bool" || name == "vec2f" || name == "vec3f"
+        || name == "vec4f" || name == "mat4x4f" || name == "array";
+}
+// "" when `name` is one a WGSL function or parameter may take: a letter, then letters, digits and `_`.
+fn string nameProblem(const ref string name, const ref string what) {
+    bool shaped = name.length() > 0;
+    for (isize i = 0; i < name.length(); i = i + 1) {
+        uint8 c = name[i];
+        bool letter = (c >= 65 && c <= 90) || (c >= 97 && c <= 122);
+        bool digit = c >= 48 && c <= 57;
+        if (!(letter || (i > 0 && (digit || c == 95)))) { shaped = false; }
+    }
+    if (!shaped) { return what + " `" + name + "` is not a WGSL name: a letter, then letters, digits and `_`"; }
+    if (wgslKeyword(name: name)) { return what + " `" + name + "` is a WGSL keyword"; }
+    if (compilerName(name: name) || isLetName(name: name) || wgslTypeName(name: name)) {
+        return what + " `" + name + "` is a name the compiler writes";
+    }
+    return "";
+}
+
+// What the renderer gives every material's WGSL in group 0: the frame (the camera's view and projection) and the
+// object records, a world matrix each, indexed by the draw's instance.
+fn string prelude() {
+    return "struct Frame { viewProjection: mat4x4f };\n"
+        + "@group(0) @binding(0) var<uniform> frame: Frame;\n"
+        + "@group(0) @binding(1) var<storage, read> objects: array<mat4x4f>;\n";
+}
+
+// A material compiled: handed its settings, given its nodes (`vertexPosition`, `fragmentColor`), and asked for its WGSL.
+type resource NodeBuilder {
+    MaterialSettings declared;
+    Optional<Vec4Node> clip = Optional::None;
+    Optional<Vec4Node> colour = Optional::None;
+    DynamicArray<Shared<Expr>> varyingSources;
+    DynamicArray<usize> varyingKeys;
+    DynamicArray<string> functionNames;
+    DynamicArray<string> functionTexts;
+    DynamicArray<string> builtins;
+    string functions = "";
+    DynamicArray<string> found;
+    int32 letsMade = 0;
+    int32 lets = 0;
+
+    public ctor make(MaterialSettings settings) {
+        this.declared = give settings;
+        this.varyingSources = DynamicArray.empty(); this.varyingKeys = DynamicArray.empty();
+        this.functionNames = DynamicArray.empty(); this.functionTexts = DynamicArray.empty();
+        this.builtins = DynamicArray.empty(); this.found = DynamicArray.empty();
+    }
+
+    // ---- what a material's nodes read and set ----
+
+    // The setting `name`, a float, as the shader reads it. A setting the material did not declare as a float is refused.
+    public fn FloatNode uniformFloat(string name) { return FloatNode.of(e: this.setting(name: give name, wgslType: "f32")); }
+    // The setting `name`, a vector or a colour, as the shader reads it.
+    public fn Vec3Node uniformVec3(string name) { return Vec3Node.of(e: this.setting(name: give name, wgslType: "vec3f")); }
+
+    fn Shared<Expr> setting(string name, string wgslType) {
+        bool declaredHere = false;
+        for (isize i = 0; i < this.declared.count(); i = i + 1) {
+            if (this.declared.nameAt(i: i) == name) {
+                declaredHere = true;
+                string has = this.declared.typeAt(i: i);
+                if (has != wgslType) {
+                    this.problem(words: "the setting `" + name + "` is read as " + wgslType + ", and the material declares it " + has);
+                }
+            }
+        }
+        if (!declaredHere) { this.problem(words: "the setting `" + name + "` is read, and the material never declares it"); }
+        Shared<Expr> e = new Expr.make(kind: ExprKind::Name, text: "material." + name, wgslType: give wgslType, amount: 0.0);
+        return e;
+    }
+
+    // The vertex's clip-space position, as TSL's `vertexNode`. A material that sets none has every mesh's: the camera's
+    // view-projection, times the object's world matrix, times the vertex.
+    public fn void vertexPosition(Vec4Node node) { this.clip = Optional::Some(value: give node); }
+    // The fragment's colour, as TSL's `outputNode`. A material that sets none draws white.
+    public fn void fragmentColor(Vec4Node node) { this.colour = Optional::Some(value: give node); }
+
+    // What the compile refused, each said once; empty when the WGSL is the material's.
+    public const fn DynamicArray<string> problems() { return copy this.found; }
+    // How many lets the WGSL holds, its functions' and its stages'.
+    public const fn int32 letCount() { return this.letsMade; }
+
+    // ---- the compile ----
+
+    fn void problem(string words) {
+        for (isize i = 0; i < this.found.length(); i = i + 1) { if (this.found[i] == words) { return; } }
+        this.found.add(item: give words);
+    }
+
+    // Counts every use in `e`, not entering a called function's body, which is a scope of its own, nor, in the fragment
+    // stage, a varying's source, which is the vertex stage's.
+    fn void countIn(ref Uses uses, Shared<Expr> e, Scope where) {
+        usize at = identity(e: e.deref());
+        if (!uses.count(at: at)) { return; }
+        ExprKind kind = e.exprKind();
+        if (where == Scope::Fragment && (kind == ExprKind::Varying || kind == ExprKind::Attribute)) { return; }
+        for (isize i = 0; i < e.argCount(); i = i + 1) { this.countIn(uses: ref uses, e: e.argAt(i: i), where: where); }
+    }
+
+    // The varying the fragment stage reads for `e`: its index, added the first time.
+    fn isize varyingOf(Shared<Expr> e) {
+        usize at = identity(e: e.deref());
+        for (isize i = 0; i < this.varyingKeys.length(); i = i + 1) { if (this.varyingKeys[i] == at) { return i; } }
+        this.varyingKeys.add(item: at);
+        // a varying() carries its source; an attribute read in the fragment stage is its own
+        Shared<Expr> source = e.exprKind() == ExprKind::Varying ? e.argAt(i: 0) : copy e;
+        this.varyingSources.add(item: give source);
+        return this.varyingKeys.length() - 1;
+    }
+
+    // `e` as WGSL in `where`, a let written into `letsOut` first for a node used more than once.
+    fn string emit(ref Uses uses, ref string letsOut, Shared<Expr> e, Scope where) {
+        usize at = identity(e: e.deref());
+        isize u = uses.find(at: at);
+        if (u >= 0) {
+            string known = uses.nameOf(i: u);
+            if (known != "") { return known; }
+        }
+        string plain = this.spelled(uses: ref uses, letsOut: ref letsOut, e: copy e, where: where);
+        ExprKind kind = e.exprKind();
+        bool leaf = kind == ExprKind::Number || kind == ExprKind::Name || kind == ExprKind::VertexName
+            || kind == ExprKind::Param || kind == ExprKind::Attribute
+            || (where == Scope::Fragment && kind == ExprKind::Varying);
+        if (u >= 0 && uses.usesOf(i: u) > 1 && !leaf) {
+            int32 n = this.lets;
+            string named = "n${n}";
+            this.lets = this.lets + 1;
+            this.letsMade = this.letsMade + 1;
+            letsOut = letsOut + "  let " + named + " = " + plain + ";\n";
+            uses.nameAt(i: u, name: copy named);
+            return named;
+        }
+        return plain;
+    }
+
+    fn string spelled(ref Uses uses, ref string letsOut, Shared<Expr> e, Scope where) {
+        ExprKind kind = e.exprKind();
+        string text = e.name();
+        match (kind) {
+            case Number: {
+                float32 v = e.number();
+                string written = wgslNumber(v: v);
+                if (written.isEmpty()) { this.problem(words: "a number WGSL cannot write, ${v}"); return "0.0"; }
+                return written;
+            }
+            case Name: { return text; }
+            case VertexName: {
+                if (where != Scope::Vertex) {
+                    this.problem(words: "`" + text + "` is the vertex stage's alone: read it there, and hand the fragment stage what it needs through varying()");
+                }
+                return text;
+            }
+            case Param: {
+                if (where != Scope::Function) { this.problem(words: "a shader function's parameter `" + text + "` is read outside its function"); }
+                return text;
+            }
+            case Attribute: {
+                if (where == Scope::Function) {
+                    this.problem(words: "the vertex attribute `" + text + "` is read inside a shader function: hand it in as a parameter");
+                    return text;
+                }
+                if (where == Scope::Fragment) { isize at = this.varyingOf(e: copy e); return "v.v${at}"; }
+                return text;
+            }
+            case Varying: {
+                if (where == Scope::Function) {
+                    this.problem(words: "a varying is read inside a shader function: hand it in as a parameter");
+                    return "v";
+                }
+                if (where == Scope::Fragment) { isize at = this.varyingOf(e: copy e); return "v.v${at}"; }
+                return this.emit(uses: ref uses, letsOut: ref letsOut, e: e.argAt(i: 0), where: where);
+            }
+            case Binary: {
+                string a = this.emit(uses: ref uses, letsOut: ref letsOut, e: e.argAt(i: 0), where: where);
+                string b = this.emit(uses: ref uses, letsOut: ref letsOut, e: e.argAt(i: 1), where: where);
+                return "(" + a + " " + text + " " + b + ")";
+            }
+            case Unary: {
+                string a = this.emit(uses: ref uses, letsOut: ref letsOut, e: e.argAt(i: 0), where: where);
+                return "(" + text + a + ")";
+            }
+            case Member: {
+                string a = this.emit(uses: ref uses, letsOut: ref letsOut, e: e.argAt(i: 0), where: where);
+                return a + "." + text;
+            }
+            case FnCall: {
+                Optional<Shared<ShaderFunction>> function = e.calledFunction();
+                match (give function) {
+                    case Some(value: f): { this.reach(f: give f); }
+                    case None: { }
+                };
+                return this.callText(uses: ref uses, letsOut: ref letsOut, e: copy e, where: where);
+            }
+            case Call: {
+                bool known = false;
+                for (isize i = 0; i < this.builtins.length(); i = i + 1) { if (this.builtins[i] == text) { known = true; } }
+                if (!known) { this.builtins.add(item: copy text); }
+                return this.callText(uses: ref uses, letsOut: ref letsOut, e: copy e, where: where);
+            }
+        };
+    }
+
+    fn string callText(ref Uses uses, ref string letsOut, Shared<Expr> e, Scope where) {
+        string written = e.name() + "(";
+        for (isize i = 0; i < e.argCount(); i = i + 1) {
+            if (i > 0) { written = written + ", "; }
+            written = written + this.emit(uses: ref uses, letsOut: ref letsOut, e: e.argAt(i: i), where: where);
+        }
+        return written + ")";
+    }
+
+    // Writes `f` once, its callees first. A second function of the same name and other WGSL is refused.
+    fn void reach(Shared<ShaderFunction> f) {
+        string name = f.name();
+        Optional<Shared<Expr>> held = f.bodyExpr();
+        Shared<Expr> body = match (give held) {
+            case Some(value: b): give b;
+            case None: { this.problem(words: "the shader function `" + name + "` has no body"); return; }
+        };
+        string named = nameProblem(name: name, what: "the shader function");
+        if (!named.isEmpty()) { this.problem(words: copy named); }
+        Uses uses = Uses.make();
+        this.countIn(uses: ref uses, e: copy body, where: Scope::Function);
+        int32 outer = this.lets;
+        int32 madeBefore = this.letsMade;
+        this.lets = 0;
+        string letsOut = "";
+        string result = this.emit(uses: ref uses, letsOut: ref letsOut, e: copy body, where: Scope::Function);
+        this.lets = outer;
+        string text = "fn " + name + "(";
+        for (isize i = 0; i < f.params(); i = i + 1) {
+            string p = f.paramName(i: i);
+            string bad = nameProblem(name: p, what: "the parameter");
+            if (!bad.isEmpty()) { this.problem(words: copy bad); }
+            if (i > 0) { text = text + ", "; }
+            text = text + p + ": " + f.paramType(i: i);
+        }
+        text = text + ") -> " + body.wgslType() + " {\n" + letsOut + "  return " + result + ";\n}\n";
+        for (isize i = 0; i < this.functionNames.length(); i = i + 1) {
+            if (this.functionNames[i] == name) {
+                // written already: its lets are counted once
+                this.letsMade = madeBefore;
+                if (this.functionTexts[i] != text) { this.problem(words: "two different shader functions are named `" + name + "`"); }
+                return;
+            }
+        }
+        this.functionNames.add(item: copy name);
+        this.functionTexts.add(item: copy text);
+        this.functions = this.functions + text;
+    }
+
+    // The material's whole shader module: the renderer's group 0, the settings, the functions, the stages.
+    public fn string wgsl() {
+        // the fragment stage first, so the vertex stage knows the varyings it writes
+        Vec4Node colourNode = match (this.colour) {
+            case Some(value: c): copy c;
+            case None: vec4(xyz: vec3(x: constant(value: 1.0), y: constant(value: 1.0), z: constant(value: 1.0)), w: constant(value: 1.0));
+        };
+        Uses fragUses = Uses.make();
+        this.countIn(uses: ref fragUses, e: colourNode.expr(), where: Scope::Fragment);
+        this.lets = 0;
+        string fragLets = "";
+        string fragOut = this.emit(uses: ref fragUses, letsOut: ref fragLets, e: colourNode.expr(), where: Scope::Fragment);
+
+        Vec4Node clipNode = match (this.clip) {
+            case Some(value: c): copy c;
+            case None: cameraViewProjectionMatrix() * modelWorldMatrix() * vec4(xyz: positionLocal(), w: constant(value: 1.0));
+        };
+        Uses vertUses = Uses.make();
+        this.countIn(uses: ref vertUses, e: clipNode.expr(), where: Scope::Vertex);
+        for (isize i = 0; i < this.varyingSources.length(); i = i + 1) {
+            this.countIn(uses: ref vertUses, e: copy this.varyingSources[i], where: Scope::Vertex);
+        }
+        this.lets = 0;
+        string vertLets = "";
+        string vertOut = this.emit(uses: ref vertUses, letsOut: ref vertLets, e: clipNode.expr(), where: Scope::Vertex);
+        string varyingWrites = "";
+        string varyingFields = "";
+        for (isize i = 0; i < this.varyingSources.length(); i = i + 1) {
+            string value = this.emit(uses: ref vertUses, letsOut: ref vertLets, e: copy this.varyingSources[i], where: Scope::Vertex);
+            string typed = this.varyingSources[i].wgslType();
+            varyingWrites = varyingWrites + "  v.v${i} = " + value + ";\n";
+            varyingFields = varyingFields + "  @location(${i}) v${i}: " + typed + ",\n";
+        }
+        for (isize i = 0; i < this.functionNames.length(); i = i + 1) {
+            for (isize k = 0; k < this.builtins.length(); k = k + 1) {
+                if (this.functionNames[i] == this.builtins[k]) {
+                    string clash = copy this.builtins[k];
+                    this.problem(words: "the shader function `" + clash + "` would hide WGSL's built-in `" + clash + "`, which this shader calls");
+                }
+            }
+        }
+
+        for (isize i = 0; i < this.declared.count(); i = i + 1) {
+            string s = this.declared.nameAt(i: i);
+            string bad = nameProblem(name: s, what: "the setting");
+            if (!bad.isEmpty()) { this.problem(words: copy bad); }
+            for (isize k = 0; k < i; k = k + 1) {
+                if (this.declared.nameAt(i: k) == s) { this.problem(words: "the setting `" + s + "` is declared twice"); }
+            }
+        }
+
+        string written = prelude();
+        if (this.declared.count() > 0) {
+            written = written + "struct Material {\n";
+            for (isize i = 0; i < this.declared.count(); i = i + 1) {
+                written = written + "  " + this.declared.nameAt(i: i) + ": " + this.declared.typeAt(i: i) + ",\n";
+            }
+            written = written + "};\n@group(1) @binding(0) var<uniform> material: Material;\n";
+        }
+        written = written + this.functions;
+        written = written + "struct Varyings {\n  @builtin(position) clip: vec4f,\n" + varyingFields + "};\n";
+        written = written + "@vertex fn vs(@builtin(instance_index) object: u32, @location(0) position: vec3f) -> Varyings {\n"
+            + "  var v: Varyings;\n" + vertLets + "  v.clip = " + vertOut + ";\n" + varyingWrites + "  return v;\n}\n";
+        written = written + "@fragment fn fs(v: Varyings) -> @location(0) vec4f {\n" + fragLets + "  return " + fragOut + ";\n}\n";
+        return written;
+    }
+}

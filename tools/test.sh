@@ -54,16 +54,17 @@ goldensHeld() {
 
 # A misuse the library refuses is printed by default (kyoten's rendering.md § Decided, GFX-1's part 2, question 4), which
 # only the run's output can show: the tests' renderer that prints refuses one render, the one told not to print refuses
-# 70 and must print none, and the tree refuses five adds (tests/src/boxes.kama and parts.kama). Each refusal printed
-# once, on every leg.
+# 70 and must print none, the tree refuses five adds (tests/src/boxes.kama and parts.kama), and a renderer refuses one
+# material, rendered twice (tests/src/shaders.kama). Each refusal printed once, on every leg.
 refusalsPrinted() {
-    local log="$1" leg="$2" renders adds
+    local log="$1" leg="$2" renders adds materials
     renders="$(grep -c '@kama/graphics: render drew nothing' "$log" || true)"
     adds="$(grep -c '@kama/graphics: add refused' "$log" || true)"
-    if [ "$renders" = 1 ] && [ "$adds" = 5 ]; then
+    materials="$(grep -c '@kama/graphics: a material was refused' "$log" || true)"
+    if [ "$renders" = 1 ] && [ "$adds" = 5 ] && [ "$materials" = 1 ]; then
         echo "ok   each refused misuse was printed once, and none by the renderer told not to print ($leg)"
     else
-        echo "FAIL ($leg) the refused misuses printed: ${renders} render line(s), not 1, and ${adds} add line(s), not 5"
+        echo "FAIL ($leg) the refused misuses printed: ${renders} render line(s), not 1, ${adds} add line(s), not 5, and ${materials} material line(s), not 1"
         failed=1
     fi
 }

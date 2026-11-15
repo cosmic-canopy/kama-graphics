@@ -5,11 +5,12 @@ tested. What comes next is [ROADMAP.md](ROADMAP.md), every feature it will have 
 decided design and the library's departures from kama's are [AGENTS.graphics.md](AGENTS.graphics.md), and its history
 is the git log and [CHANGELOG.md](CHANGELOG.md).
 
-**Where it stands** (2026-11-15, kama 0.9.956): GFX-1's parts 1 and 2. A `Renderer` with no window draws a scene of
-unlit boxes through a perspective camera into a render target, with reversed depth, and reads it back as an
-`@kama/image` `Image`, natively on Windows on wgpu-native v29.0.1.1 and on the web in headless Edge 157, Chrome for
-Testing 157 and Firefox 160. A misuse the types cannot refuse is refused and reported, never ending the program. Every
-frame in the tests is held to its software GPU's golden. Not published.
+**Where it stands** (2026-11-15, kama 0.9.960): GFX-1's parts 1 and 2, and part 3's first part. A `Renderer` with no
+window draws a scene of unlit boxes through a perspective camera into a render target, with reversed depth, and reads it
+back as an `@kama/image` `Image`, natively on Windows on wgpu-native v29.0.1.1 and on the web in headless Edge 157,
+Chrome for Testing 157 and Firefox 160. A material's shader is typed nodes compiled to WGSL at run time. A misuse the
+types cannot refuse is refused and reported, never ending the program. Every frame in the tests is held to its software
+GPU's golden. Not published.
 
 ## Using it
 
@@ -96,6 +97,9 @@ Decided, GFX-1's part 2, question 4), as `@kama/gpu` reports every misuse of Web
   rather than an option at its making, since a renderer's own misuses never arise while it is made.
 - **A node added under itself or one of its own children is refused** (§ The scene graph): `add` changes nothing,
   prints the refusal and says `false`.
+- **A material whose compile is refused draws nothing** (§ The compiler): every mesh using it is skipped, and the renderer
+  records the error once, of kind `GraphicsErrorKind::Material`, in the compile's words. It never compiles the material
+  again, so it is reported once, however many frames draw.
 
 ## Render targets
 
@@ -168,10 +172,101 @@ Decided, GFX-1's part 2, question 4), as `@kama/gpu` reports every misuse of Web
 ## Materials
 
 - **`Material` is the contract a mesh's look implements;** three.js's mesh materials are typed presets over it (area 3,
-  item 2). A setting is a value, so changing one never compiles a shader, and every mesh using the material draws with
-  the change.
-- **`MeshBasicMaterial` is unlit:** every fragment its `color()`/`colorMut()`, white by default. **Its WGSL is written by
-  hand, a stopgap** until part 3 builds it from typed nodes behind the same API, held to part 2's golden.
+  item 2). It has four members:
+  - `settings(into:)`, its settings declared with their values now;
+  - `shade(builder:)`, its typed nodes (§ Typed nodes);
+  - `version()`, which moves whenever a setting changes;
+  - `gpuMut()`, what a renderer keeps of it.
+- **A setting is a value, so changing one never compiles a shader,** and every mesh using the material draws with the
+  change. The settings are declared apart from the nodes, so writing them after a change builds no node.
+- **A renderer compiles a material once,** the first time a mesh draws with it, and keeps its WGSL. A material whose
+  compile is refused draws nothing (§ Misuse).
+- **`MeshBasicMaterial` is unlit:** every fragment its `color()`/`colorMut()`, white by default, opaque. Its nodes are
+  three.js's: the colour setting as the fragment's colour, on every mesh's vertex stage. Part 2's golden holds them to the
+  bytes its hand-written WGSL drew.
+
+## Typed nodes
+
+What a material's shader is written in (kyoten's rendering.md § Decided, GFX-1's question 2 and part 3's question).
+
+- **One node type per WGSL type:** `FloatNode` (f32), `Vec3Node` (vec3f, a colour or a direction), `Vec4Node` (vec4f)
+  and `Mat4Node` (mat4x4f). Each implements the public node contract, `Node<T is This>`: `expr()`, `wgslType()` and
+  `over(e:)`. So a program's own node type goes wherever the library takes a node, and a function generic over `Node`
+  serves every type.
+- **A node is a reference, as TSL's are.** Handing one on shares it, since each is `Copyable(bare: copy)` over a shared
+  expression, so a node used twice is one expression.
+- **Operators by operand type, as WGSL's:**
+  - `+ - * /` between two nodes of a type;
+  - a vector with a float, and a float times a vector;
+  - a matrix times a matrix or a vec4;
+  - unary `-`;
+  - a number on either side (`0.5 * x`, `x + 1.0`).
+
+  A float in a colour's place, or a vec4 used as a vec3, does not compile.
+- **Parts:** a vector's `x()`, `y()` and `z()`, and a vec4's `xyz()` and `w()`.
+- **Made from numbers and parts:** `constant(value:)`, `vec3(x:, y:, z:)` and `vec4(xyz:, w:)`.
+- **WGSL's built-ins, typed:**
+  - `dot(a:, b:)` and `normalize(v:)` on vectors;
+  - on any float type, the result its type: `max(a:, b:)`, `min(a:, b:)`, `saturate(x:)`, `sqrt(x:)`, `exp2(x:)`,
+    `pow(x:, power:)`, and `mix(from:, to:, by:)`, whose `by` is a float.
+- **What the renderer gives every material,** as TSL's:
+  - `positionLocal()`, the vertex's position in its mesh;
+  - `modelWorldMatrix()`, the object's world matrix, read in the vertex stage alone;
+  - `cameraViewProjectionMatrix()`.
+- **`varying(value:)` hands a vertex stage's value to the fragment stage,** interpolated, as TSL's `varying()`. A vertex
+  attribute read in the fragment stage passes through a varying by itself.
+- **A typed function is a `ShaderFunction`,** as TSL's `Fn(…).setLayout(…)`. It is written into a material's WGSL once,
+  where the material reaches it:
+  - a kama function makes one with `new ShaderFunction.make(name:)`;
+  - it declares each parameter with the argument this call passes, `param(function:, name:, value:)`, which hands back
+    a node of the argument's type to build the body from;
+  - it returns `called(function:, body:)`, a node of the body's type.
+
+  So a call cannot pass the wrong number or type of arguments, and the kama signature always matches the WGSL. The
+  library's own shader functions (the BSDFs, the lights) are written so (part 3's question).
+- **Programs write nodes in safe kama.** Only the compile is `unsafe`, since it tells nodes apart by where their
+  expressions live.
+
+## The compiler
+
+`NodeBuilder` compiles a material, and a renderer runs it. It is made with the material's `MaterialSettings` and given
+the material's nodes: `vertexPosition(node:)` and `fragmentColor(node:)`, as TSL's `vertexNode` and `outputNode`. Its
+`wgsl()` is the whole shader module:
+
+- **group 0, what the renderer gives:** `frame` (the view-projection) and `objects` (each mesh's world matrix);
+- **group 1, the material's settings:** one uniform block, `material`, which both stages may read.
+  - `MaterialSettings` declares each setting with its value: `addFloat`, `addVec3` and `addColor` (linear).
+  - It lays the block out by WGSL's rules for the uniform address space: an f32 on 4 bytes, a vec3f on 16, the block a
+    multiple of 16 and never empty.
+  - A material's nodes read a setting with `uniformFloat(name:)` and `uniformVec3(name:)`.
+- **each typed function the stages reach, once, its callees first;**
+- **the varyings,** one location each, in the order the fragment stage reads them;
+- **the two entry points,** `vs` and `fs`:
+  - a material that sets no vertex position has every mesh's: the view-projection, times the world matrix, times the
+    vertex;
+  - a material that sets no colour draws white.
+
+**A node used more than once in a function or a stage is written once, as a `let`** (`n0`, `n1`, …), so the WGSL reads
+as written by hand. A number, a name, a parameter, an attribute and a varying read in the fragment stage are written where
+they are used.
+
+**A number is written as kama's shortest float32 digits,** a whole number with its `.0`. A WGSL compiler reads a literal
+as an abstract float (a float64) and then rounds it to f32, and for one float32 in all 2,139,095,040 positive finite ones,
+`7.038531e-26` (and its negative), those digits round to its neighbour that way. That one is written with its float64
+digits, which a float64 holds exactly. Measured over every float32 (kyoten's `.scratch/gfx1-part3/numbers/`).
+
+**What the compile refuses,** in `problems()`, each said once. A material with a problem draws nothing (§ Misuse):
+- a value only the vertex stage has, read in the fragment stage;
+- a function's parameter read outside its function;
+- a vertex attribute or a varying read inside a function;
+- two different functions of one name;
+- a function that would hide a WGSL built-in the shader calls;
+- a function, parameter or setting name that is not a WGSL name (a letter, then letters, digits and `_`), is a WGSL
+  keyword, or is a name the compiler writes;
+- a setting read that the material never declared, or read as another type, and a setting declared twice;
+- a number WGSL cannot write (an infinity or a NaN).
+
+WGSL's reserved words beyond its keywords are refused by the GPU's own compile, reported as every WGSL error is.
 
 ## The camera
 
@@ -203,7 +298,7 @@ Decided, GFX-1's part 2, question 4), as `@kama/gpu` reports every misuse of Web
 - then `tests/`, one program, built debug and release and run natively, and built for the web and run under `kama run`
   in Edge, Firefox and the pinned Chrome for Testing, each started as `tools/browsers.mjs` says.
 
-It is 95 cases on each leg that names a software GPU, and 90 in Edge, whose leg names none.
+It is 142 cases on each leg that names a software GPU, and 137 in Edge, whose leg names none.
 
 - **The goldens** (kyoten's rendering.md § Decided, GFX-1's part 1, questions 2 and 3):
   - Each leg names its software GPU: `--golden warp` natively on Windows and in Firefox, `--golden swiftshader` in the
@@ -253,7 +348,7 @@ It is 95 cases on each leg that names a software GPU, and 90 in Edge, whose leg 
     worked by hand, every triangle's winding against its normal, segments, and a count below 1;
   - the camera's projection against three.js's, its depth at the near and far planes, a changed field of view, and an
     infinite far;
-  - `MeshBasicMaterial`'s default and its settings;
+  - `MeshBasicMaterial`'s default, and its version moving with its colour;
   - the tree's add, remove and freeing;
   - question 4's refusals: a node added under itself, its child, its grandchild, or its own child with a parent of its
     own, each refused with `false` and nothing changed; `isAncestorOf` above a child and a grandchild, never itself, its
@@ -271,5 +366,29 @@ It is 95 cases on each leg that names a software GPU, and 90 in Edge, whose leg 
     a camera naming no target drawing nothing, reported once as `NoTarget`, and drained; `printErrors` true by default
     and false once turned off; a renderer told not to print keeping the oldest 64 of 70 and counting 6, its count
     drained too.
-- **Printed from outside the program:** the gate counts each leg's printed lines, one for the render refused by the
-  renderer that prints and five for the refused adds, and none from the renderer told not to print.
+- **Part 3, with no GPU** (`tests/src/nodes.kama`), each want the WGSL as written by hand:
+  - `wgslNumber`: the shortest digits; 1,043,716 float32s, every 4,099th of each sign, reading back as themselves directly
+    and through a float64; `7.038531e-26` written with its float64 digits; an infinity and a NaN refused;
+  - `MaterialSettings`: the uniform layout, each value's bits at its offset, an empty block's 16 bytes, two floats side by
+    side;
+  - every node an operator, a built-in or a typed function makes carrying its node type's WGSL type, and the node types
+    WGSL's own;
+  - `MeshBasicMaterial`'s module through the `Material` contract, and its settings the linear colour;
+  - a material that sets nothing drawing white; typed functions written once, callees first, with lets, and the lets
+    counted; a function of a vector; a node used once written in place; a second compile from the same named nodes giving
+    the same WGSL (kyoten's KY-59); varyings, from an attribute and from `varying()`; a material's own vertex position
+    with a let both stages' values share;
+  - every operator and built-in spelled: a float's, a vector's and a vec4's;
+  - each refusal of § The compiler, in its words.
+- **Part 3, on each leg's GPU** (`tests/src/shaders.kama`):
+  - every module the node cases wrote, compiled by the leg's own WGSL compiler (naga natively and in Firefox, Tint in
+    Chromium) with no message, not even a warning;
+  - a mesh whose material is refused drawing nothing beside one that draws, reported once as `Material` in the compile's
+    words, and neither compiled nor reported again on a second render;
+  - the mesh that draws has a material whose vertex stage reads one of its settings, and it draws with no WebGPU
+    error.
+- **Part 2's golden holds part 3's compiler:** `boxes/<gpu>.png` is matched byte for byte with `MeshBasicMaterial`'s
+  nodes, as it was with its WGSL by hand.
+- **Printed from outside the program:** the gate counts each leg's printed lines: one for the render refused by the
+  renderer that prints, five for the refused adds, one for the refused material, and none from the renderer told not to
+  print.

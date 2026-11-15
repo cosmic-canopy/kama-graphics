@@ -1,0 +1,545 @@
+// GFX-1's part 3, with no GPU: typed nodes compiled to WGSL (kyoten's rendering.md § Decided, GFX-1's part 3). Each
+// want is the WGSL as written by hand, by WGSL's grammar and kama's operator precedence. Every module a case compiles
+// is also compiled on the leg's device (tests/src/shaders.kama), which holds it to WGSL's own compiler.
+
+import {
+    std::collections::DynamicArray, std::memory::Shared, std::fmt::ParseError, std::fmt::Parseable,
+    graphics::NodeBuilder, graphics::MaterialSettings, graphics::FloatNode, graphics::Vec3Node, graphics::Vec4Node,
+    graphics::ShaderFunction, graphics::param, graphics::called, graphics::constant, graphics::vec3, graphics::vec4,
+    graphics::dot, graphics::normalize, graphics::max, graphics::min, graphics::mix, graphics::saturate,
+    graphics::sqrt, graphics::exp2, graphics::pow, graphics::varying, graphics::positionLocal,
+    graphics::modelWorldMatrix, graphics::cameraViewProjectionMatrix, graphics::wgslNumber,
+    graphics::MeshBasicMaterial, graphics::Color, graphics::Node, graphics::Mat4Node,
+    Verdicts,
+};
+export { nodeCases, ShaderCase, nodeShaders };
+
+// What the renderer gives every material in group 0.
+fn string prelude() {
+    return "struct Frame { viewProjection: mat4x4f };\n"
+        + "@group(0) @binding(0) var<uniform> frame: Frame;\n"
+        + "@group(0) @binding(1) var<storage, read> objects: array<mat4x4f>;\n";
+}
+// Every mesh's vertex stage, with no varying.
+fn string standardVertex() {
+    return "struct Varyings {\n  @builtin(position) clip: vec4f,\n};\n"
+        + "@vertex fn vs(@builtin(instance_index) object: u32, @location(0) position: vec3f) -> Varyings {\n"
+        + "  var v: Varyings;\n"
+        + "  v.clip = ((frame.viewProjection * objects[object]) * vec4f(position, 1.0));\n"
+        + "  return v;\n}\n";
+}
+fn string fragment(const ref string body) {
+    return "@fragment fn fs(v: Varyings) -> @location(0) vec4f {\n" + body + "}\n";
+}
+
+// "" when `got` is `want`; else where they part, with what follows on each side.
+fn string sameText(const ref string got, const ref string want) {
+    if (got == want) { return ""; }
+    isize at = 0;
+    while (at < got.length() && at < want.length() && got[at] == want[at]) { at = at + 1; }
+    string g = got.substring(start: at, end: at + 60 < got.length() ? at + 60 : got.length());
+    string w = want.substring(start: at, end: at + 60 < want.length() ? at + 60 : want.length());
+    return "they part at byte ${at}: got [" + g + "], want [" + w + "]";
+}
+
+// "" when `problems` is `want`, each said once, in order.
+fn string sameProblems(const ref DynamicArray<string> problems, const ref DynamicArray<string> want) {
+    if (problems.length() != want.length()) {
+        string all = "";
+        for (isize i = 0; i < problems.length(); i = i + 1) { all = all + "[" + problems[i] + "] "; }
+        isize n = problems.length();
+        isize m = want.length();
+        return "${n} problem(s), not ${m}: " + all;
+    }
+    for (isize i = 0; i < want.length(); i = i + 1) {
+        if (problems[i] != want[i]) { string p = copy problems[i]; return "problem ${i} is [" + p + "]"; }
+    }
+    return "";
+}
+fn DynamicArray<string> one(string a) { DynamicArray<string> l = DynamicArray.empty(); l.add(item: give a); return l; }
+
+// A module a case compiled, for the GPU stage, and whether its compile was meant to be refused.
+type resource ShaderCase {
+    string label;
+    string text;
+    public ctor make(string name, string wgsl) { this.label = give name; this.text = give wgsl; }
+    public const fn string name() { return copy this.label; }
+    public const fn string wgsl() { return copy this.text; }
+}
+
+// three.js r187's D_GGX (nodes/functions/BSDF/D_GGX.js), here only to give the compiler a function with lets.
+fn FloatNode dGgx(FloatNode alpha, FloatNode dotNH) {
+    Shared<ShaderFunction> f = new ShaderFunction.make(name: "D_GGX");
+    FloatNode a = param(function: f, name: "alpha", value: alpha);
+    FloatNode d = param(function: f, name: "dotNH", value: dotNH);
+    FloatNode a2 = a * a;
+    FloatNode denom = 1.0 - d * d * (1.0 - a2);
+    return called(function: f, body: 0.3183098861837907 * a2 / (denom * denom));
+}
+// A function calling another, twice.
+fn FloatNode twice(FloatNode alpha, FloatNode dotNH) {
+    Shared<ShaderFunction> f = new ShaderFunction.make(name: "twice");
+    FloatNode a = param(function: f, name: "alpha", value: alpha);
+    FloatNode d = param(function: f, name: "dotNH", value: dotNH);
+    return called(function: f, body: dGgx(alpha: a, dotNH: d) + dGgx(alpha: a, dotNH: d * 0.5));
+}
+
+// A function of a vector and a float, answering a vector.
+fn Vec3Node tint(Vec3Node colour, FloatNode k) {
+    Shared<ShaderFunction> f = new ShaderFunction.make(name: "tint");
+    Vec3Node c = param(function: f, name: "colour", value: colour);
+    FloatNode s = param(function: f, name: "k", value: k);
+    return called(function: f, body: c * s);
+}
+
+// `bad` gains `label` when `node`'s expression does not carry the node's own WGSL type, which is what a let, a varying,
+// a parameter and a function's result are declared with.
+fn void hold<T: Node<T>>(ref string bad, T node, string label) {
+    string carried = node.expr().wgslType();
+    string own = node.wgslType();
+    if (carried != own) { bad = bad + " " + label + " carries " + carried + ", not " + own + ";"; }
+}
+
+// The settings most cases read: a float `r`, and vectors `c` and `d`.
+fn MaterialSettings rcd() {
+    MaterialSettings s = MaterialSettings.make();
+    s.addFloat(name: "r", value: 0.5);
+    s.addVec3(name: "c", x: 0.25, y: 0.5, z: 0.75);
+    s.addVec3(name: "d", x: 1.0, y: 0.0, z: 0.5);
+    return s;
+}
+fn string rcdStruct() {
+    return "struct Material {\n  r: f32,\n  c: vec3f,\n  d: vec3f,\n};\n@group(1) @binding(0) var<uniform> material: Material;\n";
+}
+
+// The fragment's return of `colour` and `alpha` over `rcd`'s settings, with its lets: the body alone.
+fn string bodyOf(ref NodeBuilder b, Vec3Node colour, FloatNode alpha) {
+    b.fragmentColor(node: vec4(xyz: colour, w: alpha));
+    string all = b.wgsl();
+    string opener = "@fragment fn fs(v: Varyings) -> @location(0) vec4f {\n";
+    Optional<isize> at = all.find(substring: copy opener);
+    isize from = match (at) { case Some(value: i): i + opener.length(); case None: -1; };
+    if (from < 0) { return "no fragment stage"; }
+    return all.substring(start: from, end: all.length() - 2);
+}
+
+unsafe fn void numberCases(ref Verdicts found) {
+    string spelled = wgslNumber(v: 0.04) + " " + wgslNumber(v: 0.1) + " " + wgslNumber(v: 1.0) + " " + wgslNumber(v: 0.3183098861837907)
+        + " " + wgslNumber(v: -2.5) + " " + wgslNumber(v: 1e-7) + " " + wgslNumber(v: 123456789.0) + " " + wgslNumber(v: 0.0);
+    found.add(name: "wgslNumber: a float32's shortest digits, a whole number with its .0",
+              why: sameText(got: spelled, want: "0.04 0.1 1.0 0.31830987 -2.5 1e-07 1.2345679e+08 0.0"));
+    // every 4,099th float32 pattern, both signs, reads back as itself through a float32 and through a float64, as a WGSL
+    // compiler reads an abstract-float literal
+    string first = "";
+    int32 bad = 0;
+    int32 tried = 0;
+    uint32 bits = 0;
+    while (bits < 0x7f800000) {
+        for (int32 sign = 0; sign < 2; sign = sign + 1) {
+            uint32 b = sign == 0 ? bits : bits | 0x80000000;
+            float32 v = bitcast<float32>(b);
+            string t = wgslNumber(v: v);
+            Result<float32, ParseError> direct = Parseable::<float32>.parse(text: t);
+            Result<float64, ParseError> wide = Parseable::<float64>.parse(text: t);
+            float32 d = match (direct) { case Ok(value: x): x; case Err(error: e): 0.0; };
+            float64 w = match (wide) { case Ok(value: x): x; case Err(error: e): 0.0; };
+            bool shaped = t.contains(substring: ".") || t.contains(substring: "e");
+            bool back = bitcast<uint32>(d) == b && bitcast<uint32>(cast<float32>(w)) == b;
+            if (!(shaped && back)) {
+                if (bad == 0) { first = "bits ${b} wrote " + t; }
+                bad = bad + 1;
+            }
+            tried = tried + 1;
+        }
+        bits = bits + 4099;
+    }
+    found.add(name: "wgslNumber: ${tried} float32s, every 4,099th of each sign, read back as themselves, directly and through a float64",
+              why: bad == 0 ? "" : "${bad} did not, the first " + first);
+    // the one float32, and its negative, whose shortest digits a float64 reading rounds to its neighbour
+    uint32 rareBits = 363742205;
+    uint32 rareNegative = rareBits | 0x80000000;
+    string rare = wgslNumber(v: bitcast<float32>(rareBits)) + " " + wgslNumber(v: bitcast<float32>(rareNegative));
+    found.add(name: "wgslNumber: 7.038531e-26, which a WGSL compiler would read through a float64 as its neighbour, is written with its float64 digits",
+              why: sameText(got: rare, want: "7.038530691851209e-26 -7.038530691851209e-26"));
+    string inf = wgslNumber(v: bitcast<float32>(0x7f800000));
+    string nan = wgslNumber(v: bitcast<float32>(0x7fc00000));
+    string minus = wgslNumber(v: bitcast<float32>(0xff800000ui32));
+    found.add(name: "wgslNumber: an infinity or a NaN, which WGSL cannot write, is \"\"",
+              why: inf.isEmpty() && nan.isEmpty() && minus.isEmpty() ? "" : "[" + inf + "] [" + nan + "] [" + minus + "]");
+}
+
+unsafe fn void settingsCases(ref Verdicts found) {
+    MaterialSettings s = rcd();
+    uint32 o0 = s.offsetAt(i: 0);
+    uint32 o1 = s.offsetAt(i: 1);
+    uint32 o2 = s.offsetAt(i: 2);
+    DynamicArray<uint8> bytes = s.bytes();
+    isize n = bytes.length();
+    found.add(name: "MaterialSettings: WGSL's uniform layout, an f32 at 0 and each vec3f on 16 bytes, the block 48 bytes",
+              why: o0 == 0 && o1 == 16 && o2 == 32 && n == 48 ? "" : "offsets ${o0}, ${o1}, ${o2}, ${n} bytes");
+    uint32 r = bitcast<uint32>(0.5);
+    uint32 cz = bitcast<uint32>(0.75);
+    bool laid = n == 48 && bytes[0] == truncate<uint8>(r) && bytes[3] == truncate<uint8>(r >> 24)
+        && bytes[4] == 0 && bytes[15] == 0
+        && bytes[24] == truncate<uint8>(cz) && bytes[27] == truncate<uint8>(cz >> 24) && bytes[28] == 0
+        && bytes[32] == 0 && bytes[35] == 0x3f && bytes[36] == 0 && bytes[47] == 0;
+    found.add(name: "MaterialSettings: each value's float32 bits at its offset, little-endian, the padding zero",
+              why: laid ? "" : "the bytes are not laid out so");
+    MaterialSettings none = MaterialSettings.make();
+    DynamicArray<uint8> empty = none.bytes();
+    isize ne = empty.length();
+    found.add(name: "MaterialSettings: a block holding nothing is still 16 bytes, since a binding takes no empty buffer",
+              why: ne == 16 ? "" : "${ne} bytes");
+    MaterialSettings pair = MaterialSettings.make();
+    pair.addFloat(name: "f", value: 1.0);
+    pair.addFloat(name: "g", value: 2.0);
+    uint32 og = pair.offsetAt(i: 1);
+    DynamicArray<uint8> two = pair.bytes();
+    isize nt = two.length();
+    found.add(name: "MaterialSettings: two floats sit side by side, at 0 and 4, in a block rounded to 16",
+              why: og == 4 && nt == 16 ? "" : "the second at ${og}, ${nt} bytes");
+}
+
+// Every node a typed function or operator makes carries its node type's WGSL type, and each node type is WGSL's.
+fn void typeCases(ref Verdicts found) {
+    FloatNode f = constant(value: 1.0);
+    Vec3Node v = vec3(x: f, y: f, z: f);
+    Vec4Node q = vec4(xyz: v, w: f);
+    Mat4Node m = modelWorldMatrix();
+    string bad = "";
+    hold(bad: ref bad, node: f + f, label: "f + f"); hold(bad: ref bad, node: f - f, label: "f - f");
+    hold(bad: ref bad, node: f * f, label: "f * f"); hold(bad: ref bad, node: f / f, label: "f / f");
+    hold(bad: ref bad, node: f + 1.0, label: "f + 1"); hold(bad: ref bad, node: f - 1.0, label: "f - 1");
+    hold(bad: ref bad, node: f * 1.0, label: "f * 1"); hold(bad: ref bad, node: f / 1.0, label: "f / 1");
+    hold(bad: ref bad, node: 1.0 + f, label: "1 + f"); hold(bad: ref bad, node: 1.0 - f, label: "1 - f");
+    hold(bad: ref bad, node: 1.0 * f, label: "1 * f"); hold(bad: ref bad, node: 1.0 / f, label: "1 / f");
+    hold(bad: ref bad, node: -f, label: "-f"); hold::<Vec3Node>(bad: ref bad, node: f * v, label: "f * v");
+    hold(bad: ref bad, node: v + v, label: "v + v"); hold(bad: ref bad, node: v - v, label: "v - v");
+    hold(bad: ref bad, node: v * v, label: "v * v"); hold(bad: ref bad, node: v / v, label: "v / v");
+    hold(bad: ref bad, node: v * f, label: "v * f"); hold(bad: ref bad, node: v / f, label: "v / f");
+    hold(bad: ref bad, node: v * 2.0, label: "v * 2"); hold(bad: ref bad, node: 2.0 * v, label: "2 * v");
+    hold(bad: ref bad, node: -v, label: "-v"); hold(bad: ref bad, node: v.x(), label: "v.x");
+    hold(bad: ref bad, node: v.y(), label: "v.y"); hold(bad: ref bad, node: v.z(), label: "v.z");
+    hold(bad: ref bad, node: q + q, label: "q + q"); hold(bad: ref bad, node: q * q, label: "q * q");
+    hold(bad: ref bad, node: q.xyz(), label: "q.xyz"); hold(bad: ref bad, node: q.w(), label: "q.w");
+    hold(bad: ref bad, node: m * m, label: "m * m"); hold::<Vec4Node>(bad: ref bad, node: m * q, label: "m * q");
+    hold(bad: ref bad, node: f, label: "constant"); hold(bad: ref bad, node: v, label: "vec3"); hold(bad: ref bad, node: q, label: "vec4");
+    hold(bad: ref bad, node: dot(a: v, b: v), label: "dot"); hold(bad: ref bad, node: normalize(v: v), label: "normalize");
+    hold(bad: ref bad, node: max(a: v, b: v), label: "max"); hold(bad: ref bad, node: min(a: f, b: f), label: "min");
+    hold(bad: ref bad, node: saturate(x: v), label: "saturate"); hold(bad: ref bad, node: sqrt(x: f), label: "sqrt");
+    hold(bad: ref bad, node: exp2(x: v), label: "exp2"); hold(bad: ref bad, node: pow(x: v, power: v), label: "pow");
+    hold(bad: ref bad, node: mix(from: v, to: v, by: f), label: "mix"); hold(bad: ref bad, node: varying(value: v), label: "varying");
+    hold(bad: ref bad, node: positionLocal(), label: "positionLocal"); hold(bad: ref bad, node: m, label: "modelWorldMatrix");
+    hold(bad: ref bad, node: cameraViewProjectionMatrix(), label: "cameraViewProjectionMatrix");
+    hold(bad: ref bad, node: tint(colour: v, k: f), label: "a typed function's call");
+    found.add(name: "typed nodes: every node an operator, a built-in or a typed function makes carries its node type's WGSL type",
+              why: give bad);
+    string own = f.wgslType() + " " + v.wgslType() + " " + q.wgslType() + " " + m.wgslType();
+    found.add(name: "typed nodes: FloatNode, Vec3Node, Vec4Node and Mat4Node are WGSL's f32, vec3f, vec4f and mat4x4f",
+              why: sameText(got: own, want: "f32 vec3f vec4f mat4x4f"));
+}
+
+unsafe fn void compileCases(ref Verdicts found, ref DynamicArray<ShaderCase> shaders) {
+    // MeshBasicMaterial through the Material contract, as the renderer compiles it
+    {
+        Shared<MeshBasicMaterial> m = new MeshBasicMaterial.make();
+        m.colorMut() = Color.fromHex(hex: 0x336699);
+        MaterialSettings s = MaterialSettings.make();
+        m.settings(into: ref s);
+        NodeBuilder b = NodeBuilder.make(settings: give s);
+        m.shade(builder: ref b);
+        string got = b.wgsl();
+        string want = prelude() + "struct Material {\n  color: vec3f,\n};\n@group(1) @binding(0) var<uniform> material: Material;\n"
+            + standardVertex() + fragment(body: "  return vec4f(material.color, 1.0);\n");
+        found.add(name: "MeshBasicMaterial: its nodes compile to its colour, opaque, on every mesh's vertex stage",
+                  why: sameText(got: got, want: want));
+        DynamicArray<string> problems = b.problems();
+        isize np = problems.length();
+        found.add(name: "MeshBasicMaterial: its compile finds nothing to refuse", why: np == 0 ? "" : "${np} problem(s)");
+        shaders.add(item: ShaderCase.make(name: "MeshBasicMaterial", wgsl: give got));
+        MaterialSettings again = MaterialSettings.make();
+        m.settings(into: ref again);
+        DynamicArray<uint8> bytes = again.bytes();
+        Color c = Color.fromHex(hex: 0x336699);
+        uint32 rb = bitcast<uint32>(c.linearR());
+        uint32 bb = bitcast<uint32>(c.linearB());
+        isize nb = bytes.length();
+        bool linear = nb == 16 && bytes[0] == truncate<uint8>(rb) && bytes[3] == truncate<uint8>(rb >> 24)
+            && bytes[8] == truncate<uint8>(bb) && bytes[11] == truncate<uint8>(bb >> 24) && bytes[12] == 0 && bytes[15] == 0;
+        found.add(name: "MeshBasicMaterial: its settings are its colour, linear, 16 bytes",
+                  why: linear ? "" : "${nb} bytes, not the linear colour");
+    }
+    // a material that sets nothing draws white
+    {
+        NodeBuilder b = NodeBuilder.make(settings: MaterialSettings.make());
+        string got = b.wgsl();
+        string want = prelude() + standardVertex() + fragment(body: "  return vec4f(vec3f(1.0, 1.0, 1.0), 1.0);\n");
+        found.add(name: "NodeBuilder: a material that sets no node draws white, with no settings block",
+                  why: sameText(got: got, want: want));
+        shaders.add(item: ShaderCase.make(name: "white", wgsl: give got));
+    }
+    // typed functions, each written once, its callees first; lets for a node used twice, in a function and in a stage
+    {
+        NodeBuilder b = NodeBuilder.make(settings: rcd());
+        FloatNode rough = b.uniformFloat(name: "r");
+        Vec3Node colour = b.uniformVec3(name: "c");
+        FloatNode a = rough * rough;
+        FloatNode lit = dGgx(alpha: a, dotNH: constant(value: 0.9)) + twice(alpha: a, dotNH: rough);
+        b.fragmentColor(node: vec4(xyz: colour * lit, w: a));
+        string got = b.wgsl();
+        string want = prelude() + rcdStruct()
+            + "fn D_GGX(alpha: f32, dotNH: f32) -> f32 {\n"
+            + "  let n0 = (alpha * alpha);\n"
+            + "  let n1 = (1.0 - ((dotNH * dotNH) * (1.0 - n0)));\n"
+            + "  return ((0.31830987 * n0) / (n1 * n1));\n}\n"
+            + "fn twice(alpha: f32, dotNH: f32) -> f32 {\n"
+            + "  return (D_GGX(alpha, dotNH) + D_GGX(alpha, (dotNH * 0.5)));\n}\n"
+            + standardVertex()
+            + fragment(body: "  let n0 = (material.r * material.r);\n  return vec4f((material.c * (D_GGX(n0, 0.9) + twice(n0, material.r))), n0);\n");
+        found.add(name: "NodeBuilder: a typed function is written once, its callees first, a let for a node used twice",
+                  why: sameText(got: got, want: want));
+        int32 lets = b.letCount();
+        found.add(name: "NodeBuilder: the lets counted, two in D_GGX and one in the fragment stage", why: lets == 3 ? "" : "${lets} lets");
+        DynamicArray<string> problems = b.problems();
+        isize np = problems.length();
+        found.add(name: "NodeBuilder: functions and lets compile with nothing refused", why: np == 0 ? "" : "${np} problem(s)");
+        shaders.add(item: ShaderCase.make(name: "functions and lets", wgsl: copy got));
+        // the named nodes handed to operators above are whole: compiled again from them, the same WGSL (kyoten's KY-59)
+        NodeBuilder again = NodeBuilder.make(settings: rcd());
+        again.fragmentColor(node: vec4(xyz: colour * lit, w: a));
+        string second = again.wgsl();
+        found.add(name: "typed nodes: named nodes handed to operators stay whole, so a second compile writes the same WGSL",
+                  why: sameText(got: second, want: got));
+    }
+    // a typed function of a vector and a float, answering a vector
+    {
+        NodeBuilder b = NodeBuilder.make(settings: rcd());
+        Vec3Node c = b.uniformVec3(name: "c");
+        FloatNode r = b.uniformFloat(name: "r");
+        b.fragmentColor(node: vec4(xyz: tint(colour: c, k: r), w: r));
+        string got = b.wgsl();
+        string want = prelude() + rcdStruct()
+            + "fn tint(colour: vec3f, k: f32) -> vec3f {\n  return (colour * k);\n}\n"
+            + standardVertex() + fragment(body: "  return vec4f(tint(material.c, material.r), material.r);\n");
+        found.add(name: "NodeBuilder: a typed function of a vector and a float, answering a vector, its parameters typed by their arguments",
+                  why: sameText(got: got, want: want));
+        shaders.add(item: ShaderCase.make(name: "vector function", wgsl: give got));
+    }
+    // a node used once has no let, though it is a call
+    {
+        NodeBuilder b = NodeBuilder.make(settings: rcd());
+        FloatNode r = b.uniformFloat(name: "r");
+        Vec3Node c = b.uniformVec3(name: "c");
+        string body = bodyOf(b: ref b, colour: c, alpha: sqrt(x: r) * r);
+        found.add(name: "NodeBuilder: a node used once is written where it is used",
+                  why: sameText(got: body, want: "  return vec4f(material.c, (sqrt(material.r) * material.r));\n"));
+    }
+    // varyings: the vertex position read in the fragment stage, and a varying() of a vertex-stage value
+    {
+        NodeBuilder b = NodeBuilder.make(settings: MaterialSettings.make());
+        Vec3Node p = positionLocal();
+        Vec4Node world = modelWorldMatrix() * vec4(xyz: p, w: constant(value: 1.0));
+        Vec3Node worldPos = varying(value: world.xyz());
+        FloatNode shade = saturate(x: dot(a: normalize(v: p), b: normalize(v: worldPos)));
+        b.fragmentColor(node: vec4(xyz: mix(from: p, to: worldPos, by: shade), w: shade));
+        string got = b.wgsl();
+        string want = prelude()
+            + "struct Varyings {\n  @builtin(position) clip: vec4f,\n  @location(0) v0: vec3f,\n  @location(1) v1: vec3f,\n};\n"
+            + "@vertex fn vs(@builtin(instance_index) object: u32, @location(0) position: vec3f) -> Varyings {\n"
+            + "  var v: Varyings;\n"
+            + "  v.clip = ((frame.viewProjection * objects[object]) * vec4f(position, 1.0));\n"
+            + "  v.v0 = position;\n"
+            + "  v.v1 = (objects[object] * vec4f(position, 1.0)).xyz;\n"
+            + "  return v;\n}\n"
+            + fragment(body: "  let n0 = saturate(dot(normalize(v.v0), normalize(v.v1)));\n  return vec4f(mix(v.v0, v.v1, n0), n0);\n");
+        found.add(name: "NodeBuilder: a vertex attribute read in the fragment stage, and a varying(), each pass through a varying",
+                  why: sameText(got: got, want: want));
+        shaders.add(item: ShaderCase.make(name: "varyings", wgsl: give got));
+    }
+    // a varying used twice in the vertex stage takes a let there
+    {
+        NodeBuilder b = NodeBuilder.make(settings: MaterialSettings.make());
+        Vec4Node world = modelWorldMatrix() * vec4(xyz: positionLocal(), w: constant(value: 1.0));
+        b.vertexPosition(node: cameraViewProjectionMatrix() * world);
+        Vec3Node worldPos = varying(value: world.xyz());
+        b.fragmentColor(node: vec4(xyz: worldPos, w: constant(value: 1.0)));
+        string got = b.wgsl();
+        string want = prelude()
+            + "struct Varyings {\n  @builtin(position) clip: vec4f,\n  @location(0) v0: vec3f,\n};\n"
+            + "@vertex fn vs(@builtin(instance_index) object: u32, @location(0) position: vec3f) -> Varyings {\n"
+            + "  var v: Varyings;\n"
+            + "  let n0 = (objects[object] * vec4f(position, 1.0));\n"
+            + "  v.clip = (frame.viewProjection * n0);\n"
+            + "  v.v0 = n0.xyz;\n"
+            + "  return v;\n}\n"
+            + fragment(body: "  return vec4f(v.v0, 1.0);\n");
+        found.add(name: "NodeBuilder: a vertex position of the material's own, and its world position a let both use",
+                  why: sameText(got: got, want: want));
+        shaders.add(item: ShaderCase.make(name: "vertex position", wgsl: give got));
+    }
+    // every operator and built-in, spelled
+    {
+        NodeBuilder b = NodeBuilder.make(settings: rcd());
+        FloatNode r = b.uniformFloat(name: "r");
+        Vec3Node c = b.uniformVec3(name: "c");
+        Vec3Node d = b.uniformVec3(name: "d");
+        FloatNode f = sqrt(x: r) + exp2(x: r) - pow(x: r, power: constant(value: 2.0)) * min(a: r, b: constant(value: 0.5)) / max(a: r, b: constant(value: 0.25));
+        FloatNode g = (0.5 + r) * (2.0 - r) / (3.0 * r) - 4.0 / r + (r + 1.0) * (r - 1.0) / (r * 2.0) - r / 2.0 + (-r);
+        string got = bodyOf(b: ref b, colour: c, alpha: f + g);
+        string want = "  return vec4f(material.c, (((sqrt(material.r) + exp2(material.r)) - ((pow(material.r, 2.0) * min(material.r, 0.5)) / max(material.r, 0.25)))"
+            + " + (((((((0.5 + material.r) * (2.0 - material.r)) / (3.0 * material.r)) - (4.0 / material.r)) + (((material.r + 1.0) * (material.r - 1.0)) / (material.r * 2.0))) - (material.r / 2.0)) + (-material.r))));\n";
+        found.add(name: "typed nodes: a float's operators, a number on either side, unary minus and the float built-ins",
+                  why: sameText(got: got, want: want));
+        shaders.add(item: ShaderCase.make(name: "float operators", wgsl: b.wgsl()));
+
+        NodeBuilder b2 = NodeBuilder.make(settings: rcd());
+        FloatNode r2 = b2.uniformFloat(name: "r");
+        Vec3Node c2 = b2.uniformVec3(name: "c");
+        Vec3Node d2 = b2.uniformVec3(name: "d");
+        Vec3Node v = (c2 + d2) - c2 * d2 / d2 * r2 / r2 * 2.0 + 2.0 * (-c2) + r2 * normalize(v: c2)
+            + vec3(x: c2.x(), y: c2.y(), z: c2.z()) + saturate(x: d2) + max(a: c2, b: d2) + min(a: c2, b: d2) + mix(from: c2, to: d2, by: r2);
+        FloatNode w = dot(a: c2, b: d2);
+        string got2 = bodyOf(b: ref b2, colour: v, alpha: w);
+        string want2 = "  return vec4f((((((((((material.c + material.d) - (((((material.c * material.d) / material.d) * material.r) / material.r) * 2.0)) + (2.0 * (-material.c))) + (material.r * normalize(material.c)))"
+            + " + vec3f(material.c.x, material.c.y, material.c.z)) + saturate(material.d)) + max(material.c, material.d)) + min(material.c, material.d)) + mix(material.c, material.d, material.r)), dot(material.c, material.d));\n";
+        found.add(name: "typed nodes: a vector's operators with vectors, floats and numbers, its parts, and the vector built-ins",
+                  why: sameText(got: got2, want: want2));
+        shaders.add(item: ShaderCase.make(name: "vector operators", wgsl: b2.wgsl()));
+
+        NodeBuilder b3 = NodeBuilder.make(settings: rcd());
+        Vec3Node c3 = b3.uniformVec3(name: "c");
+        Vec4Node four = vec4(xyz: c3, w: constant(value: 1.0));
+        Vec4Node sum = four + four * four;
+        string got3 = bodyOf(b: ref b3, colour: sum.xyz(), alpha: sum.w());
+        string want3 = "  let n0 = vec4f(material.c, 1.0);\n  let n1 = (n0 + (n0 * n0));\n  return vec4f(n1.xyz, n1.w);\n";
+        found.add(name: "typed nodes: a vec4's operators and parts, a let for each node used twice",
+                  why: sameText(got: got3, want: want3));
+        shaders.add(item: ShaderCase.make(name: "vec4 operators", wgsl: b3.wgsl()));
+    }
+}
+
+// What the compiler refuses: each misuse said once, and the material's WGSL never reaches a GPU.
+unsafe fn void refusalCases(ref Verdicts found) {
+    {
+        NodeBuilder b = NodeBuilder.make(settings: MaterialSettings.make());
+        b.fragmentColor(node: modelWorldMatrix() * vec4(xyz: positionLocal(), w: constant(value: 1.0)));
+        string all = b.wgsl();
+        DynamicArray<string> problems = b.problems();
+        found.add(name: "NodeBuilder refuses the object's world matrix read in the fragment stage",
+                  why: sameProblems(problems: problems, want: one(a: "`objects[object]` is the vertex stage's alone: read it there, and hand the fragment stage what it needs through varying()")));
+    }
+    {
+        NodeBuilder b = NodeBuilder.make(settings: MaterialSettings.make());
+        Shared<ShaderFunction> f = new ShaderFunction.make(name: "D_GGX");
+        FloatNode x = param(function: f, name: "x", value: constant(value: 2.0));
+        FloatNode other = called(function: f, body: x * x);
+        b.fragmentColor(node: vec4(xyz: positionLocal(), w: other + dGgx(alpha: constant(value: 0.5), dotNH: constant(value: 0.5))));
+        string all = b.wgsl();
+        found.add(name: "NodeBuilder refuses two different shader functions of one name",
+                  why: sameProblems(problems: b.problems(), want: one(a: "two different shader functions are named `D_GGX`")));
+    }
+    {
+        NodeBuilder b = NodeBuilder.make(settings: MaterialSettings.make());
+        Shared<ShaderFunction> f = new ShaderFunction.make(name: "square");
+        FloatNode x = param(function: f, name: "x", value: constant(value: 2.0));
+        FloatNode squared = called(function: f, body: x * x);
+        b.fragmentColor(node: vec4(xyz: positionLocal(), w: squared + x));
+        string all = b.wgsl();
+        found.add(name: "NodeBuilder refuses a shader function's parameter read outside its function",
+                  why: sameProblems(problems: b.problems(), want: one(a: "a shader function's parameter `x` is read outside its function")));
+    }
+    {
+        NodeBuilder b = NodeBuilder.make(settings: MaterialSettings.make());
+        Shared<ShaderFunction> f = new ShaderFunction.make(name: "height");
+        FloatNode x = param(function: f, name: "x", value: constant(value: 2.0));
+        FloatNode h = called(function: f, body: x * positionLocal().y());
+        b.fragmentColor(node: vec4(xyz: positionLocal(), w: h));
+        string all = b.wgsl();
+        found.add(name: "NodeBuilder refuses a vertex attribute read inside a shader function",
+                  why: sameProblems(problems: b.problems(), want: one(a: "the vertex attribute `position` is read inside a shader function: hand it in as a parameter")));
+    }
+    {
+        NodeBuilder b = NodeBuilder.make(settings: MaterialSettings.make());
+        Shared<ShaderFunction> f = new ShaderFunction.make(name: "lifted");
+        FloatNode x = param(function: f, name: "x", value: constant(value: 2.0));
+        Vec3Node carried = varying(value: positionLocal());
+        FloatNode h = called(function: f, body: x * carried.y());
+        b.fragmentColor(node: vec4(xyz: positionLocal(), w: h));
+        string all = b.wgsl();
+        found.add(name: "NodeBuilder refuses a varying read inside a shader function",
+                  why: sameProblems(problems: b.problems(), want: one(a: "a varying is read inside a shader function: hand it in as a parameter")));
+    }
+    {
+        NodeBuilder b = NodeBuilder.make(settings: MaterialSettings.make());
+        Shared<ShaderFunction> f = new ShaderFunction.make(name: "fn");
+        FloatNode x = param(function: f, name: "position", value: constant(value: 2.0));
+        Shared<ShaderFunction> g = new ShaderFunction.make(name: "2x");
+        FloatNode y = param(function: g, name: "n3", value: constant(value: 2.0));
+        Shared<ShaderFunction> h = new ShaderFunction.make(name: "vec3f");
+        FloatNode z = param(function: h, name: "ok_name2", value: constant(value: 2.0));
+        FloatNode all3 = called(function: f, body: x) + called(function: g, body: y) + called(function: h, body: z);
+        b.fragmentColor(node: vec4(xyz: positionLocal(), w: all3));
+        string all = b.wgsl();
+        DynamicArray<string> want = DynamicArray.empty();
+        want.add(item: "the shader function `fn` is a WGSL keyword");
+        want.add(item: "the parameter `position` is a name the compiler writes");
+        want.add(item: "the shader function `2x` is not a WGSL name: a letter, then letters, digits and `_`");
+        want.add(item: "the parameter `n3` is a name the compiler writes");
+        want.add(item: "the shader function `vec3f` is a name the compiler writes");
+        found.add(name: "NodeBuilder refuses a function or parameter named as WGSL or the compiler already names, or not a WGSL name",
+                  why: sameProblems(problems: b.problems(), want: want));
+    }
+    {
+        NodeBuilder b = NodeBuilder.make(settings: MaterialSettings.make());
+        Shared<ShaderFunction> f = new ShaderFunction.make(name: "max");
+        FloatNode x = param(function: f, name: "x", value: constant(value: 2.0));
+        FloatNode mine = called(function: f, body: x);
+        b.fragmentColor(node: vec4(xyz: positionLocal(), w: max(a: mine, b: constant(value: 1.0))));
+        string all = b.wgsl();
+        found.add(name: "NodeBuilder refuses a shader function that would hide a WGSL built-in the shader calls",
+                  why: sameProblems(problems: b.problems(), want: one(a: "the shader function `max` would hide WGSL's built-in `max`, which this shader calls")));
+    }
+    {
+        MaterialSettings s = MaterialSettings.make();
+        s.addFloat(name: "r", value: 1.0);
+        s.addFloat(name: "r", value: 2.0);
+        s.addFloat(name: "let", value: 3.0);
+        NodeBuilder b = NodeBuilder.make(settings: give s);
+        FloatNode r = b.uniformFloat(name: "r");
+        Vec3Node wrong = b.uniformVec3(name: "r");
+        FloatNode missing = b.uniformFloat(name: "nowhere");
+        b.fragmentColor(node: vec4(xyz: wrong, w: r + missing));
+        string all = b.wgsl();
+        DynamicArray<string> want = DynamicArray.empty();
+        want.add(item: "the setting `r` is read as vec3f, and the material declares it f32");
+        want.add(item: "the setting `nowhere` is read, and the material never declares it");
+        want.add(item: "the setting `r` is declared twice");
+        want.add(item: "the setting `let` is a WGSL keyword");
+        found.add(name: "NodeBuilder refuses a setting read as another type, one never declared, one declared twice, and a WGSL keyword",
+                  why: sameProblems(problems: b.problems(), want: want));
+    }
+    {
+        NodeBuilder b = NodeBuilder.make(settings: MaterialSettings.make());
+        b.fragmentColor(node: vec4(xyz: positionLocal(), w: constant(value: bitcast<float32>(0x7f800000))));
+        string all = b.wgsl();
+        found.add(name: "NodeBuilder refuses a number WGSL cannot write",
+                  why: sameProblems(problems: b.problems(), want: one(a: "a number WGSL cannot write, inf")));
+    }
+}
+
+// The cases, and the modules they compiled, for the GPU stage.
+unsafe fn void nodeCases(ref Verdicts found, ref DynamicArray<ShaderCase> shaders) {
+    numberCases(found: ref found);
+    settingsCases(found: ref found);
+    typeCases(found: ref found);
+    compileCases(found: ref found, shaders: ref shaders);
+    refusalCases(found: ref found);
+}
+
+// The modules alone, for a stage that runs without the cases' verdicts.
+unsafe fn DynamicArray<ShaderCase> nodeShaders() {
+    Verdicts ignored = Verdicts.make();
+    DynamicArray<ShaderCase> shaders = DynamicArray.empty();
+    compileCases(found: ref ignored, shaders: ref shaders);
+    return shaders;
+}

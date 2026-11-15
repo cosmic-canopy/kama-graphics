@@ -1,0 +1,179 @@
+// GFX-1's part 3 on the GPU (kyoten's rendering.md § Decided, GFX-1's part 3). A step a tick on the device the check
+// opened:
+// - **every module the node cases compiled** (tests/src/nodes.kama) is compiled by the leg's own WGSL compiler, naga
+//   natively and in Firefox and Tint in Chromium, and has no compilation message: not an error, not a warning;
+// - **a material whose compile is refused** draws nothing, beside a mesh that draws: the renderer reports it once, as
+//   `GraphicsErrorKind::Material`, printed, and never compiles it again.
+
+import {
+    core::println,
+    std::collections::DynamicArray,
+    std::math::Vec3, std::math::radians,
+    std::time::Instant, std::time::monotonicNow,
+    gpu::Device, gpu::Queue, gpu::ShaderModuleDescriptor, gpu::ShaderModule, gpu::CompilationRequest,
+    gpu::CompilationStatus, gpu::CompilationMessage, gpu::DeviceErrors,
+    graphics::Color, graphics::Renderer, graphics::RenderInfo, graphics::RenderTarget, graphics::Scene, graphics::Mesh,
+    graphics::PerspectiveCamera, graphics::BoxGeometry, graphics::MeshBasicMaterial, graphics::Material,
+    graphics::MaterialGpu, graphics::MaterialSettings, graphics::NodeBuilder, graphics::RendererErrors,
+    graphics::GraphicsErrorKind, graphics::modelWorldMatrix, graphics::positionLocal, graphics::vec4, graphics::constant,
+    graphics::FloatNode, graphics::Vec4Node, graphics::Mat4Node, graphics::cameraViewProjectionMatrix,
+    Verdicts, ShaderCase, nodeShaders,
+};
+export { ShaderRun };
+
+comptime int64 SETTLE_MS = 10000;
+
+// A program's own material whose nodes read the object's world matrix in the fragment stage, which the compile refuses.
+type resource Misread implements Material {
+    MaterialGpu cache;
+    public ctor make() { this.cache = MaterialGpu.make(); }
+    public fn ref MaterialGpu gpuMut() { return this.cache; }
+    public const fn uint32 version() { return 0; }
+    public const fn void settings(ref MaterialSettings into) { }
+    public fn void shade(ref NodeBuilder builder) {
+        builder.fragmentColor(node: modelWorldMatrix() * vec4(xyz: positionLocal(), w: constant(value: 1.0)));
+    }
+}
+
+// A program's own material whose vertex stage reads one of its settings: its mesh shrunk to half.
+type resource Shrunk implements Material {
+    MaterialGpu cache;
+    public ctor make() { this.cache = MaterialGpu.make(); }
+    public fn ref MaterialGpu gpuMut() { return this.cache; }
+    public const fn uint32 version() { return 0; }
+    public const fn void settings(ref MaterialSettings into) { into.addFloat(name: "shrink", value: 0.5); }
+    public fn void shade(ref NodeBuilder builder) {
+        FloatNode shrink = builder.uniformFloat(name: "shrink");
+        builder.vertexPosition(node: cameraViewProjectionMatrix() * modelWorldMatrix()
+                                     * vec4(xyz: positionLocal() * shrink, w: constant(value: 1.0)));
+    }
+}
+
+fn string infoIs(RenderInfo got, int32 calls, int32 triangles, int32 objects) {
+    if (got.calls == calls && got.triangles == triangles && got.objects == objects) { return ""; }
+    return "calls ${got.calls}, triangles ${got.triangles}, objects ${got.objects}";
+}
+
+type resource ShaderRun {
+    int32 stage = 0;
+    Instant began = monotonicNow();
+    Verdicts found;
+    Device device;
+    Queue queue;
+    DynamicArray<ShaderCase> cases;
+    DynamicArray<CompilationRequest> asked;
+    DynamicArray<bool> answered;
+
+    public ctor make(Device device, Queue queue) {
+        this.found = Verdicts.make();
+        this.device = give device;
+        this.queue = give queue;
+        this.cases = DynamicArray.empty();
+        this.asked = DynamicArray.empty();
+        this.answered = DynamicArray.empty();
+    }
+
+    public fn ref Verdicts verdicts() { return this.found; }
+
+    // Each case's module made, and its compilation messages asked for.
+    unsafe fn void compileAll() {
+        this.cases = nodeShaders();
+        for (isize i = 0; i < this.cases.length(); i = i + 1) {
+            ShaderModuleDescriptor desc = ShaderModuleDescriptor.make(wgsl: this.cases[i].wgsl());
+            desc.label(text: "node case " + this.cases[i].name());
+            ShaderModule m = this.device.createShaderModule(descriptor: give desc);
+            this.asked.add(item: m.compilationInfo());
+            this.answered.add(item: false);
+        }
+    }
+
+    // A verdict for each case answered since the last tick: true once every case has one.
+    unsafe fn bool pollAll() {
+        bool waiting = false;
+        bool late = this.began.elapsed().asMillis() >= SETTLE_MS;
+        for (isize i = 0; i < this.asked.length(); i = i + 1) {
+            if (this.answered[i]) { continue; }
+            string name = "node case " + this.cases[i].name() + ": WGSL's compiler on this leg compiles it with no message";
+            CompilationStatus s = this.asked[i].poll();
+            match (give s) {
+                case Pending: {
+                    if (!late) { waiting = true; continue; }
+                    this.found.add(name: give name, why: "not answered within ${SETTLE_MS} ms");
+                }
+                case Ready(info: info): {
+                    isize n = info.messages().length();
+                    string why = "";
+                    if (n > 0) {
+                        isize line = info.messages()[0].line();
+                        why = "${n} message(s), the first at line ${line}: " + info.messages()[0].message();
+                    }
+                    this.found.add(name: give name, why: give why);
+                }
+                case Failed(error: e): { this.found.add(name: give name, why: "the request failed: " + e.message()); }
+            };
+            this.answered[i] = true;
+        }
+        return !waiting;
+    }
+
+    // A scene of two boxes, one with a material its compile refuses: the other draws, the refusal is reported once.
+    unsafe fn void refusedMaterial() {
+        Renderer r = Renderer.withDevice(device: copy this.device, queue: copy this.queue);
+        Shared<RenderTarget> t = new RenderTarget.make(width: 32, height: 24);
+        Shared<PerspectiveCamera> cam = new PerspectiveCamera.make(fovRad: radians(deg: 50.0), aspect: 32.0 / 24.0, near: 0.1, far: 100.0);
+        cam.positionMut() = Vec3.of(x: 0.0, y: 0.0, z: 4.0);
+        cam.targetMut() = Optional::Some(value: copy t);
+        Shared<Scene> s = new Scene.make();
+        Shared<BoxGeometry> box = new BoxGeometry.make(width: 1.0, height: 1.0, depth: 1.0);
+        Shared<Shrunk> plain = new Shrunk.make();
+        Shared<Mesh> good = new Mesh.make(geometry: box, material: plain);
+        good.positionMut() = Vec3.of(x: -0.8, y: 0.0, z: 0.0);
+        Shared<Misread> wrong = new Misread.make();
+        Shared<Mesh> bad = new Mesh.make(geometry: box, material: wrong);
+        bad.positionMut() = Vec3.of(x: 0.8, y: 0.0, z: 0.0);
+        s.add(object: good);
+        s.add(object: bad);
+        r.render(scene: copy s, camera: copy cam);
+        RenderInfo first = r.info();
+        this.found.add(name: "render: a mesh whose material is refused draws nothing, and the mesh beside it draws",
+                       why: infoIs(got: first, calls: 1, triangles: 12, objects: 2));
+        DeviceErrors errs = this.device.takeErrors();
+        isize nerr = errs.reports().length();
+        string firstError = nerr > 0 ? errs.reports()[0].message() : "";
+        this.found.add(name: "render: a material whose vertex stage reads its settings draws with no WebGPU error",
+                       why: errs.isEmpty() ? "" : "the channel holds ${nerr} error(s), the first: " + firstError);
+        RendererErrors taken = r.takeErrors();
+        isize kept = taken.reports().length();
+        string why = kept == 1 ? "" : "takeErrors handed back ${kept} report(s)";
+        if (kept == 1) {
+            bool material = match (taken.reports()[0].kind()) { case Material: true; case _: false; };
+            string words = taken.reports()[0].message();
+            string want = "a material was refused, so nothing draws with it: `objects[object]` is the vertex stage's alone: read it there, and hand the fragment stage what it needs through varying()";
+            if (!material) { why = "its kind is not Material"; }
+            else if (words != want) { why = "its words are [" + words + "]"; }
+        }
+        this.found.add(name: "render: a refused material is reported once, as Material, in its compile's words", why: give why);
+        r.render(scene: copy s, camera: copy cam);
+        RenderInfo second = r.info();
+        RendererErrors again = r.takeErrors();
+        bool quiet = again.isEmpty();
+        string still = infoIs(got: second, calls: 1, triangles: 12, objects: 2);
+        this.found.add(name: "render: a refused material is not compiled or reported again, and still draws nothing",
+                       why: quiet && still.isEmpty() ? "" : "a second report, or " + still);
+    }
+
+    public unsafe fn bool step() {
+        if (this.stage == 0) {
+            this.compileAll();
+            this.began = monotonicNow();
+            this.stage = 1;
+            return false;
+        }
+        if (this.stage == 1) {
+            if (!this.pollAll()) { return false; }
+            this.refusedMaterial();
+            this.stage = 2;
+        }
+        return true;
+    }
+}

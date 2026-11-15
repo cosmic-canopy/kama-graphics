@@ -1,0 +1,268 @@
+// Typed nodes, what a material's shader is written in (kyoten's rendering.md § Decided, GFX-1's question 2; part 3's
+// question): one node type per WGSL type, operators by operand type, functions with named arguments, and a public node
+// contract a program's own node types implement, so the library's nodes and a program's are checked alike. A node is a
+// reference, as TSL's are: handing one on shares it (`Copyable<This>(bare: copy)` over a shared expression), so a node
+// used twice is one expression, which the compiler writes once as a `let` (node_builder.kama).
+//
+// The library's own shader functions are typed nodes too (`ShaderFunction`, as TSL's `Fn(…).setLayout(…)`): a kama
+// function whose body is built from its parameters, written into a material's WGSL once where the material reaches it.
+
+import { std::collections::DynamicArray, std::memory::Shared };
+export {
+    Node, Expr, ExprKind, FloatNode, Vec3Node, Vec4Node, Mat4Node, ShaderFunction, param, called,
+    constant, vec3, vec4, dot, normalize, max, min, mix, saturate, sqrt, exp2, pow, varying,
+    positionLocal, modelWorldMatrix, cameraViewProjectionMatrix,
+};
+
+// What a node computes:
+// - `Number`, a float32 constant; `Call`, a WGSL built-in function or constructor; `Binary` and `Unary`, an operator;
+//   `Member`, a swizzle; `FnCall`, a call of a typed function;
+// - `Name`, a value any stage or function reads by name: a material's setting, the frame;
+// - `VertexName`, one only the vertex stage has: its object's record;
+// - `Attribute`, a vertex input, which the fragment stage reads through a varying;
+// - `Param`, a typed function's parameter, read only inside it;
+// - `Varying`, a vertex stage's value the fragment stage reads.
+type enum ExprKind { Number, Name, VertexName, Attribute, Param, Call, Binary, Unary, Member, FnCall, Varying }
+
+// One node of the graph: what it computes, its WGSL type and its arguments, each shared, so one subexpression can feed
+// several nodes.
+type resource Expr {
+    ExprKind kind;
+    string text;
+    string typed;
+    float32 amount;
+    DynamicArray<Shared<Expr>> args;
+    Optional<Shared<ShaderFunction>> callee = Optional::None;
+
+    public ctor make(ExprKind kind, string text, string wgslType, float32 amount) {
+        this.kind = kind; this.text = give text; this.typed = give wgslType; this.amount = amount;
+        this.args = DynamicArray.empty();
+    }
+    fn void arg(Shared<Expr> e) { this.args.add(item: give e); }
+    fn void calls(Shared<ShaderFunction> f) { this.callee = Optional::Some(value: give f); }
+    public const fn ExprKind exprKind() { return this.kind; }
+    public const fn string name() { return copy this.text; }
+    public const fn string wgslType() { return copy this.typed; }
+    public const fn float32 number() { return this.amount; }
+    public const fn isize argCount() { return this.args.length(); }
+    public const fn Shared<Expr> argAt(isize i) { return copy this.args[i]; }
+    public const fn Optional<Shared<ShaderFunction>> calledFunction() { return copy this.callee; }
+
+    friend withArgs[arg];
+    friend called[arg, calls];
+}
+
+fn Shared<Expr> exprOf(ExprKind kind, string text, string wgslType) {
+    Shared<Expr> e = new Expr.make(kind: kind, text: give text, wgslType: give wgslType, amount: 0.0);
+    return e;
+}
+fn Shared<Expr> numberExpr(float32 v) {
+    Shared<Expr> e = new Expr.make(kind: ExprKind::Number, text: "", wgslType: "f32", amount: v);
+    return e;
+}
+// `e` with `args` as its arguments, in order.
+fn Shared<Expr> withArgs(Shared<Expr> e, Shared<Expr> a, Optional<Shared<Expr>> b, Optional<Shared<Expr>> c) {
+    e.arg(e: give a);
+    match (give b) { case Some(value: x): { e.arg(e: give x); } case None: { } };
+    match (give c) { case Some(value: x): { e.arg(e: give x); } case None: { } };
+    return e;
+}
+fn Shared<Expr> binary(string op, string wgslType, Shared<Expr> a, Shared<Expr> b) {
+    return withArgs(e: exprOf(kind: ExprKind::Binary, text: give op, wgslType: give wgslType), a: give a,
+                    b: Optional::Some(value: give b), c: Optional::None);
+}
+fn Shared<Expr> unary(string op, string wgslType, Shared<Expr> a) {
+    return withArgs(e: exprOf(kind: ExprKind::Unary, text: give op, wgslType: give wgslType), a: give a, b: Optional::None,
+                    c: Optional::None);
+}
+fn Shared<Expr> call1(string name, string wgslType, Shared<Expr> a) {
+    return withArgs(e: exprOf(kind: ExprKind::Call, text: give name, wgslType: give wgslType), a: give a, b: Optional::None,
+                    c: Optional::None);
+}
+fn Shared<Expr> call2(string name, string wgslType, Shared<Expr> a, Shared<Expr> b) {
+    return withArgs(e: exprOf(kind: ExprKind::Call, text: give name, wgslType: give wgslType), a: give a,
+                    b: Optional::Some(value: give b), c: Optional::None);
+}
+fn Shared<Expr> call3(string name, string wgslType, Shared<Expr> a, Shared<Expr> b, Shared<Expr> c) {
+    return withArgs(e: exprOf(kind: ExprKind::Call, text: give name, wgslType: give wgslType), a: give a,
+                    b: Optional::Some(value: give b), c: Optional::Some(value: give c));
+}
+fn Shared<Expr> member(string name, string wgslType, Shared<Expr> of) {
+    return withArgs(e: exprOf(kind: ExprKind::Member, text: give name, wgslType: give wgslType), a: give of, b: Optional::None,
+                    c: Optional::None);
+}
+
+// What every node is, the library's types and a program's own alike: its expression, its WGSL type, and a node of the
+// same type over another expression, which is how a function generic over nodes makes its result.
+type contract Node<T is This> for resource {
+    fn Shared<Expr> expr();
+    const fn string wgslType();
+    fn T over(Shared<Expr> e);
+}
+
+// WGSL's f32. A number goes on either side of an operator, as in WGSL (`0.5 * x`, `x + 1.0`).
+type resource FloatNode implements Copyable<This>(bare: copy), Node<This> {
+    Shared<Expr> e;
+    public ctor of(Shared<Expr> e) { this.e = give e; }
+    public ctor copy(ref FloatNode source) { this.e = copy source.e; }
+    public fn Shared<Expr> expr() { return copy this.e; }
+    public const fn string wgslType() { return "f32"; }
+    public fn FloatNode over(Shared<Expr> e) { return FloatNode.of(e: give e); }
+
+    public FloatNode operator+(FloatNode rhs) { return FloatNode.of(e: binary(op: "+", wgslType: "f32", a: this.expr(), b: rhs.expr())); }
+    public FloatNode operator-(FloatNode rhs) { return FloatNode.of(e: binary(op: "-", wgslType: "f32", a: this.expr(), b: rhs.expr())); }
+    public FloatNode operator*(FloatNode rhs) { return FloatNode.of(e: binary(op: "*", wgslType: "f32", a: this.expr(), b: rhs.expr())); }
+    public FloatNode operator/(FloatNode rhs) { return FloatNode.of(e: binary(op: "/", wgslType: "f32", a: this.expr(), b: rhs.expr())); }
+    public FloatNode operator+(float32 s) { return FloatNode.of(e: binary(op: "+", wgslType: "f32", a: this.expr(), b: numberExpr(v: s))); }
+    public FloatNode operator-(float32 s) { return FloatNode.of(e: binary(op: "-", wgslType: "f32", a: this.expr(), b: numberExpr(v: s))); }
+    public FloatNode operator*(float32 s) { return FloatNode.of(e: binary(op: "*", wgslType: "f32", a: this.expr(), b: numberExpr(v: s))); }
+    public FloatNode operator/(float32 s) { return FloatNode.of(e: binary(op: "/", wgslType: "f32", a: this.expr(), b: numberExpr(v: s))); }
+    public FloatNode operator+(float32 s, FloatNode v) { return FloatNode.of(e: binary(op: "+", wgslType: "f32", a: numberExpr(v: s), b: v.expr())); }
+    public FloatNode operator-(float32 s, FloatNode v) { return FloatNode.of(e: binary(op: "-", wgslType: "f32", a: numberExpr(v: s), b: v.expr())); }
+    public FloatNode operator*(float32 s, FloatNode v) { return FloatNode.of(e: binary(op: "*", wgslType: "f32", a: numberExpr(v: s), b: v.expr())); }
+    public FloatNode operator/(float32 s, FloatNode v) { return FloatNode.of(e: binary(op: "/", wgslType: "f32", a: numberExpr(v: s), b: v.expr())); }
+    public FloatNode operator-() { return FloatNode.of(e: unary(op: "-", wgslType: "f32", a: this.expr())); }
+    // a float times a vector is a vector, as in WGSL
+    public Vec3Node operator*(Vec3Node rhs) { return Vec3Node.of(e: binary(op: "*", wgslType: "vec3f", a: this.expr(), b: rhs.expr())); }
+}
+
+// WGSL's vec3f, a colour as well as a direction.
+type resource Vec3Node implements Copyable<This>(bare: copy), Node<This> {
+    Shared<Expr> e;
+    public ctor of(Shared<Expr> e) { this.e = give e; }
+    public ctor copy(ref Vec3Node source) { this.e = copy source.e; }
+    public fn Shared<Expr> expr() { return copy this.e; }
+    public const fn string wgslType() { return "vec3f"; }
+    public fn Vec3Node over(Shared<Expr> e) { return Vec3Node.of(e: give e); }
+
+    public Vec3Node operator+(Vec3Node rhs) { return Vec3Node.of(e: binary(op: "+", wgslType: "vec3f", a: this.expr(), b: rhs.expr())); }
+    public Vec3Node operator-(Vec3Node rhs) { return Vec3Node.of(e: binary(op: "-", wgslType: "vec3f", a: this.expr(), b: rhs.expr())); }
+    public Vec3Node operator*(Vec3Node rhs) { return Vec3Node.of(e: binary(op: "*", wgslType: "vec3f", a: this.expr(), b: rhs.expr())); }
+    public Vec3Node operator/(Vec3Node rhs) { return Vec3Node.of(e: binary(op: "/", wgslType: "vec3f", a: this.expr(), b: rhs.expr())); }
+    public Vec3Node operator*(FloatNode rhs) { return Vec3Node.of(e: binary(op: "*", wgslType: "vec3f", a: this.expr(), b: rhs.expr())); }
+    public Vec3Node operator/(FloatNode rhs) { return Vec3Node.of(e: binary(op: "/", wgslType: "vec3f", a: this.expr(), b: rhs.expr())); }
+    public Vec3Node operator*(float32 s) { return Vec3Node.of(e: binary(op: "*", wgslType: "vec3f", a: this.expr(), b: numberExpr(v: s))); }
+    public Vec3Node operator*(float32 s, Vec3Node v) { return Vec3Node.of(e: binary(op: "*", wgslType: "vec3f", a: numberExpr(v: s), b: v.expr())); }
+    public Vec3Node operator-() { return Vec3Node.of(e: unary(op: "-", wgslType: "vec3f", a: this.expr())); }
+    public fn FloatNode x() { return FloatNode.of(e: member(name: "x", wgslType: "f32", of: this.expr())); }
+    public fn FloatNode y() { return FloatNode.of(e: member(name: "y", wgslType: "f32", of: this.expr())); }
+    public fn FloatNode z() { return FloatNode.of(e: member(name: "z", wgslType: "f32", of: this.expr())); }
+}
+
+// WGSL's vec4f.
+type resource Vec4Node implements Copyable<This>(bare: copy), Node<This> {
+    Shared<Expr> e;
+    public ctor of(Shared<Expr> e) { this.e = give e; }
+    public ctor copy(ref Vec4Node source) { this.e = copy source.e; }
+    public fn Shared<Expr> expr() { return copy this.e; }
+    public const fn string wgslType() { return "vec4f"; }
+    public fn Vec4Node over(Shared<Expr> e) { return Vec4Node.of(e: give e); }
+    public Vec4Node operator+(Vec4Node rhs) { return Vec4Node.of(e: binary(op: "+", wgslType: "vec4f", a: this.expr(), b: rhs.expr())); }
+    public Vec4Node operator*(Vec4Node rhs) { return Vec4Node.of(e: binary(op: "*", wgslType: "vec4f", a: this.expr(), b: rhs.expr())); }
+    public fn Vec3Node xyz() { return Vec3Node.of(e: member(name: "xyz", wgslType: "vec3f", of: this.expr())); }
+    public fn FloatNode w() { return FloatNode.of(e: member(name: "w", wgslType: "f32", of: this.expr())); }
+}
+
+// WGSL's mat4x4f, column-major as WGSL's is.
+type resource Mat4Node implements Copyable<This>(bare: copy), Node<This> {
+    Shared<Expr> e;
+    public ctor of(Shared<Expr> e) { this.e = give e; }
+    public ctor copy(ref Mat4Node source) { this.e = copy source.e; }
+    public fn Shared<Expr> expr() { return copy this.e; }
+    public const fn string wgslType() { return "mat4x4f"; }
+    public fn Mat4Node over(Shared<Expr> e) { return Mat4Node.of(e: give e); }
+    public Mat4Node operator*(Mat4Node rhs) { return Mat4Node.of(e: binary(op: "*", wgslType: "mat4x4f", a: this.expr(), b: rhs.expr())); }
+    public Vec4Node operator*(Vec4Node rhs) { return Vec4Node.of(e: binary(op: "*", wgslType: "vec4f", a: this.expr(), b: rhs.expr())); }
+}
+
+// A number as a node, where nothing beside it gives its type (an argument, a constructor's part).
+fn FloatNode constant(float32 value) { return FloatNode.of(e: numberExpr(v: value)); }
+fn Vec3Node vec3(FloatNode x, FloatNode y, FloatNode z) {
+    return Vec3Node.of(e: call3(name: "vec3f", wgslType: "vec3f", a: x.expr(), b: y.expr(), c: z.expr()));
+}
+fn Vec4Node vec4(Vec3Node xyz, FloatNode w) {
+    return Vec4Node.of(e: call2(name: "vec4f", wgslType: "vec4f", a: xyz.expr(), b: w.expr()));
+}
+
+// WGSL's built-in functions, typed. One WGSL defines for every float type takes any node and answers its type.
+fn FloatNode dot(Vec3Node a, Vec3Node b) { return FloatNode.of(e: call2(name: "dot", wgslType: "f32", a: a.expr(), b: b.expr())); }
+fn Vec3Node normalize(Vec3Node v) { return Vec3Node.of(e: call1(name: "normalize", wgslType: "vec3f", a: v.expr())); }
+fn T max<T: Node<T>>(T a, T b) { return a.over(e: call2(name: "max", wgslType: a.wgslType(), a: a.expr(), b: b.expr())); }
+fn T min<T: Node<T>>(T a, T b) { return a.over(e: call2(name: "min", wgslType: a.wgslType(), a: a.expr(), b: b.expr())); }
+fn T saturate<T: Node<T>>(T x) { return x.over(e: call1(name: "saturate", wgslType: x.wgslType(), a: x.expr())); }
+fn T sqrt<T: Node<T>>(T x) { return x.over(e: call1(name: "sqrt", wgslType: x.wgslType(), a: x.expr())); }
+fn T exp2<T: Node<T>>(T x) { return x.over(e: call1(name: "exp2", wgslType: x.wgslType(), a: x.expr())); }
+fn T pow<T: Node<T>>(T x, T power) { return x.over(e: call2(name: "pow", wgslType: x.wgslType(), a: x.expr(), b: power.expr())); }
+// `from` where `by` is 0 and `to` where it is 1, for any float type and a float between, as WGSL's `mix`
+fn T mix<T: Node<T>>(T from, T to, FloatNode by) {
+    return from.over(e: call3(name: "mix", wgslType: from.wgslType(), a: from.expr(), b: to.expr(), c: by.expr()));
+}
+
+// A vertex stage's value read by the fragment stage, interpolated across the triangle, as TSL's `varying()`. A vertex
+// attribute read in the fragment stage becomes one by itself.
+fn T varying<T: Node<T>>(T value) {
+    return value.over(e: withArgs(e: exprOf(kind: ExprKind::Varying, text: "", wgslType: value.wgslType()), a: value.expr(),
+                                  b: Optional::None, c: Optional::None));
+}
+
+// What the renderer gives every material: the vertex's position in its mesh, the object's world matrix and the camera's
+// view-projection, as TSL's `positionLocal`, `modelWorldMatrix` and `cameraProjectionMatrix * cameraViewMatrix`.
+fn Vec3Node positionLocal() { return Vec3Node.of(e: exprOf(kind: ExprKind::Attribute, text: "position", wgslType: "vec3f")); }
+fn Mat4Node modelWorldMatrix() { return Mat4Node.of(e: exprOf(kind: ExprKind::VertexName, text: "objects[object]", wgslType: "mat4x4f")); }
+fn Mat4Node cameraViewProjectionMatrix() { return Mat4Node.of(e: exprOf(kind: ExprKind::Name, text: "frame.viewProjection", wgslType: "mat4x4f")); }
+
+// A typed function, as TSL's `Fn(…).setLayout(…)`: its name, its parameters, and its body over them. Each parameter is
+// declared with the argument this call passes (`param`), so a call cannot pass the wrong number or type, and `called`
+// hands back a node of the body's type. The compiler writes each function a material reaches once, its callees first.
+//
+//     fn FloatNode dGgx(FloatNode alpha, FloatNode dotNH) {
+//         Shared<ShaderFunction> f = new ShaderFunction.make(name: "D_GGX");
+//         FloatNode a = param(function: f, name: "alpha", value: alpha);
+//         …
+//         return called(function: f, body: a2 / (denom * denom) * RECIPROCAL_PI);
+//     }
+type resource ShaderFunction {
+    string named;
+    DynamicArray<string> paramNames;
+    DynamicArray<string> paramTypes;
+    DynamicArray<Shared<Expr>> values;
+    Optional<Shared<Expr>> body = Optional::None;
+
+    public ctor make(string name) {
+        this.named = give name;
+        this.paramNames = DynamicArray.empty(); this.paramTypes = DynamicArray.empty(); this.values = DynamicArray.empty();
+    }
+    public const fn string name() { return copy this.named; }
+    public const fn isize params() { return this.paramNames.length(); }
+    public const fn string paramName(isize i) { return copy this.paramNames[i]; }
+    public const fn string paramType(isize i) { return copy this.paramTypes[i]; }
+    // Its body, once `called` has given it one.
+    public const fn Optional<Shared<Expr>> bodyExpr() { return copy this.body; }
+
+    fn void declare(string name, string wgslType, Shared<Expr> value) {
+        this.paramNames.add(item: give name);
+        this.paramTypes.add(item: give wgslType);
+        this.values.add(item: give value);
+    }
+    fn void finish(Shared<Expr> e) { this.body = Optional::Some(value: give e); }
+    const fn isize valueCount() { return this.values.length(); }
+    const fn Shared<Expr> valueAt(isize i) { return copy this.values[i]; }
+
+    friend param[declare];
+    friend called[finish, valueCount, valueAt];
+}
+
+// A parameter of `function` named `name`, taking `value` at this call: in the body, a node of `value`'s type.
+fn T param<T: Node<T>>(Shared<ShaderFunction> function, string name, T value) {
+    function.declare(name: copy name, wgslType: value.wgslType(), value: value.expr());
+    return value.over(e: exprOf(kind: ExprKind::Param, text: give name, wgslType: value.wgslType()));
+}
+
+// The call of `function`, whose body is `body`: a node of the body's type, written as a call of the function.
+fn T called<T: Node<T>>(Shared<ShaderFunction> function, T body) {
+    function.finish(e: body.expr());
+    Shared<Expr> e = exprOf(kind: ExprKind::FnCall, text: function.name(), wgslType: body.wgslType());
+    for (isize i = 0; i < function.valueCount(); i = i + 1) { e.arg(e: function.valueAt(i: i)); }
+    e.calls(f: give function);
+    return body.over(e: give e);
+}

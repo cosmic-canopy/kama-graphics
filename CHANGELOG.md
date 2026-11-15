@@ -44,3 +44,24 @@ package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (KR-281 4g), ticking as it did; its manifest needs kama 0.9.958 or later. Green on kama 0.9.960 at the same
   counts (2026-11-15), which also fixes kyoten's KY-59, an operator releasing a node passed to it by value
   twice, which part 3's typed nodes need.
+- GFX-1's part 3, its first part: typed nodes compiled to WGSL.
+  - Typed nodes: `FloatNode`, `Vec3Node`, `Vec4Node` and `Mat4Node` behind the public `Node<T is This>` contract
+    (`expr()`, `wgslType()`, `over(e:)`), and `Expr`.
+  - Operators by operand type, a number on either side, and parts (`x()`, `y()`, `z()`, `xyz()`, `w()`).
+  - `constant`, `vec3` and `vec4`.
+  - WGSL's built-ins: `dot`, `normalize`, `max`, `min`, `saturate`, `sqrt`, `exp2`, `pow` and `mix`.
+  - `varying`.
+  - `positionLocal`, `modelWorldMatrix` and `cameraViewProjectionMatrix`.
+  - Typed functions: `ShaderFunction`, `param(function:, name:, value:)` and `called(function:, body:)`.
+  - `NodeBuilder` compiles a material:
+    - group 0, the settings block and the typed functions, each once with its callees first;
+    - lets for nodes used twice, the varyings and the two entry points;
+    - its refusals in `problems()`.
+  - `MaterialSettings` declares a material's settings with their values, laid out by WGSL's uniform rules.
+  - `wgslNumber` writes a float32 so that a WGSL compiler reads it back exactly, through a float64 as well.
+  - **Changed:** `Material` is `settings(into:)`, `shade(builder:)`, `version()` and `gpuMut()`. `shaderSource()` and
+    `settingBytes()` are gone.
+  - A renderer compiles a material once. A material whose compile is refused draws nothing, and is reported once as
+    `GraphicsErrorKind::Material`, which joins the enum.
+  - `MeshBasicMaterial` is built from nodes behind the same API, its frames the same bytes.
+  - A material's settings (group 1) are visible to the vertex stage too, so a material's vertex stage may read them.

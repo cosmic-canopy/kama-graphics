@@ -122,7 +122,13 @@ cannot refuse is refused and reported, never ending the program, as `@kama/gpu`'
 (SPEC § Misuse).
 Then part 3, typed nodes compiled to WGSL and the lit box. Its question, how the library's shader functions reach a
 material compiled at run time, was decided on 2026-11-15 ([ROADMAP_DETAIL.md](ROADMAP_DETAIL.md#cube)): typed-node
-functions in kama, a WGSL function as text the escape, and no WESL linker at run time. GFX-1 is built depth-first, and every example is a test: a headless
+functions in kama, a WGSL function as text the escape, and no WESL linker at run time. **Part 3's first part is built**
+(2026-11-15, SPEC § Typed nodes and § The compiler):
+- typed nodes and typed functions;
+- the material compiler, with its lets, varyings and refusals;
+- `MeshBasicMaterial` rebuilt on them, part 2's golden matched byte for byte.
+
+Its second part, `MeshStandardMaterial` and normals reaching the fragment stage, is next. GFX-1 is built depth-first, and every example is a test: a headless
 readback and a golden image, on web and native. A feature a program does not use drops out at link time.
 [SPEC.md](SPEC.md) is what is built so far, and grows with each part.
 

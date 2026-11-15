@@ -50,11 +50,12 @@ type resource BufferGeometry implements Geometry {
     DynamicArray<GeometryGroup> groupList;
     DynamicArray<UnsafePtr> devices;      // each device that drew it, and its buffers there
     DynamicArray<Buffer> positionBuffers;
+    DynamicArray<Buffer> normalBuffers;
     DynamicArray<Buffer> indexBuffers;
 
     friend BoxGeometry[empty];
     friend buildPlane[vertex, triangle, group];
-    friend Renderer::render[entryOn, positionsOn, indicesOn, indexFormat];
+    friend Renderer::render[entryOn, positionsOn, normalsOn, indicesOn, indexFormat];
 
     unsafe ctor empty() {
         this.positionList = DynamicArray.empty();
@@ -64,6 +65,7 @@ type resource BufferGeometry implements Geometry {
         this.groupList = DynamicArray.empty();
         this.devices = DynamicArray.empty();
         this.positionBuffers = DynamicArray.empty();
+        this.normalBuffers = DynamicArray.empty();
         this.indexBuffers = DynamicArray.empty();
     }
     fn void vertex(Vec3 position, Vec3 normal, Vec2 uv) {
@@ -81,13 +83,17 @@ type resource BufferGeometry implements Geometry {
     public const fn const ref BufferGeometry buffers() { return this; }
     public fn ref BufferGeometry buffersMut() { return this; }
 
-    // Its buffers on `device`, made the first time: the positions, and the index at 16 bits where it fits.
+    // Its buffers on `device`, made the first time: the positions, the normals, and the index at 16 bits where it fits.
     unsafe fn isize entryOn(ref Device device, ref Queue queue) {
         UnsafePtr at = device.raw();
         for (isize i = 0; i < this.devices.length(); i = i + 1) { if (this.devices[i] == at) { return i; } }
         DynamicArray<uint8> positions = DynamicArray.empty();
         for (isize i = 0; i < this.positionList.length(); i = i + 1) {
             putWord(into: ref positions, bits: bitcast<uint32>(this.positionList[i]));
+        }
+        DynamicArray<uint8> normals = DynamicArray.empty();
+        for (isize i = 0; i < this.normalList.length(); i = i + 1) {
+            putWord(into: ref normals, bits: bitcast<uint32>(this.normalList[i]));
         }
         DynamicArray<uint8> indices = DynamicArray.empty();
         bool short16 = this.shortIndex();
@@ -99,16 +105,23 @@ type resource BufferGeometry implements Geometry {
         }
         Buffer p = holding(device: ref device, queue: ref queue, bytes: give positions, usage: BufferUsage::Vertex,
                            name: "a geometry's positions");
+        Buffer n = holding(device: ref device, queue: ref queue, bytes: give normals, usage: BufferUsage::Vertex,
+                           name: "a geometry's normals");
         Buffer x = holding(device: ref device, queue: ref queue, bytes: give indices, usage: BufferUsage::Index,
                            name: "a geometry's index");
         this.devices.add(item: at);
         this.positionBuffers.add(item: give p);
+        this.normalBuffers.add(item: give n);
         this.indexBuffers.add(item: give x);
         return this.devices.length() - 1;
     }
     unsafe fn Buffer positionsOn(ref Device device, ref Queue queue) {
         isize i = this.entryOn(device: ref device, queue: ref queue);
         return copy this.positionBuffers[i];
+    }
+    unsafe fn Buffer normalsOn(ref Device device, ref Queue queue) {
+        isize i = this.entryOn(device: ref device, queue: ref queue);
+        return copy this.normalBuffers[i];
     }
     unsafe fn Buffer indicesOn(ref Device device, ref Queue queue) {
         isize i = this.entryOn(device: ref device, queue: ref queue);

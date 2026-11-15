@@ -73,7 +73,8 @@ a resource the program owns.
   - the target is cleared to the clear colour and its depth to 0, since depth is reversed: near is 1, far is 0, and a
     fragment is kept where it is greater (GFX-1's question 1);
   - each mesh is one draw, of its geometry's triangles, with back faces not drawn (three.js's `FrontSide`), its vertex
-    shader reading its world matrix from the scene's records by its instance index;
+    shader reading its world matrix and normal matrix from the scene's records by its instance index, and each vertex's
+    position and normal from the geometry's buffers;
   - a mirrored mesh, whose world matrix's 3x3 has a negative determinant, is drawn with its winding flipped, as three.js
     r187 flips it (`WebGPUPipelineUtils.js`), so its front faces stay its front. Its pipeline is its material's
     other one;
@@ -137,9 +138,13 @@ Decided, GFX-1's part 2, question 4), as `@kama/gpu` reports every misuse of Web
   only a subtree that moved or holds a mark, so an unchanged scene costs nothing to walk. A node is made again where it,
   or a node above it, changed.
 - **The flat core:** each mesh in a scene owns a record in the scene's table (its world matrix, geometry and material),
-  written when it changed and given up when the mesh leaves the scene. The table reaches the GPU as one storage buffer, a
-  64-byte world matrix a record, written where it changed. It is internal; an engine's way to drive it is decided when
-  one first does.
+  written when it changed and given up when the mesh leaves the scene.
+  - The table reaches the GPU as one storage buffer, written where it changed. A record is 112 bytes: the world matrix,
+    then its normal matrix (kyoten's rendering.md § Decided, GFX-1's part 3, its second part's question 1).
+  - The normal matrix is the inverse transpose of the world matrix's 3x3, made on the CPU when the world matrix is
+    written, as three.js's `modelNormalMatrix`, so a normal stays at right angles to its surface under any scale, shear
+    or mirror. A world matrix with no inverse (a scale of 0) gives zeros, as three.js's `invert` does.
+  - It is internal; an engine's way to drive it is decided when one first does.
 
 ## Rotation
 
@@ -192,8 +197,8 @@ Decided, GFX-1's part 2, question 4), as `@kama/gpu` reports every misuse of Web
 
 What a material's shader is written in (kyoten's rendering.md § Decided, GFX-1's question 2 and part 3's question).
 
-- **One node type per WGSL type:** `FloatNode` (f32), `Vec3Node` (vec3f, a colour or a direction), `Vec4Node` (vec4f)
-  and `Mat4Node` (mat4x4f). Each implements the public node contract, `Node<T is This>`: `expr()`, `wgslType()` and
+- **One node type per WGSL type:** `FloatNode` (f32), `Vec3Node` (vec3f, a colour or a direction), `Vec4Node` (vec4f),
+  `Mat3Node` (mat3x3f) and `Mat4Node` (mat4x4f). Each implements the public node contract, `Node<T is This>`: `expr()`, `wgslType()` and
   `over(e:)`. So a program's own node type goes wherever the library takes a node, and a function generic over `Node`
   serves every type.
 - **A node is a reference, as TSL's are.** Handing one on shares it, since each is `Copyable(bare: copy)` over a shared
@@ -202,6 +207,7 @@ What a material's shader is written in (kyoten's rendering.md § Decided, GFX-1'
   - `+ - * /` between two nodes of a type;
   - a vector with a float, and a float times a vector;
   - a matrix times a matrix or a vec4;
+  - a mat3 times a mat3 or a vec3;
   - unary `-`;
   - a number on either side (`0.5 * x`, `x + 1.0`).
 
@@ -213,11 +219,16 @@ What a material's shader is written in (kyoten's rendering.md § Decided, GFX-1'
   - on any float type, the result its type: `max(a:, b:)`, `min(a:, b:)`, `saturate(x:)`, `sqrt(x:)`, `exp2(x:)`,
     `pow(x:, power:)`, and `mix(from:, to:, by:)`, whose `by` is a float.
 - **What the renderer gives every material,** as TSL's:
-  - `positionLocal()`, the vertex's position in its mesh;
-  - `modelWorldMatrix()`, the object's world matrix, read in the vertex stage alone;
-  - `cameraViewProjectionMatrix()`.
+  - `positionLocal()` and `normalLocal()`, the vertex's position and normal in its mesh;
+  - `modelWorldMatrix()` and `modelNormalMatrix()`, the object's world matrix and normal matrix, read in the vertex stage
+    alone;
+  - `cameraViewProjectionMatrix()`;
+  - `normalWorld()`, the surface's normal in world space: the normal matrix times the vertex's normal, through a varying,
+    normalized, as TSL's `normalWorldGeometry`;
+  - `positionWorld()`, the surface's position in world space through a varying, as TSL's `positionWorld`.
 - **`varying(value:)` hands a vertex stage's value to the fragment stage,** interpolated, as TSL's `varying()`. A vertex
-  attribute read in the fragment stage passes through a varying by itself.
+  attribute read in the fragment stage passes through a varying by itself. Two reads of a value written alike, such as
+  two calls of `normalWorld()`, share one varying, since a stage passes few.
 - **A typed function is a `ShaderFunction`,** as TSL's `Fn(…).setLayout(…)`. It is written into a material's WGSL once,
   where the material reaches it:
   - a kama function makes one with `new ShaderFunction.make(name:)`;
@@ -236,7 +247,9 @@ What a material's shader is written in (kyoten's rendering.md § Decided, GFX-1'
 the material's nodes: `vertexPosition(node:)` and `fragmentColor(node:)`, as TSL's `vertexNode` and `outputNode`. Its
 `wgsl()` is the whole shader module:
 
-- **group 0, what the renderer gives:** `frame` (the view-projection) and `objects` (each mesh's world matrix);
+- **group 0, what the renderer gives:** `frame` (the view-projection) and `objects`, each mesh's `Object` (its `world`
+  and `normal` matrices);
+- **the vertex's inputs:** its `position` at location 0 and its `normal` at location 1;
 - **group 1, the material's settings:** one uniform block, `material`, which both stages may read.
   - `MaterialSettings` declares each setting with its value: `addFloat`, `addVec3` and `addColor` (linear).
   - It lays the block out by WGSL's rules for the uniform address space: an f32 on 4 bytes, a vec3f on 16, the block a
@@ -301,7 +314,7 @@ WGSL's reserved words beyond its keywords are refused by the GPU's own compile, 
 - then `tests/`, one program, built debug and release and run natively, and built for the web and run under `kama run`
   in Edge, Firefox and the pinned Chrome for Testing, each started as `tools/browsers.mjs` says.
 
-It is 144 cases on each leg that names a software GPU, and 139 in Edge, whose leg names none.
+It is 151 cases on each leg that names a software GPU, and 146 in Edge, whose leg names none.
 
 - **The goldens** (kyoten's rendering.md § Decided, GFX-1's part 1, questions 2 and 3):
   - Each leg names its software GPU: `--golden warp` natively on Windows and in Firefox, `--golden swiftshader` in the
@@ -392,6 +405,13 @@ It is 144 cases on each leg that names a software GPU, and 139 in Edge, whose le
     error;
   - a mirrored box drawn from outside only: a camera inside it sees the backdrop, and a box not mirrored beside it,
     drawn first by the same renderer with the same WGSL, needs a pipeline of its own; seen from outside, it shows.
+- **Part 3's second part, with no GPU** (`tests/src/nodes.kama`): `normalWorld()` and `positionWorld()` spelled, two
+  reads of the normal sharing one varying, and two varyings alike but for their operator kept apart; the normal matrix
+  refused in the fragment stage; `Mat3Node`'s type and operators; and `normal` and `mat3x3f` refused as names.
+- **Part 3's second part, on each leg's GPU** (`tests/src/normals.kama`): a box turned 25 degrees about x and 35 about
+  y under a parent scaled (2, 0.5, 1), a shear, drawn by a program's own material showing `normalWorld()` as a colour.
+  Every texel is held, within 2 steps, to a face's normal worked in float64 as S⁻¹ R n and encoded as the sRGB target
+  holds it. Then the same under a parent mirrored on x, its normals still pointing out, and no WebGPU error.
 - **Part 2's golden holds part 3's compiler:** `boxes/<gpu>.png` is matched byte for byte with `MeshBasicMaterial`'s
   nodes, as it was with its WGSL by hand.
 - **Printed from outside the program:** the gate counts each leg's printed lines: one for the render refused by the

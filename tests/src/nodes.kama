@@ -9,7 +9,8 @@ import {
     graphics::dot, graphics::normalize, graphics::max, graphics::min, graphics::mix, graphics::saturate,
     graphics::sqrt, graphics::exp2, graphics::pow, graphics::varying, graphics::positionLocal,
     graphics::modelWorldMatrix, graphics::cameraViewProjectionMatrix, graphics::wgslNumber,
-    graphics::MeshBasicMaterial, graphics::Color, graphics::Node, graphics::Mat4Node,
+    graphics::MeshBasicMaterial, graphics::Color, graphics::Node, graphics::Mat4Node, graphics::Mat3Node,
+    graphics::normalLocal, graphics::modelNormalMatrix, graphics::normalWorld, graphics::positionWorld,
     Verdicts,
 };
 export { nodeCases, ShaderCase, nodeShaders };
@@ -18,14 +19,15 @@ export { nodeCases, ShaderCase, nodeShaders };
 fn string prelude() {
     return "struct Frame { viewProjection: mat4x4f };\n"
         + "@group(0) @binding(0) var<uniform> frame: Frame;\n"
-        + "@group(0) @binding(1) var<storage, read> objects: array<mat4x4f>;\n";
+        + "struct Object { world: mat4x4f, normal: mat3x3f };\n"
+        + "@group(0) @binding(1) var<storage, read> objects: array<Object>;\n";
 }
 // Every mesh's vertex stage, with no varying.
 fn string standardVertex() {
     return "struct Varyings {\n  @builtin(position) clip: vec4f,\n};\n"
-        + "@vertex fn vs(@builtin(instance_index) object: u32, @location(0) position: vec3f) -> Varyings {\n"
+        + "@vertex fn vs(@builtin(instance_index) object: u32, @location(0) position: vec3f, @location(1) normal: vec3f) -> Varyings {\n"
         + "  var v: Varyings;\n"
-        + "  v.clip = ((frame.viewProjection * objects[object]) * vec4f(position, 1.0));\n"
+        + "  v.clip = ((frame.viewProjection * objects[object].world) * vec4f(position, 1.0));\n"
         + "  return v;\n}\n";
 }
 fn string fragment(const ref string body) {
@@ -232,11 +234,15 @@ fn void typeCases(ref Verdicts found) {
     hold(bad: ref bad, node: positionLocal(), label: "positionLocal"); hold(bad: ref bad, node: m, label: "modelWorldMatrix");
     hold(bad: ref bad, node: cameraViewProjectionMatrix(), label: "cameraViewProjectionMatrix");
     hold(bad: ref bad, node: tint(colour: v, k: f), label: "a typed function's call");
+    Mat3Node nm = modelNormalMatrix();
+    hold(bad: ref bad, node: nm * nm, label: "n * n"); hold::<Vec3Node>(bad: ref bad, node: nm * v, label: "n * v");
+    hold(bad: ref bad, node: nm, label: "modelNormalMatrix"); hold(bad: ref bad, node: normalLocal(), label: "normalLocal");
+    hold(bad: ref bad, node: normalWorld(), label: "normalWorld"); hold(bad: ref bad, node: positionWorld(), label: "positionWorld");
     found.add(name: "typed nodes: every node an operator, a built-in or a typed function makes carries its node type's WGSL type",
               why: give bad);
-    string own = f.wgslType() + " " + v.wgslType() + " " + q.wgslType() + " " + m.wgslType();
-    found.add(name: "typed nodes: FloatNode, Vec3Node, Vec4Node and Mat4Node are WGSL's f32, vec3f, vec4f and mat4x4f",
-              why: sameText(got: own, want: "f32 vec3f vec4f mat4x4f"));
+    string own = f.wgslType() + " " + v.wgslType() + " " + q.wgslType() + " " + nm.wgslType() + " " + m.wgslType();
+    found.add(name: "typed nodes: FloatNode, Vec3Node, Vec4Node, Mat3Node and Mat4Node are WGSL's f32, vec3f, vec4f, mat3x3f and mat4x4f",
+              why: sameText(got: own, want: "f32 vec3f vec4f mat3x3f mat4x4f"));
 }
 
 unsafe fn void compileCases(ref Verdicts found, ref DynamicArray<ShaderCase> shaders) {
@@ -325,6 +331,34 @@ unsafe fn void compileCases(ref Verdicts found, ref DynamicArray<ShaderCase> sha
                   why: sameText(got: got, want: want));
         shaders.add(item: ShaderCase.make(name: "vector function", wgsl: give got));
     }
+    // the normal and the world position: the normal matrix times the vertex's normal, and two reads of the normal share
+    // one varying
+    {
+        NodeBuilder b = NodeBuilder.make(settings: MaterialSettings.make());
+        b.fragmentColor(node: vec4(xyz: normalWorld() + positionWorld() + normalWorld(), w: constant(value: 1.0)));
+        string got = b.wgsl();
+        string want = prelude()
+            + "struct Varyings {\n  @builtin(position) clip: vec4f,\n  @location(0) v0: vec3f,\n  @location(1) v1: vec3f,\n};\n"
+            + "@vertex fn vs(@builtin(instance_index) object: u32, @location(0) position: vec3f, @location(1) normal: vec3f) -> Varyings {\n"
+            + "  var v: Varyings;\n"
+            + "  v.clip = ((frame.viewProjection * objects[object].world) * vec4f(position, 1.0));\n"
+            + "  v.v0 = (objects[object].normal * normal);\n"
+            + "  v.v1 = (objects[object].world * vec4f(position, 1.0)).xyz;\n"
+            + "  return v;\n}\n"
+            + fragment(body: "  return vec4f(((normalize(v.v0) + v.v1) + normalize(v.v0)), 1.0);\n");
+        found.add(name: "NodeBuilder: normalWorld() is the normal matrix times the vertex's normal through a varying, normalized; positionWorld() the world position; two reads of one value share a varying",
+                  why: sameText(got: got, want: want));
+        shaders.add(item: ShaderCase.make(name: "normals", wgsl: give got));
+    }
+    // two varyings written alike but for their operator are two
+    {
+        NodeBuilder b = NodeBuilder.make(settings: MaterialSettings.make());
+        Vec3Node sum = varying(value: positionLocal() + normalLocal());
+        Vec3Node product = varying(value: positionLocal() * normalLocal());
+        string body = bodyOf(b: ref b, colour: sum + product, alpha: constant(value: 1.0));
+        found.add(name: "NodeBuilder: two varyings written alike but for their operator are two",
+                  why: sameText(got: body, want: "  return vec4f((v.v0 + v.v1), 1.0);\n"));
+    }
     // a node used once has no let, though it is a call
     {
         NodeBuilder b = NodeBuilder.make(settings: rcd());
@@ -345,11 +379,11 @@ unsafe fn void compileCases(ref Verdicts found, ref DynamicArray<ShaderCase> sha
         string got = b.wgsl();
         string want = prelude()
             + "struct Varyings {\n  @builtin(position) clip: vec4f,\n  @location(0) v0: vec3f,\n  @location(1) v1: vec3f,\n};\n"
-            + "@vertex fn vs(@builtin(instance_index) object: u32, @location(0) position: vec3f) -> Varyings {\n"
+            + "@vertex fn vs(@builtin(instance_index) object: u32, @location(0) position: vec3f, @location(1) normal: vec3f) -> Varyings {\n"
             + "  var v: Varyings;\n"
-            + "  v.clip = ((frame.viewProjection * objects[object]) * vec4f(position, 1.0));\n"
+            + "  v.clip = ((frame.viewProjection * objects[object].world) * vec4f(position, 1.0));\n"
             + "  v.v0 = position;\n"
-            + "  v.v1 = (objects[object] * vec4f(position, 1.0)).xyz;\n"
+            + "  v.v1 = (objects[object].world * vec4f(position, 1.0)).xyz;\n"
             + "  return v;\n}\n"
             + fragment(body: "  let n0 = saturate(dot(normalize(v.v0), normalize(v.v1)));\n  return vec4f(mix(v.v0, v.v1, n0), n0);\n");
         found.add(name: "NodeBuilder: a vertex attribute read in the fragment stage, and a varying(), each pass through a varying",
@@ -366,9 +400,9 @@ unsafe fn void compileCases(ref Verdicts found, ref DynamicArray<ShaderCase> sha
         string got = b.wgsl();
         string want = prelude()
             + "struct Varyings {\n  @builtin(position) clip: vec4f,\n  @location(0) v0: vec3f,\n};\n"
-            + "@vertex fn vs(@builtin(instance_index) object: u32, @location(0) position: vec3f) -> Varyings {\n"
+            + "@vertex fn vs(@builtin(instance_index) object: u32, @location(0) position: vec3f, @location(1) normal: vec3f) -> Varyings {\n"
             + "  var v: Varyings;\n"
-            + "  let n0 = (objects[object] * vec4f(position, 1.0));\n"
+            + "  let n0 = (objects[object].world * vec4f(position, 1.0));\n"
             + "  v.clip = (frame.viewProjection * n0);\n"
             + "  v.v0 = n0.xyz;\n"
             + "  return v;\n}\n"
@@ -426,7 +460,14 @@ unsafe fn void refusalCases(ref Verdicts found) {
         string all = b.wgsl();
         DynamicArray<string> problems = b.problems();
         found.add(name: "NodeBuilder refuses the object's world matrix read in the fragment stage",
-                  why: sameProblems(problems: problems, want: one(a: "`objects[object]` is the vertex stage's alone: read it there, and hand the fragment stage what it needs through varying()")));
+                  why: sameProblems(problems: problems, want: one(a: "`objects[object].world` is the vertex stage's alone: read it there, and hand the fragment stage what it needs through varying()")));
+    }
+    {
+        NodeBuilder b = NodeBuilder.make(settings: MaterialSettings.make());
+        b.fragmentColor(node: vec4(xyz: modelNormalMatrix() * normalLocal(), w: constant(value: 1.0)));
+        string all = b.wgsl();
+        found.add(name: "NodeBuilder refuses the object's normal matrix read in the fragment stage",
+                  why: sameProblems(problems: b.problems(), want: one(a: "`objects[object].normal` is the vertex stage's alone: read it there, and hand the fragment stage what it needs through varying()")));
     }
     {
         NodeBuilder b = NodeBuilder.make(settings: MaterialSettings.make());
@@ -477,7 +518,10 @@ unsafe fn void refusalCases(ref Verdicts found) {
         FloatNode y = param(function: g, name: "n3", value: constant(value: 2.0));
         Shared<ShaderFunction> h = new ShaderFunction.make(name: "vec3f");
         FloatNode z = param(function: h, name: "ok_name2", value: constant(value: 2.0));
-        FloatNode all3 = called(function: f, body: x) + called(function: g, body: y) + called(function: h, body: z);
+        Shared<ShaderFunction> k = new ShaderFunction.make(name: "mat3x3f");
+        FloatNode u = param(function: k, name: "normal", value: constant(value: 2.0));
+        FloatNode all3 = called(function: f, body: x) + called(function: g, body: y) + called(function: h, body: z)
+            + called(function: k, body: u);
         b.fragmentColor(node: vec4(xyz: positionLocal(), w: all3));
         string all = b.wgsl();
         DynamicArray<string> want = DynamicArray.empty();
@@ -486,6 +530,8 @@ unsafe fn void refusalCases(ref Verdicts found) {
         want.add(item: "the shader function `2x` is not a WGSL name: a letter, then letters, digits and `_`");
         want.add(item: "the parameter `n3` is a name the compiler writes");
         want.add(item: "the shader function `vec3f` is a name the compiler writes");
+        want.add(item: "the shader function `mat3x3f` is a name the compiler writes");
+        want.add(item: "the parameter `normal` is a name the compiler writes");
         found.add(name: "NodeBuilder refuses a function or parameter named as WGSL or the compiler already names, or not a WGSL name",
                   why: sameProblems(problems: b.problems(), want: want));
     }

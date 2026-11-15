@@ -153,7 +153,7 @@ type resource ShaderRun {
         if (kept == 1) {
             bool material = match (taken.reports()[0].kind()) { case Material: true; case _: false; };
             string words = taken.reports()[0].message();
-            string want = "a material was refused, so nothing draws with it: `objects[object]` is the vertex stage's alone: read it there, and hand the fragment stage what it needs through varying()";
+            string want = "a material was refused, so nothing draws with it: `objects[object].world` is the vertex stage's alone: read it there, and hand the fragment stage what it needs through varying()";
             if (!material) { why = "its kind is not Material"; }
             else if (words != want) { why = "its words are [" + words + "]"; }
         }

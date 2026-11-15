@@ -65,5 +65,12 @@ package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     `GraphicsErrorKind::Material`, which joins the enum.
   - `MeshBasicMaterial` is built from nodes behind the same API, its frames the same bytes.
   - A material's settings (group 1) are visible to the vertex stage too, so a material's vertex stage may read them.
+- GFX-1's part 3, its second part, step 1: normals in world space.
+  - Each mesh's record carries its normal matrix, the inverse transpose of its world matrix's 3x3, made when it moves. A
+    record is 112 bytes.
+  - A geometry's normals reach the vertex stage at location 1.
+  - `Mat3Node`, `normalLocal`, `modelNormalMatrix`, `normalWorld` and `positionWorld`.
+  - Two reads of a value written alike share one varying.
+  - **Changed:** `modelWorldMatrix()` reads `objects[object].world`.
 - **Fixed:** a mirrored mesh (a world matrix with a negative determinant) drew inside out. Its winding is flipped, as
   three.js r187's is, so a camera inside a mirrored box sees the backdrop.

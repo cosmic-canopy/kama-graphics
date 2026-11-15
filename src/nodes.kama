@@ -9,9 +9,9 @@
 
 import { std::collections::DynamicArray, std::memory::Shared };
 export {
-    Node, Expr, ExprKind, FloatNode, Vec3Node, Vec4Node, Mat4Node, ShaderFunction, param, called,
+    Node, Expr, ExprKind, FloatNode, Vec3Node, Vec4Node, Mat3Node, Mat4Node, ShaderFunction, param, called,
     constant, vec3, vec4, dot, normalize, max, min, mix, saturate, sqrt, exp2, pow, varying,
-    positionLocal, modelWorldMatrix, cameraViewProjectionMatrix,
+    positionLocal, normalLocal, modelWorldMatrix, modelNormalMatrix, cameraViewProjectionMatrix, normalWorld, positionWorld,
 };
 
 // What a node computes:
@@ -163,6 +163,18 @@ type resource Vec4Node implements Copyable<This>(bare: copy), Node<This> {
     public fn FloatNode w() { return FloatNode.of(e: member(name: "w", wgslType: "f32", of: this.expr())); }
 }
 
+// WGSL's mat3x3f, column-major as WGSL's is: a normal matrix.
+type resource Mat3Node implements Copyable<This>(bare: copy), Node<This> {
+    Shared<Expr> e;
+    public ctor of(Shared<Expr> e) { this.e = give e; }
+    public ctor copy(ref Mat3Node source) { this.e = copy source.e; }
+    public fn Shared<Expr> expr() { return copy this.e; }
+    public const fn string wgslType() { return "mat3x3f"; }
+    public fn Mat3Node over(Shared<Expr> e) { return Mat3Node.of(e: give e); }
+    public Mat3Node operator*(Mat3Node rhs) { return Mat3Node.of(e: binary(op: "*", wgslType: "mat3x3f", a: this.expr(), b: rhs.expr())); }
+    public Vec3Node operator*(Vec3Node rhs) { return Vec3Node.of(e: binary(op: "*", wgslType: "vec3f", a: this.expr(), b: rhs.expr())); }
+}
+
 // WGSL's mat4x4f, column-major as WGSL's is.
 type resource Mat4Node implements Copyable<This>(bare: copy), Node<This> {
     Shared<Expr> e;
@@ -205,11 +217,28 @@ fn T varying<T: Node<T>>(T value) {
                                   b: Optional::None, c: Optional::None));
 }
 
-// What the renderer gives every material: the vertex's position in its mesh, the object's world matrix and the camera's
-// view-projection, as TSL's `positionLocal`, `modelWorldMatrix` and `cameraProjectionMatrix * cameraViewMatrix`.
+// What the renderer gives every material, as TSL's: the vertex's position and normal in its mesh (`positionLocal`,
+// `normalLocal`), the object's world matrix and normal matrix, read in the vertex stage alone (`modelWorldMatrix`,
+// `modelNormalMatrix`), and the camera's view-projection (`cameraProjectionMatrix * cameraViewMatrix`).
 fn Vec3Node positionLocal() { return Vec3Node.of(e: exprOf(kind: ExprKind::Attribute, text: "position", wgslType: "vec3f")); }
-fn Mat4Node modelWorldMatrix() { return Mat4Node.of(e: exprOf(kind: ExprKind::VertexName, text: "objects[object]", wgslType: "mat4x4f")); }
+fn Vec3Node normalLocal() { return Vec3Node.of(e: exprOf(kind: ExprKind::Attribute, text: "normal", wgslType: "vec3f")); }
+fn Mat4Node modelWorldMatrix() { return Mat4Node.of(e: exprOf(kind: ExprKind::VertexName, text: "objects[object].world", wgslType: "mat4x4f")); }
+// The inverse transpose of the world matrix's 3x3, made on the CPU when the object moved (three.js's
+// `modelNormalMatrix`), so a normal stays at right angles to its surface under any scale, shear or mirror.
+fn Mat3Node modelNormalMatrix() { return Mat3Node.of(e: exprOf(kind: ExprKind::VertexName, text: "objects[object].normal", wgslType: "mat3x3f")); }
 fn Mat4Node cameraViewProjectionMatrix() { return Mat4Node.of(e: exprOf(kind: ExprKind::Name, text: "frame.viewProjection", wgslType: "mat4x4f")); }
+
+// The surface's normal in world space, interpolated across the triangle and of length 1, as TSL's
+// `normalWorldGeometry`: the normal matrix times the vertex's normal, through a varying, normalized.
+fn Vec3Node normalWorld() {
+    Vec3Node turned = modelNormalMatrix() * normalLocal();
+    return normalize(v: varying(value: turned));
+}
+// The surface's position in world space, as TSL's `positionWorld`: the world matrix times the vertex, through a varying.
+fn Vec3Node positionWorld() {
+    Vec4Node world = modelWorldMatrix() * vec4(xyz: positionLocal(), w: constant(value: 1.0));
+    return varying(value: world.xyz());
+}
 
 // A typed function, as TSL's `Fn(…).setLayout(…)`: its name, its parameters, and its body over them. Each parameter is
 // declared with the argument this call passes (`param`), so a call cannot pass the wrong number or type, and `called`

@@ -129,6 +129,17 @@ natively. The library's own `examples/cube` is the same scene without an engine.
   mesh's record carries its normal matrix, the inverse transpose of its world matrix's 3x3, computed on the CPU when the
   world matrix changes. That is three.js's `modelNormalMatrix`, and Bevy's record carries one too. The record grows from
   64 bytes to 112.
+- **Built, part 3's second part, step 1** (2026-11-15, [SPEC.md](SPEC.md) § The scene graph and § Typed nodes):
+  - each record carries its normal matrix (std::math's `Mat3`, zero where there is no inverse);
+  - the geometry's normals reach the vertex stage at location 1;
+  - new nodes: `Mat3Node`, `normalLocal`, `modelNormalMatrix`, `normalWorld` (normalized after its varying, as TSL's
+    `normalWorldGeometry`) and `positionWorld`;
+  - two reads of a value written alike share one varying.
+
+  The normals test was red first against a stub record carrying the world matrix's plain 3x3: 279 texels were no face's
+  normal under the shear. 151 cases on each golden leg, 146 in Edge. 18 of 18 mutations caught, the last after a case
+  kept two varyings alike but for their operator apart. Found on the way: kyoten's KY-62, a generic's type argument
+  inferred from an operator expression's left operand. Next, step 2: `MeshStandardMaterial`'s values and slots.
 - **Done:**
   - `examples/cube` draws from one source on both legs;
   - its golden passes on a software GPU on each leg CI has, and perceptually on the reference machines present;

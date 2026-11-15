@@ -34,7 +34,9 @@ import {
 };
 export { Object3D, NodePart, Walk, Scene, Group, Mesh, PerspectiveCamera };
 
-comptime isize RECORD_BYTES = 64;   // an object's record: its world matrix, as WGSL's mat4x4f
+// An object's record: its world matrix, WGSL's mat4x4f, then its normal matrix, a mat3x3f, whose three columns take 16
+// bytes each (the owner's (A), kyoten's rendering.md § Decided, GFX-1's part 3, its second part's question 1).
+comptime isize RECORD_BYTES = 112;
 
 fn void putFloat(ref DynamicArray<uint8> into, float32 value) {
     uint32 bits = bitcast<uint32>(value);
@@ -55,6 +57,24 @@ fn Mat3 upperLeft(const ref Mat4 m) {
     return Mat3.fromCols(c0: Vec3.of(x: m.get(c: 0, r: 0), y: m.get(c: 0, r: 1), z: m.get(c: 0, r: 2)),
                          c1: Vec3.of(x: m.get(c: 1, r: 0), y: m.get(c: 1, r: 1), z: m.get(c: 1, r: 2)),
                          c2: Vec3.of(x: m.get(c: 2, r: 0), y: m.get(c: 2, r: 1), z: m.get(c: 2, r: 2)));
+}
+
+// The normal matrix of a world matrix, as three.js's `getNormalMatrix`: the inverse transpose of its 3x3, which keeps a
+// normal at right angles to its surface under any scale, shear or mirror. A matrix with no inverse (a scale of 0) gives
+// zeros, as three.js's `invert` does.
+fn Mat3 normalMatrixOf(const ref Mat4 world) {
+    Mat3 m = upperLeft(m: world);
+    if (m.determinant() == 0.0) { return Mat3.fromCols(c0: Vec3.zero(), c1: Vec3.zero(), c2: Vec3.zero()); }
+    return m.inverse().transpose();
+}
+
+// A record as WGSL's `Object` reads it: the world matrix, then the normal matrix's columns, each padded to 16 bytes.
+fn void putRecord(ref DynamicArray<uint8> into, const ref Mat4 world, const ref Mat3 normal) {
+    putMatrix(into: ref into, m: world);
+    for (int32 c = 0; c < 3; c = c + 1) {
+        for (int32 r = 0; r < 3; r = r + 1) { putFloat(into: ref into, value: normal.get(c: c, r: r)); }
+        putFloat(into: ref into, value: 0.0);
+    }
 }
 
 // The local matrix of a position, a rotation and a scale, as three.js's `compose`.
@@ -112,6 +132,7 @@ type resource TableGpu {
 // The packed records under a scene: a mesh's slot is its own while it is in the scene.
 type resource CoreTable {
     DynamicArray<Mat4> worlds;
+    DynamicArray<Mat3> normals;   // each world matrix's normal matrix, made when it is written
     DynamicArray<Optional<Shared<Geometry>>> geometries;
     DynamicArray<Optional<Shared<Material>>> materials;
     DynamicArray<isize> free;
@@ -121,6 +142,7 @@ type resource CoreTable {
 
     public ctor make() {
         this.worlds = DynamicArray.empty();
+        this.normals = DynamicArray.empty();
         this.geometries = DynamicArray.empty();
         this.materials = DynamicArray.empty();
         this.free = DynamicArray.empty();
@@ -132,6 +154,7 @@ type resource CoreTable {
         isize slot = match (reused) { case Some(value: s): s; case None: -1; };
         if (slot >= 0) { return slot; }
         this.worlds.add(item: Mat4.identity());
+        this.normals.add(item: Mat3.identity());
         this.geometries.add(item: Optional::None);
         this.materials.add(item: Optional::None);
         return this.worlds.length() - 1;
@@ -147,6 +170,7 @@ type resource CoreTable {
         Optional<Shared<Geometry>> shape = Optional::Some(value: give geometry);
         Optional<Shared<Material>> look = Optional::Some(value: give material);
         this.worlds[slot] = world;
+        this.normals[slot] = normalMatrixOf(world: world);
         this.geometries[slot] = give shape;
         this.materials[slot] = give look;
         this.dirty.add(item: slot);
@@ -188,13 +212,13 @@ type resource CoreTable {
         Buffer target = match (this.gpu) { case Some(value: g): g.records(); case None: { panic(msg: "the records were just made"); } };
         if (this.rewrite) {
             DynamicArray<uint8> all = DynamicArray.empty();
-            for (isize s = 0; s < this.worlds.length(); s = s + 1) { putMatrix(into: ref all, m: this.worlds[s]); }
+            for (isize s = 0; s < this.worlds.length(); s = s + 1) { putRecord(into: ref all, world: this.worlds[s], normal: this.normals[s]); }
             if (all.length() > 0) { queue.writeBuffer(buffer: target, offset: 0, data: all.view()); }
         } else {
             for (isize i = 0; i < this.dirty.length(); i = i + 1) {
                 isize s = this.dirty[i];
                 DynamicArray<uint8> one = DynamicArray.empty();
-                putMatrix(into: ref one, m: this.worlds[s]);
+                putRecord(into: ref one, world: this.worlds[s], normal: this.normals[s]);
                 queue.writeBuffer(buffer: target, offset: cast<uint64>(s * RECORD_BYTES), data: one.view());
             }
         }

@@ -124,6 +124,26 @@ type resource Uses {
     public fn void nameAt(isize i, string name) { this.names[i] = give name; }
 }
 
+// An expression as written, with no let: two expressions written alike compute the same value in a stage.
+fn string shapeOf(Shared<Expr> e) {
+    string text = e.name();
+    string args = "";
+    for (isize i = 0; i < e.argCount(); i = i + 1) {
+        if (i > 0) { args = args + ", "; }
+        args = args + shapeOf(e: e.argAt(i: i));
+    }
+    match (e.exprKind()) {
+        case Number: { float32 v = e.number(); return wgslNumber(v: v); }
+        case Binary: { return "(" + shapeOf(e: e.argAt(i: 0)) + " " + text + " " + shapeOf(e: e.argAt(i: 1)) + ")"; }
+        case Unary: { return "(" + text + args + ")"; }
+        case Member: { return args + "." + text; }
+        case Varying: { return "varying(" + args + ")"; }
+        case Call: { return text + "(" + args + ")"; }
+        case FnCall: { return text + "(" + args + ")"; }
+        case _: { return text; }
+    };
+}
+
 // A node's identity: where its expression lives, as a number. Two nodes are one when they share an expression.
 unsafe fn usize identity(const ref Expr e) { return cast<usize>(addr(of: e)); }
 
@@ -133,7 +153,8 @@ type enum Scope { Vertex, Fragment, Function }
 // The names the compiler writes: no function or parameter may take one. A let is `n` and a number.
 fn bool compilerName(const ref string name) {
     return name == "vs" || name == "fs" || name == "v" || name == "object" || name == "position" || name == "frame"
-        || name == "objects" || name == "material" || name == "Frame" || name == "Material" || name == "Varyings";
+        || name == "objects" || name == "material" || name == "Frame" || name == "Material" || name == "Varyings"
+        || name == "normal" || name == "Object";
 }
 fn bool isLetName(const ref string name) {
     if (name.length() < 2 || name[0] != 110) { return false; }   // 'n'
@@ -152,7 +173,7 @@ fn bool wgslKeyword(const ref string name) {
 // WGSL's predeclared types the compiler writes, which a function's name would hide.
 fn bool wgslTypeName(const ref string name) {
     return name == "f32" || name == "i32" || name == "u32" || name == "bool" || name == "vec2f" || name == "vec3f"
-        || name == "vec4f" || name == "mat4x4f" || name == "array";
+        || name == "vec4f" || name == "mat3x3f" || name == "mat4x4f" || name == "array";
 }
 // "" when `name` is one a WGSL function or parameter may take: a letter, then letters, digits and `_`.
 fn string nameProblem(const ref string name, const ref string what) {
@@ -172,11 +193,12 @@ fn string nameProblem(const ref string name, const ref string what) {
 }
 
 // What the renderer gives every material's WGSL in group 0: the frame (the camera's view and projection) and the
-// object records, a world matrix each, indexed by the draw's instance.
+// object records, a world matrix and a normal matrix each, indexed by the draw's instance.
 fn string prelude() {
     return "struct Frame { viewProjection: mat4x4f };\n"
         + "@group(0) @binding(0) var<uniform> frame: Frame;\n"
-        + "@group(0) @binding(1) var<storage, read> objects: array<mat4x4f>;\n";
+        + "struct Object { world: mat4x4f, normal: mat3x3f };\n"
+        + "@group(0) @binding(1) var<storage, read> objects: array<Object>;\n";
 }
 
 // A material compiled: handed its settings, given its nodes (`vertexPosition`, `fragmentColor`), and asked for its WGSL.
@@ -186,6 +208,7 @@ type resource NodeBuilder {
     Optional<Vec4Node> colour = Optional::None;
     DynamicArray<Shared<Expr>> varyingSources;
     DynamicArray<usize> varyingKeys;
+    DynamicArray<string> varyingShapes;   // each varying's source as written, so two reads of one value share it
     DynamicArray<string> functionNames;
     DynamicArray<string> functionTexts;
     DynamicArray<string> builtins;
@@ -196,7 +219,7 @@ type resource NodeBuilder {
 
     public ctor make(MaterialSettings settings) {
         this.declared = give settings;
-        this.varyingSources = DynamicArray.empty(); this.varyingKeys = DynamicArray.empty();
+        this.varyingSources = DynamicArray.empty(); this.varyingKeys = DynamicArray.empty(); this.varyingShapes = DynamicArray.empty();
         this.functionNames = DynamicArray.empty(); this.functionTexts = DynamicArray.empty();
         this.builtins = DynamicArray.empty(); this.found = DynamicArray.empty();
     }
@@ -252,13 +275,17 @@ type resource NodeBuilder {
         for (isize i = 0; i < e.argCount(); i = i + 1) { this.countIn(uses: ref uses, e: e.argAt(i: i), where: where); }
     }
 
-    // The varying the fragment stage reads for `e`: its index, added the first time.
+    // The varying the fragment stage reads for `e`: its index, added the first time. Two reads of the same value, such as
+    // two calls of normalWorld(), share one varying: the varyings a stage can pass are few.
     fn isize varyingOf(Shared<Expr> e) {
         usize at = identity(e: e.deref());
         for (isize i = 0; i < this.varyingKeys.length(); i = i + 1) { if (this.varyingKeys[i] == at) { return i; } }
-        this.varyingKeys.add(item: at);
         // a varying() carries its source; an attribute read in the fragment stage is its own
         Shared<Expr> source = e.exprKind() == ExprKind::Varying ? e.argAt(i: 0) : copy e;
+        string shape = shapeOf(e: copy source);
+        for (isize i = 0; i < this.varyingShapes.length(); i = i + 1) { if (this.varyingShapes[i] == shape) { return i; } }
+        this.varyingKeys.add(item: at);
+        this.varyingShapes.add(item: give shape);
         this.varyingSources.add(item: give source);
         return this.varyingKeys.length() - 1;
     }
@@ -465,7 +492,7 @@ type resource NodeBuilder {
         }
         written = written + this.functions;
         written = written + "struct Varyings {\n  @builtin(position) clip: vec4f,\n" + varyingFields + "};\n";
-        written = written + "@vertex fn vs(@builtin(instance_index) object: u32, @location(0) position: vec3f) -> Varyings {\n"
+        written = written + "@vertex fn vs(@builtin(instance_index) object: u32, @location(0) position: vec3f, @location(1) normal: vec3f) -> Varyings {\n"
             + "  var v: Varyings;\n" + vertLets + "  v.clip = " + vertOut + ";\n" + varyingWrites + "  return v;\n}\n";
         written = written + "@fragment fn fs(v: Varyings) -> @location(0) vec4f {\n" + fragLets + "  return " + fragOut + ";\n}\n";
         return written;

@@ -1,0 +1,200 @@
+// GFX-1's part 3, its second part, on the GPU: normals in world space under a shear, as the owner decided (A): each
+// mesh's record carries its normal matrix, the inverse transpose of its world matrix's 3x3 (kyoten's rendering.md §
+// Decided, GFX-1's part 3, its second part's question 1). A step a tick on the device the check opened.
+//
+// A box turned 25 degrees about x and 35 about y, under a parent scaled (2, 0.5, 1): its world matrix is S R, which
+// shears it, so a normal multiplied by the world matrix tilts off its face, and only the inverse transpose, S⁻¹ R, keeps
+// it at right angles. A program's own material shows `normalWorld()` as a colour (n / 2 + 1/2), and every texel of the
+// box is held to one of its faces' normals worked here in float64, encoded as the 8-bit sRGB target holds it. Then the
+// same under a parent mirrored on x, (-2, 0.5, 1), whose normals must still point out.
+
+import {
+    std::collections::DynamicArray,
+    std::math::Vec3, std::math::radians, std::math::sin, std::math::cos, std::math::sqrt, std::math::pow,
+    std::math::round,
+    std::time::Instant, std::time::monotonicNow,
+    gpu::Device, gpu::Queue, gpu::DeviceErrors,
+    image::Image,
+    graphics::Color, graphics::Renderer, graphics::RenderTarget, graphics::Scene, graphics::Group, graphics::Mesh,
+    graphics::PerspectiveCamera, graphics::BoxGeometry, graphics::Material, graphics::MaterialGpu,
+    graphics::MaterialSettings, graphics::NodeBuilder, graphics::Euler, graphics::EulerOrder, graphics::PixelRead,
+    graphics::PixelStatus, graphics::Vec3Node, graphics::Vec4Node, graphics::normalWorld, graphics::vec3, graphics::vec4,
+    graphics::constant,
+    Verdicts,
+};
+export { NormalsRun };
+
+comptime int64 SETTLE_MS = 10000;
+comptime uint32 WIDE = 64;
+comptime uint32 HIGH = 48;
+
+// A program's own material: its world normal as a colour, n / 2 + 1/2, opaque.
+type resource ShowNormals implements Material {
+    MaterialGpu cache;
+    public ctor make() { this.cache = MaterialGpu.make(); }
+    public fn ref MaterialGpu gpuMut() { return this.cache; }
+    public const fn uint32 version() { return 0; }
+    public const fn void settings(ref MaterialSettings into) { }
+    public fn void shade(ref NodeBuilder builder) {
+        Vec3Node half = vec3(x: constant(value: 0.5), y: constant(value: 0.5), z: constant(value: 0.5));
+        builder.fragmentColor(node: vec4(xyz: normalWorld() * 0.5 + half, w: constant(value: 1.0)));
+    }
+}
+
+// A linear channel as the 8-bit sRGB target holds it, by three.js's curve.
+fn int32 encoded(float64 c) {
+    float64 s = c <= 0.0031308 ? c * 12.92 : 1.055 * pow(x: c, y: 1.0 / 2.4) - 0.055;
+    float64 b = round(x: s * 255.0);
+    if (b < 0.0) { return 0; }
+    if (b > 255.0) { return 255; }
+    return cast<int32>(b);
+}
+
+// The colour a face whose normal in the box is (x, y, z) shows, under the parent's scale (sx, 0.5, 1) and the box's turn
+// of 25 degrees about x after 35 about y (three.js's XYZ order: Rx Ry): normalize(S⁻¹ R n), encoded, as 0xRRGGBB.
+fn uint32 faceColour(float64 x, float64 y, float64 z, float64 sx) {
+    float64 a = 25.0 * 3.14159265358979323846 / 180.0;
+    float64 b = 35.0 * 3.14159265358979323846 / 180.0;
+    // Ry
+    float64 x1 = cos(x: b) * x + sin(x: b) * z;
+    float64 y1 = y;
+    float64 z1 = 0.0 - sin(x: b) * x + cos(x: b) * z;
+    // Rx
+    float64 x2 = x1;
+    float64 y2 = cos(x: a) * y1 - sin(x: a) * z1;
+    float64 z2 = sin(x: a) * y1 + cos(x: a) * z1;
+    // S⁻¹
+    float64 nx = x2 / sx;
+    float64 ny = y2 / 0.5;
+    float64 nz = z2;
+    float64 len = sqrt(x: nx * nx + ny * ny + nz * nz);
+    int32 r = encoded(c: nx / len * 0.5 + 0.5);
+    int32 g = encoded(c: ny / len * 0.5 + 0.5);
+    int32 bl = encoded(c: nz / len * 0.5 + 0.5);
+    return (cast<uint32>(r) << 16) | (cast<uint32>(g) << 8) | cast<uint32>(bl);
+}
+
+fn int32 channel(uint32 c, int32 shift) { return cast<int32>((c >> cast<uint32>(shift)) & 255); }
+fn int32 apart(int32 a, int32 b) { return a > b ? a - b : b - a; }
+
+// "" when every texel is the backdrop or within 2 steps of one face's colour, and two faces or more each show on 20
+// texels or more; else what differs.
+fn string heldToFaces(const ref DynamicArray<uint8> frame, float64 sx) {
+    DynamicArray<uint32> faces = DynamicArray.empty();
+    faces.add(item: faceColour(x: 1.0, y: 0.0, z: 0.0, sx: sx)); faces.add(item: faceColour(x: -1.0, y: 0.0, z: 0.0, sx: sx));
+    faces.add(item: faceColour(x: 0.0, y: 1.0, z: 0.0, sx: sx)); faces.add(item: faceColour(x: 0.0, y: -1.0, z: 0.0, sx: sx));
+    faces.add(item: faceColour(x: 0.0, y: 0.0, z: 1.0, sx: sx)); faces.add(item: faceColour(x: 0.0, y: 0.0, z: -1.0, sx: sx));
+    DynamicArray<int32> counts = DynamicArray.empty();
+    for (isize f = 0; f < 6; f = f + 1) { counts.add(item: 0); }
+    isize off = 0;
+    uint32 firstOff = 0;
+    isize n = frame.length() / 4;
+    if (n != cast<isize>(WIDE * HIGH)) { return "the frame holds ${n} texels"; }
+    for (isize i = 0; i < n; i = i + 1) {
+        uint32 t = (cast<uint32>(frame[i * 4]) << 16) | (cast<uint32>(frame[i * 4 + 1]) << 8) | cast<uint32>(frame[i * 4 + 2]);
+        if (t == 0) { continue; }
+        bool matched = false;
+        for (isize f = 0; f < 6; f = f + 1) {
+            uint32 w = faces[f];
+            bool near = apart(a: channel(c: t, shift: 16), b: channel(c: w, shift: 16)) <= 2
+                && apart(a: channel(c: t, shift: 8), b: channel(c: w, shift: 8)) <= 2
+                && apart(a: channel(c: t, shift: 0), b: channel(c: w, shift: 0)) <= 2;
+            if (near && !matched) { counts[f] = counts[f] + 1; matched = true; }
+        }
+        if (!matched) { if (off == 0) { firstOff = t; } off = off + 1; }
+    }
+    int32 shown = 0;
+    for (isize f = 0; f < 6; f = f + 1) { if (counts[f] >= 20) { shown = shown + 1; } }
+    if (off > 0) { return "${off} texels are no face's normal, the first ${firstOff}"; }
+    if (shown < 2) { return "only ${shown} face(s) show on 20 texels or more"; }
+    return "";
+}
+
+type resource NormalsRun {
+    int32 stage = 0;
+    Instant began = monotonicNow();
+    Verdicts found;
+    Device device;
+    Queue queue;
+    Optional<Renderer> renderer = Optional::None;
+    Optional<PixelRead> reading = Optional::None;
+
+    public ctor make(Device device, Queue queue) {
+        this.found = Verdicts.make();
+        this.device = give device;
+        this.queue = give queue;
+    }
+
+    public fn ref Verdicts verdicts() { return this.found; }
+
+    // The box under a parent scaled (sx, 0.5, 1), rendered, and its read started.
+    unsafe fn void renderBox(float32 sx) {
+        Renderer r = Renderer.withDevice(device: copy this.device, queue: copy this.queue);
+        r.clearColorMut() = Color.fromHex(hex: 0x000000);
+        Shared<RenderTarget> t = new RenderTarget.make(width: WIDE, height: HIGH);
+        Shared<PerspectiveCamera> cam = new PerspectiveCamera.make(fovRad: radians(deg: 50.0),
+                                                                    aspect: cast<float32>(WIDE) / cast<float32>(HIGH),
+                                                                    near: 0.1, far: 100.0);
+        cam.positionMut() = Vec3.of(x: 0.0, y: 0.0, z: 4.0);
+        cam.targetMut() = Optional::Some(value: copy t);
+        Shared<Scene> s = new Scene.make();
+        Shared<Group> parent = new Group.make();
+        parent.scaleMut() = Vec3.of(x: sx, y: 0.5, z: 1.0);
+        Shared<BoxGeometry> box = new BoxGeometry.make(width: 1.0, height: 1.0, depth: 1.0);
+        Shared<ShowNormals> look = new ShowNormals.make();
+        Shared<Mesh> m = new Mesh.make(geometry: box, material: look);
+        m.rotationMut() = Euler.fromDegrees(x: 25.0, y: 35.0, z: 0.0, order: EulerOrder::XYZ);
+        parent.add(object: m);
+        s.add(object: parent);
+        r.render(scene: copy s, camera: copy cam);
+        this.reading = Optional::Some(value: r.readRenderTargetPixels(target: copy t));
+        this.renderer = Optional::Some(value: give r);
+        this.began = monotonicNow();
+    }
+
+    // The read's texels once it answers; empty while pending; "failed" in `why` when it failed.
+    unsafe fn bool polled(ref DynamicArray<uint8> frame, ref string why) {
+        PixelStatus s = match (this.reading) { case Some(value: r): r.poll(); case None: PixelStatus::Pending; };
+        bool pending = match (s) { case Pending: true; case _: false; };
+        if (pending && this.began.elapsed().asMillis() < SETTLE_MS) { return false; }
+        this.reading = Optional::None;
+        match (give s) {
+            case Ready(image: img): {
+                borrow img.samples8() as px { for (isize i = 0; i < px.length(); i = i + 1) { frame.add(item: px[i]); } }
+            }
+            case Failed(error: e): { why = "the read failed: " + e.message(); }
+            case Pending: { why = "the read was still pending after ${SETTLE_MS} ms"; }
+        };
+        return true;
+    }
+
+    public unsafe fn bool step() {
+        if (this.stage == 0) { this.renderBox(sx: 2.0); this.stage = 1; return false; }
+        if (this.stage == 1) {
+            DynamicArray<uint8> frame = DynamicArray.empty();
+            string why = "";
+            if (!this.polled(frame: ref frame, why: ref why)) { return false; }
+            if (why.isEmpty()) { why = heldToFaces(frame: frame, sx: 2.0); }
+            this.found.add(name: "normals: under a shear, each face's normal in world space is its normal matrix's, the inverse transpose, not the world matrix's",
+                           why: give why);
+            this.renderBox(sx: -2.0);
+            this.stage = 2;
+            return false;
+        }
+        if (this.stage == 2) {
+            DynamicArray<uint8> frame = DynamicArray.empty();
+            string why = "";
+            if (!this.polled(frame: ref frame, why: ref why)) { return false; }
+            if (why.isEmpty()) { why = heldToFaces(frame: frame, sx: -2.0); }
+            this.found.add(name: "normals: under a mirrored shear, each face's normal in world space still points out of it",
+                           why: give why);
+            DeviceErrors errs = this.device.takeErrors();
+            isize nerr = errs.reports().length();
+            string firstError = nerr > 0 ? errs.reports()[0].message() : "";
+            this.found.add(name: "normals: their frames raise no WebGPU error",
+                           why: errs.isEmpty() ? "" : "the channel holds ${nerr} error(s), the first: " + firstError);
+            this.stage = 3;
+        }
+        return true;
+    }
+}

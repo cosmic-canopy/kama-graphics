@@ -223,8 +223,11 @@ type resource Renderer {
         ShaderModule shader = this.device.createShaderModule(descriptor: give described);
         VertexBufferLayout positions = VertexBufferLayout.make(arrayStride: 12);
         positions.attribute(format: VertexFormat::Float32x3, offset: 0, shaderLocation: 0);
+        VertexBufferLayout normals = VertexBufferLayout.make(arrayStride: 12);
+        normals.attribute(format: VertexFormat::Float32x3, offset: 0, shaderLocation: 1);
         VertexState vertex = VertexState.make(module: copy shader, entryPoint: "vs");
         vertex.buffer(layout: give positions);
+        vertex.buffer(layout: give normals);
         FragmentState fragment = FragmentState.make(module: copy shader, entryPoint: "fs");
         fragment.target(state: ColorTargetState.make(format: TextureFormat::RGBA8UnormSrgb));
         RenderPipelineDescriptor pipeline = RenderPipelineDescriptor.make(layout: Layout::Explicit(layout: copy this.layout),
@@ -325,6 +328,8 @@ type resource Renderer {
             Buffer positions = geometry.buffersMut().positionsOn(device: ref this.device, queue: ref this.queue);
             Buffer indices = geometry.buffersMut().indicesOn(device: ref this.device, queue: ref this.queue);
             rp.setVertexBuffer(slot: 0, binding: BufferBinding.whole(buffer: give positions));
+            Buffer normals = geometry.buffersMut().normalsOn(device: ref this.device, queue: ref this.queue);
+            rp.setVertexBuffer(slot: 1, binding: BufferBinding.whole(buffer: give normals));
             rp.setIndexBuffer(binding: BufferBinding.whole(buffer: give indices), format: geometry.buffers().indexFormat());
             isize count = geometry.buffers().indexCount();
             rp.drawIndexed(indexCount: cast<uint32>(count), instanceCount: 1, firstIndex: 0, baseVertex: 0,

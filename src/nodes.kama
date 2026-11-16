@@ -9,8 +9,8 @@
 
 import { std::collections::DynamicArray, std::memory::Shared };
 export {
-    Node, Expr, ExprKind, FloatNode, Vec3Node, Vec4Node, Mat3Node, Mat4Node, ShaderFunction, param, called,
-    constant, vec3, vec4, dot, normalize, max, min, mix, saturate, sqrt, exp2, pow, varying,
+    Node, Expr, ExprKind, FloatNode, Vec2Node, Vec3Node, Vec4Node, Mat3Node, Mat4Node, ShaderFunction, param, called,
+    constant, vec2, vec3, vec4, dfg, dot, normalize, max, min, mix, saturate, sqrt, exp2, pow, varying,
     positionLocal, normalLocal, modelWorldMatrix, modelNormalMatrix, cameraViewProjectionMatrix, normalWorld, positionWorld,
 };
 
@@ -21,8 +21,10 @@ export {
 // - `VertexName`, one only the vertex stage has: its object's record;
 // - `Attribute`, a vertex input, which the fragment stage reads through a varying;
 // - `Param`, a typed function's parameter, read only inside it;
-// - `Varying`, a vertex stage's value the fragment stage reads.
-type enum ExprKind { Number, Name, VertexName, Attribute, Param, Call, Binary, Unary, Member, FnCall, Varying }
+// - `Varying`, a vertex stage's value the fragment stage reads;
+// - `Sample`, a texture the renderer binds, sampled at its argument, a vec2f, in the fragment stage alone (WGSL's
+//   `textureSample`): its text names the texture, whose sampler is the texture's name and `_sampler`.
+type enum ExprKind { Number, Name, VertexName, Attribute, Param, Call, Binary, Unary, Member, FnCall, Varying, Sample }
 
 // One node of the graph: what it computes, its WGSL type and its arguments, each shared, so one subexpression can feed
 // several nodes.
@@ -126,6 +128,24 @@ type resource FloatNode implements Copyable<This>(bare: copy), Node<This> {
     public Vec3Node operator*(Vec3Node rhs) { return Vec3Node.of(e: binary(op: "*", wgslType: "vec3f", a: this.expr(), b: rhs.expr())); }
 }
 
+// WGSL's vec2f: a texture coordinate, or two numbers read together, as a table's texel.
+type resource Vec2Node implements Copyable<This>(bare: copy), Node<This> {
+    Shared<Expr> e;
+    public ctor of(Shared<Expr> e) { this.e = give e; }
+    public ctor copy(ref Vec2Node source) { this.e = copy source.e; }
+    public fn Shared<Expr> expr() { return copy this.e; }
+    public const fn string wgslType() { return "vec2f"; }
+    public fn Vec2Node over(Shared<Expr> e) { return Vec2Node.of(e: give e); }
+
+    public Vec2Node operator+(Vec2Node rhs) { return Vec2Node.of(e: binary(op: "+", wgslType: "vec2f", a: this.expr(), b: rhs.expr())); }
+    public Vec2Node operator-(Vec2Node rhs) { return Vec2Node.of(e: binary(op: "-", wgslType: "vec2f", a: this.expr(), b: rhs.expr())); }
+    public Vec2Node operator*(Vec2Node rhs) { return Vec2Node.of(e: binary(op: "*", wgslType: "vec2f", a: this.expr(), b: rhs.expr())); }
+    public Vec2Node operator*(FloatNode rhs) { return Vec2Node.of(e: binary(op: "*", wgslType: "vec2f", a: this.expr(), b: rhs.expr())); }
+    public Vec2Node operator*(float32 s) { return Vec2Node.of(e: binary(op: "*", wgslType: "vec2f", a: this.expr(), b: numberExpr(v: s))); }
+    public fn FloatNode x() { return FloatNode.of(e: member(name: "x", wgslType: "f32", of: this.expr())); }
+    public fn FloatNode y() { return FloatNode.of(e: member(name: "y", wgslType: "f32", of: this.expr())); }
+}
+
 // WGSL's vec3f, a colour as well as a direction.
 type resource Vec3Node implements Copyable<This>(bare: copy), Node<This> {
     Shared<Expr> e;
@@ -159,6 +179,7 @@ type resource Vec4Node implements Copyable<This>(bare: copy), Node<This> {
     public fn Vec4Node over(Shared<Expr> e) { return Vec4Node.of(e: give e); }
     public Vec4Node operator+(Vec4Node rhs) { return Vec4Node.of(e: binary(op: "+", wgslType: "vec4f", a: this.expr(), b: rhs.expr())); }
     public Vec4Node operator*(Vec4Node rhs) { return Vec4Node.of(e: binary(op: "*", wgslType: "vec4f", a: this.expr(), b: rhs.expr())); }
+    public fn Vec2Node xy() { return Vec2Node.of(e: member(name: "xy", wgslType: "vec2f", of: this.expr())); }
     public fn Vec3Node xyz() { return Vec3Node.of(e: member(name: "xyz", wgslType: "vec3f", of: this.expr())); }
     public fn FloatNode w() { return FloatNode.of(e: member(name: "w", wgslType: "f32", of: this.expr())); }
 }
@@ -189,6 +210,9 @@ type resource Mat4Node implements Copyable<This>(bare: copy), Node<This> {
 
 // A number as a node, where nothing beside it gives its type (an argument, a constructor's part).
 fn FloatNode constant(float32 value) { return FloatNode.of(e: numberExpr(v: value)); }
+fn Vec2Node vec2(FloatNode x, FloatNode y) {
+    return Vec2Node.of(e: call2(name: "vec2f", wgslType: "vec2f", a: x.expr(), b: y.expr()));
+}
 fn Vec3Node vec3(FloatNode x, FloatNode y, FloatNode z) {
     return Vec3Node.of(e: call3(name: "vec3f", wgslType: "vec3f", a: x.expr(), b: y.expr(), c: z.expr()));
 }
@@ -238,6 +262,24 @@ fn Vec3Node normalWorld() {
 fn Vec3Node positionWorld() {
     Vec4Node world = modelWorldMatrix() * vec4(xyz: positionLocal(), w: constant(value: 1.0));
     return varying(value: world.xyz());
+}
+
+// The texture the renderer binds as `texture`, sampled at `uv`, as TSL's `texture(…)`: in the fragment stage alone. The
+// renderer binds one, the DFG table (`dfgTable`); a material's own textures come with its maps.
+fn Vec4Node sampled(string texture, Vec2Node uv) {
+    return Vec4Node.of(e: withArgs(e: exprOf(kind: ExprKind::Sample, text: give texture, wgslType: "vec4f"), a: uv.expr(),
+                                   b: Optional::None, c: Optional::None));
+}
+
+// The DFG table at (`roughness`, `dotNV`), as three.js r187's `DFGLUT`: the scale and bias a surface's specular
+// reflectance takes, read through the renderer's 16 x 16 RG16F table (src/dfg.kama), linear between texels and clamped
+// at its edges. In the fragment stage alone, since it samples a texture.
+fn Vec2Node dfg(FloatNode roughness, FloatNode dotNV) {
+    Shared<ShaderFunction> f = new ShaderFunction.make(name: "DFGLUT");
+    FloatNode r = param(function: f, name: "roughness", value: roughness);
+    FloatNode n = param(function: f, name: "dotNV", value: dotNV);
+    Vec4Node texel = sampled(texture: "dfgTable", uv: vec2(x: r, y: n));
+    return called(function: f, body: texel.xy());
 }
 
 // A typed function, as TSL's `Fn(…).setLayout(…)`: its name, its parameters, and its body over them. Each parameter is

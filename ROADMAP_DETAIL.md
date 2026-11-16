@@ -168,6 +168,16 @@ natively. The library's own `examples/cube` is the same scene without an engine.
 
   Built depth-first: the texture node and the table, then the lights as scene nodes and their buffer, then the direct
   and ambient terms with `colorNode`, `roughnessNode` and `metalnessNode`, then the lit box's golden.
+- **Built, part 3's third part, step 1** (2026-11-16, [SPEC.md](SPEC.md) § The renderer, § Typed nodes and § The
+  compiler), on `@kama/gpu`'s `writeTexture`, brought forward from its GPU-8 at the owner's word for it:
+  - `dfgTable()`, three.js r187's 512 half floats, which a renderer writes once into an RG16Float texture and binds in
+    group 0 with a linear sampler that clamps; THIRD-PARTY-NOTICES.md carries three.js's MIT notice;
+  - `dfg(roughness:, dotNV:)`, r187's `DFGLUT`, a typed function that samples it, and `Vec2Node`;
+  - the compiler declaring the table only to a material that reads it, and refusing a sample in the vertex stage.
+
+  Red first against a stubbed `dfg()`, 3 of the 10 cases then written failing; the others held the table and the
+  compiler, which the mutations hold. 177 cases on each golden leg, 172 in Edge. 23 of 23 mutations caught (kyoten's
+  `.scratch/s30/kg-tools/list331.py`). Next, step 2: the lights as scene nodes and their buffer.
 - **Done:**
   - `examples/cube` draws from one source on both legs;
   - its golden passes on a software GPU on each leg CI has, and perceptually on the reference machines present;

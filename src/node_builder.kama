@@ -154,7 +154,7 @@ type enum Scope { Vertex, Fragment, Function }
 fn bool compilerName(const ref string name) {
     return name == "vs" || name == "fs" || name == "v" || name == "object" || name == "position" || name == "frame"
         || name == "objects" || name == "material" || name == "Frame" || name == "Material" || name == "Varyings"
-        || name == "normal" || name == "Object";
+        || name == "normal" || name == "Object" || name == "dfgTable" || name == "dfgTable_sampler";
 }
 fn bool isLetName(const ref string name) {
     if (name.length() < 2 || name[0] != 110) { return false; }   // 'n'
@@ -173,7 +173,8 @@ fn bool wgslKeyword(const ref string name) {
 // WGSL's predeclared types the compiler writes, which a function's name would hide.
 fn bool wgslTypeName(const ref string name) {
     return name == "f32" || name == "i32" || name == "u32" || name == "bool" || name == "vec2f" || name == "vec3f"
-        || name == "vec4f" || name == "mat3x3f" || name == "mat4x4f" || name == "array";
+        || name == "vec4f" || name == "mat3x3f" || name == "mat4x4f" || name == "array" || name == "texture_2d"
+        || name == "sampler";
 }
 // "" when `name` is one a WGSL function or parameter may take: a letter, then letters, digits and `_`.
 fn string nameProblem(const ref string name, const ref string what) {
@@ -193,12 +194,33 @@ fn string nameProblem(const ref string name, const ref string what) {
 }
 
 // What the renderer gives every material's WGSL in group 0: the frame (the camera's view and projection) and the
-// object records, a world matrix and a normal matrix each, indexed by the draw's instance.
-fn string prelude() {
-    return "struct Frame { viewProjection: mat4x4f };\n"
+// object records, a world matrix and a normal matrix each, indexed by the draw's instance; and, to a material that reads
+// it, the DFG table and its sampler.
+fn string prelude(bool dfgRead) {
+    string written = "struct Frame { viewProjection: mat4x4f };\n"
         + "@group(0) @binding(0) var<uniform> frame: Frame;\n"
         + "struct Object { world: mat4x4f, normal: mat3x3f };\n"
         + "@group(0) @binding(1) var<storage, read> objects: array<Object>;\n";
+    if (dfgRead) {
+        written = written + "@group(0) @binding(2) var dfgTable: texture_2d<f32>;\n"
+            + "@group(0) @binding(3) var dfgTable_sampler: sampler;\n";
+    }
+    return written;
+}
+
+// Whether `e` samples a texture, itself or in a function it calls.
+fn bool samples(Shared<Expr> e) {
+    if (e.exprKind() == ExprKind::Sample) { return true; }
+    if (e.exprKind() == ExprKind::FnCall) {
+        Optional<Shared<ShaderFunction>> function = e.calledFunction();
+        bool inside = match (give function) {
+            case Some(value: f): match (f.bodyExpr()) { case Some(value: b): samples(e: copy b); case None: false; };
+            case None: false;
+        };
+        if (inside) { return true; }
+    }
+    for (isize i = 0; i < e.argCount(); i = i + 1) { if (samples(e: e.argAt(i: i))) { return true; } }
+    return false;
 }
 
 // A material compiled: handed its settings, given its nodes (`vertexPosition`, `fragmentColor`), and asked for its WGSL.
@@ -216,6 +238,7 @@ type resource NodeBuilder {
     DynamicArray<string> found;
     int32 letsMade = 0;
     int32 lets = 0;
+    bool dfgRead = false;   // a stage or a function samples the DFG table
 
     public ctor make(MaterialSettings settings) {
         this.declared = give settings;
@@ -368,10 +391,28 @@ type resource NodeBuilder {
             case FnCall: {
                 Optional<Shared<ShaderFunction>> function = e.calledFunction();
                 match (give function) {
-                    case Some(value: f): { this.reach(f: give f); }
+                    case Some(value: f): {
+                        if (where == Scope::Vertex && samples(e: copy e)) {
+                            this.problem(words: "the shader function `" + text + "` samples a texture and is called in the vertex stage, where WGSL's textureSample cannot run: call it in the fragment stage");
+                        }
+                        this.reach(f: give f);
+                    }
                     case None: { }
                 };
                 return this.callText(uses: ref uses, letsOut: ref letsOut, e: copy e, where: where);
+            }
+            case Sample: {
+                if (where == Scope::Vertex) {
+                    this.problem(words: "the texture `" + text + "` is sampled in the vertex stage, where WGSL's textureSample cannot run: sample it in the fragment stage");
+                }
+                if (text == "dfgTable") { this.dfgRead = true; }
+                else { this.problem(words: "`" + text + "` is no texture the renderer binds: it binds the DFG table, `dfgTable`"); }
+                if (e.argCount() != 1 || e.argAt(i: 0).wgslType() != "vec2f") {
+                    this.problem(words: "the sample of `" + text + "` takes one coordinate, a vec2f");
+                    return "vec4f()";
+                }
+                string uv = this.emit(uses: ref uses, letsOut: ref letsOut, e: e.argAt(i: 0), where: where);
+                return "textureSample(" + text + ", " + text + "_sampler, " + uv + ")";
             }
             case Call: {
                 bool known = false;
@@ -482,7 +523,7 @@ type resource NodeBuilder {
             }
         }
 
-        string written = prelude();
+        string written = prelude(dfgRead: this.dfgRead);
         if (this.declared.count() > 0) {
             written = written + "struct Material {\n";
             for (isize i = 0; i < this.declared.count(); i = i + 1) {

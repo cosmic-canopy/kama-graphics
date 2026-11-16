@@ -33,8 +33,12 @@ import {
     gpu::PipelineLayout, gpu::PipelineLayoutDescriptor, gpu::Layout,
     gpu::RenderPipeline, gpu::RenderPipelineDescriptor, gpu::VertexState, gpu::VertexBufferLayout, gpu::VertexFormat,
     gpu::FragmentState, gpu::ColorTargetState, gpu::CullMode, gpu::FrontFace, gpu::DepthStencilState, gpu::CompareFunction,
+    gpu::TextureDescriptor, gpu::TextureUsage, gpu::TextureBindingLayout, gpu::SamplerBindingLayout, gpu::Sampler,
+    gpu::SamplerDescriptor, gpu::AddressMode, gpu::FilterMode, gpu::MipmapFilterMode, gpu::TexelCopyTextureInfo,
+    gpu::TexelCopyBufferLayout, gpu::Extent3D,
     image::Image, image::ImageError, image::PixelFormat, image::AlphaMode, image::ColorSpace,
     Color, RenderTarget, Scene, PerspectiveCamera, Geometry, BufferGeometry, Material, MaterialSettings, NodeBuilder,
+    dfgTable,
 };
 export { Renderer, RenderInfo, PixelRead, PixelStatus, GraphicsErrorKind, GraphicsErrorReport, RendererErrors };
 
@@ -112,10 +116,12 @@ type resource Renderer {
     Queue queue;
     Color clearTo = Color.fromHex(hex: 0x000000);
     float32 alpha = 1.0;
-    BindGroupLayout frameLayout;      // group 0: the frame, and the object records
+    BindGroupLayout frameLayout;      // group 0: the frame, the object records, and the DFG table and its sampler
     BindGroupLayout materialLayout;   // group 1: a material's settings
     PipelineLayout layout;
     Buffer frame;                     // the frame's uniform: the view-projection
+    TextureView dfgView;              // three.js r187's DFG table, 16 x 16 RG16F, made once (src/dfg.kama)
+    Sampler dfgSampling;              // linear, clamped to the edge, as r187's
     DynamicArray<string> sources;     // the pipelines made, by the WGSL they run
     DynamicArray<bool> flipped;       // ...and whether they draw mirrored meshes, whose front faces wind clockwise
     DynamicArray<RenderPipeline> pipelines;
@@ -132,7 +138,10 @@ type resource Renderer {
         BufferBindingLayout records = BufferBindingLayout.make();
         records.kind = BufferBindingType::ReadOnlyStorage;
         g0.entry(binding: 1, visibility: ShaderStage::Vertex, layout: BindingLayout::Buffer(layout: records));
-        g0.label(text: "the frame and the object records");
+        // the DFG table and its sampler, which only a fragment stage samples (WGSL's textureSample)
+        g0.entry(binding: 2, visibility: ShaderStage::Fragment, layout: BindingLayout::Texture(layout: TextureBindingLayout.make()));
+        g0.entry(binding: 3, visibility: ShaderStage::Fragment, layout: BindingLayout::Sampler(layout: SamplerBindingLayout.make()));
+        g0.label(text: "the frame, the object records and the DFG table");
         this.frameLayout = device.createBindGroupLayout(descriptor: give g0);
         BindGroupLayoutDescriptor g1 = BindGroupLayoutDescriptor.make();
         // both stages, since a material's vertex stage may read its settings as well as its fragment stage
@@ -148,6 +157,26 @@ type resource Renderer {
         BufferDescriptor described = BufferDescriptor.make(size: 64, usage: BufferUsage::Uniform | BufferUsage::CopyDst);
         described.label(text: "the frame");
         this.frame = device.createBuffer(descriptor: give described);
+        // the DFG table, r187's 512 half floats as they are, 64 bytes a row
+        TextureDescriptor table = TextureDescriptor.make(width: 16, height: 16, format: TextureFormat::RG16Float,
+                                                         usage: TextureUsage::TextureBinding | TextureUsage::CopyDst);
+        table.label(text: "the DFG table");
+        Texture dfg = device.createTexture(descriptor: give table);
+        DynamicArray<uint16> halves = dfgTable();
+        DynamicArray<uint8> bytes = DynamicArray.empty();
+        for (isize i = 0; i < halves.length(); i = i + 1) {
+            bytes.add(item: truncate<uint8>(halves[i]));
+            bytes.add(item: truncate<uint8>(halves[i] >> 8));
+        }
+        TexelCopyBufferLayout rows = TexelCopyBufferLayout.make();
+        rows.bytesPerRow(bytes: 64);
+        queue.writeTexture(destination: TexelCopyTextureInfo.make(texture: copy dfg), data: bytes.view(), layout: rows,
+                           size: Extent3D.of(width: 16, height: 16, depthOrArrayLayers: 1));
+        this.dfgView = dfg.createView(descriptor: TextureViewDescriptor.make());
+        SamplerDescriptor sampling = SamplerDescriptor.make();
+        sampling.filters(mag: FilterMode::Linear, min: FilterMode::Linear, mipmap: MipmapFilterMode::Nearest);
+        sampling.label(text: "the DFG table's sampler");
+        this.dfgSampling = device.createSampler(descriptor: give sampling);
         this.sources = DynamicArray.empty();
         this.flipped = DynamicArray.empty();
         this.pipelines = DynamicArray.empty();
@@ -292,7 +321,9 @@ type resource Renderer {
         BindGroupDescriptor bound = BindGroupDescriptor.make(layout: copy this.frameLayout);
         bound.entry(binding: 0, resource: BindingResource::Buffer(binding: BufferBinding.whole(buffer: copy this.frame)));
         bound.entry(binding: 1, resource: BindingResource::Buffer(binding: BufferBinding.whole(buffer: give records)));
-        bound.label(text: "the frame and the object records");
+        bound.entry(binding: 2, resource: BindingResource::Texture(view: copy this.dfgView));
+        bound.entry(binding: 3, resource: BindingResource::Sampler(sampler: copy this.dfgSampling));
+        bound.label(text: "the frame, the object records and the DFG table");
         BindGroup frameGroup = this.device.createBindGroup(descriptor: give bound);
 
         RenderPassDescriptor pass = RenderPassDescriptor.make();

@@ -1,0 +1,378 @@
+// GFX-1's part 3, its third part, step 1: the texture-sample node and the DFG table, as the owner decided (A): the direct
+// light reads three.js r187's DFG table through a texture-sample node (kyoten's rendering.md § Decided, GFX-1's part 3,
+// the lights, question 2).
+//
+// With no GPU: the table is r187's, value for value; a material reading `dfg(roughness:, dotNV:)` compiles to r187's
+// `DFGLUT`, which samples the table group 0 binds, and a material that samples nothing declares no texture; a sample in
+// the vertex stage, where WGSL's `textureSample` cannot run, is refused, and so is a texture the renderer does not bind.
+//
+// On the GPU, a step a tick on the device the check opened: sixteen boxes, each a program's own material showing
+// `dfg(...)` at its own (roughness, dotNV) as a colour (scale, bias, 0). Each box's centre texel is held to the table's
+// half floats decoded here in float64, mixed as a linear, clamped sampler mixes them, and encoded as the 8-bit sRGB target
+// holds it, within one step: at texel centres, halfway between two texels and between four, and past the edges, where
+// the sampler clamps. Every point is a multiple of 1/32, so the GPU's own sub-texel weights are exact there.
+
+import {
+    std::collections::DynamicArray,
+    std::math::Vec3, std::math::radians, std::math::tan, std::math::pow, std::math::floor,
+    std::time::Instant, std::time::monotonicNow,
+    gpu::Device, gpu::Queue, gpu::DeviceErrors,
+    image::Image,
+    graphics::Color, graphics::Renderer, graphics::RenderTarget, graphics::Scene, graphics::Mesh,
+    graphics::PerspectiveCamera, graphics::BoxGeometry, graphics::Material, graphics::MaterialGpu,
+    graphics::MaterialSettings, graphics::NodeBuilder, graphics::PixelRead, graphics::PixelStatus, graphics::Expr,
+    graphics::ExprKind, graphics::FloatNode, graphics::Vec2Node, graphics::Vec4Node, graphics::vec2, graphics::vec3,
+    graphics::vec4, graphics::constant, graphics::dfg, graphics::dfgTable, graphics::positionLocal,
+    graphics::ShaderFunction, graphics::param, graphics::called,
+    Verdicts, encoded,
+};
+export { dfgCases, DfgRun };
+
+comptime int64 SETTLE_MS = 10000;
+comptime uint32 SIDE = 64;
+
+// ---- the table, with no GPU ----------------------------------------------------------------------------------------
+
+// The FNV-1a hash of r187's 512 half floats as 1,024 little-endian bytes, in its order (kyoten's .scratch/s30/gen_dfg.py,
+// from r187's DFGLUT.js).
+comptime uint32 R187_HASH = 0xbc3d02eb;
+
+fn uint32 fnv1a(const ref DynamicArray<uint16> halves) {
+    uint32 h = 0x811c9dc5;
+    for (isize i = 0; i < halves.length(); i = i + 1) {
+        uint16 v = halves[i];
+        h = (h ^ cast<uint32>(truncate<uint8>(v))) * 0x01000193;
+        h = (h ^ cast<uint32>(v >> 8)) * 0x01000193;
+    }
+    return h;
+}
+
+// A half float's value, exactly, as a float64.
+fn float64 halfValue(uint16 h) {
+    int32 exponent = cast<int32>((h >> 10) & 0x1F);
+    float64 mantissa = cast<float64>(h & 0x3FF);
+    float64 v = exponent == 0 ? mantissa * pow(x: 2.0, y: -24.0)
+                              : (1.0 + mantissa / 1024.0) * pow(x: 2.0, y: cast<float64>(exponent - 15));
+    return (h & 0x8000) != 0 ? 0.0 - v : v;
+}
+
+// ---- a material showing the table ----------------------------------------------------------------------------------
+
+// A program's own material: the DFG table at its roughness and dotNV, shown as (scale, bias, 0), opaque.
+type resource ShowDfg implements Material {
+    MaterialGpu cache;
+    float32 rough;
+    float32 facing;
+    public ctor make(float32 roughness, float32 dotNV) {
+        this.cache = MaterialGpu.make();
+        this.rough = roughness;
+        this.facing = dotNV;
+    }
+    public fn ref MaterialGpu gpuMut() { return this.cache; }
+    public const fn uint32 version() { return 0; }
+    public const fn uint32 graphVersion() { return 0; }
+    public const fn void settings(ref MaterialSettings into) {
+        into.addFloat(name: "roughness", value: this.rough);
+        into.addFloat(name: "dotNV", value: this.facing);
+    }
+    public fn void shade(ref NodeBuilder builder) {
+        Vec2Node d = dfg(roughness: builder.uniformFloat(name: "roughness"), dotNV: builder.uniformFloat(name: "dotNV"));
+        builder.fragmentColor(node: vec4(xyz: vec3(x: d.x(), y: d.y(), z: constant(value: 0.0)), w: constant(value: 1.0)));
+    }
+}
+
+// The settings ShowDfg declares, for a compile with no renderer.
+fn MaterialSettings roughnessAndFacing() {
+    MaterialSettings s = MaterialSettings.make();
+    s.addFloat(name: "roughness", value: 0.5);
+    s.addFloat(name: "dotNV", value: 0.5);
+    return s;
+}
+
+// "" when `got` is `want`; else where they part.
+fn string sameWgsl(const ref string got, const ref string want) {
+    if (got == want) { return ""; }
+    isize at = 0;
+    while (at < got.length() && at < want.length() && got[at] == want[at]) { at = at + 1; }
+    string gotRest = got.substring(start: at, end: at + 80 < got.length() ? at + 80 : got.length());
+    string wantRest = want.substring(start: at, end: at + 80 < want.length() ? at + 80 : want.length());
+    return "they part at byte ${at}: got `" + gotRest + "`, want `" + wantRest + "`";
+}
+
+// A program's own typed function named `name`, of one float.
+fn FloatNode named(string name, FloatNode x) {
+    Shared<ShaderFunction> f = new ShaderFunction.make(name: give name);
+    FloatNode a = param(function: f, name: "a", value: x);
+    return called(function: f, body: a * 2.0);
+}
+
+// "" when `problems` holds `want`.
+fn string hasProblem(const ref DynamicArray<string> problems, const ref string want) {
+    for (isize i = 0; i < problems.length(); i = i + 1) { if (problems[i] == want) { return ""; } }
+    isize n = problems.length();
+    string first = n > 0 ? copy problems[0] : "none";
+    return "${n} problem(s), not this one; the first: " + first;
+}
+
+// "" when `problems` is `want` alone.
+fn string onlyProblem(const ref DynamicArray<string> problems, const ref string want) {
+    isize n = problems.length();
+    if (n != 1) {
+        string first = n > 0 ? copy problems[0] : "none";
+        return "${n} problem(s), the first: " + first;
+    }
+    if (problems[0] != want) { return "it says: " + problems[0]; }
+    return "";
+}
+
+// The WGSL every material is given in group 0, and the table a material that reads it is given beside it.
+fn string groupZero() {
+    return "struct Frame { viewProjection: mat4x4f };\n"
+        + "@group(0) @binding(0) var<uniform> frame: Frame;\n"
+        + "struct Object { world: mat4x4f, normal: mat3x3f };\n"
+        + "@group(0) @binding(1) var<storage, read> objects: array<Object>;\n";
+}
+fn string theTable() {
+    return "@group(0) @binding(2) var dfgTable: texture_2d<f32>;\n"
+        + "@group(0) @binding(3) var dfgTable_sampler: sampler;\n";
+}
+
+unsafe fn void dfgCases(ref Verdicts found) {
+    {
+        DynamicArray<uint16> table = dfgTable();
+        isize n = table.length();
+        uint32 h = n == 512 ? fnv1a(halves: table) : 0;
+        found.add(name: "the DFG table is three.js r187's, its 512 half floats value for value and in its order",
+                  why: n != 512 ? "it holds ${n} half floats" : (h == R187_HASH ? "" : "its FNV-1a hash is ${h}"));
+        bool corners = n == 512 && table[0] == 0x30b5 && table[1] == 0x3ad1 && table[510] == 0x3586 && table[511] == 0x049f;
+        found.add(name: "its first texel is r187's (scale 0x30b5, bias 0x3ad1) and its last (0x3586, 0x049f)",
+                  why: corners ? "" : "they differ");
+    }
+    {
+        NodeBuilder b = NodeBuilder.make(settings: roughnessAndFacing());
+        Vec2Node d = dfg(roughness: b.uniformFloat(name: "roughness"), dotNV: b.uniformFloat(name: "dotNV"));
+        b.fragmentColor(node: vec4(xyz: vec3(x: d.x(), y: d.y(), z: constant(value: 0.0)), w: constant(value: 1.0)));
+        string all = b.wgsl();
+        string want = groupZero() + theTable()
+            + "struct Material {\n  roughness: f32,\n  dotNV: f32,\n};\n@group(1) @binding(0) var<uniform> material: Material;\n"
+            + "fn DFGLUT(roughness: f32, dotNV: f32) -> vec2f {\n"
+            + "  return textureSample(dfgTable, dfgTable_sampler, vec2f(roughness, dotNV)).xy;\n}\n"
+            + "struct Varyings {\n  @builtin(position) clip: vec4f,\n};\n"
+            + "@vertex fn vs(@builtin(instance_index) object: u32, @location(0) position: vec3f, @location(1) normal: vec3f) -> Varyings {\n"
+            + "  var v: Varyings;\n"
+            + "  v.clip = ((frame.viewProjection * objects[object].world) * vec4f(position, 1.0));\n"
+            + "  return v;\n}\n"
+            + "@fragment fn fs(v: Varyings) -> @location(0) vec4f {\n"
+            + "  let n0 = DFGLUT(material.roughness, material.dotNV);\n"
+            + "  return vec4f(vec3f(n0.x, n0.y, 0.0), 1.0);\n}\n";
+        DynamicArray<string> problems = b.problems();
+        isize np = problems.length();
+        found.add(name: "dfg() compiles to three.js r187's DFGLUT, sampling the table group 0 binds at (roughness, dotNV), written once and read through one let",
+                  why: np > 0 ? "refused: " + problems[0] : sameWgsl(got: all, want: want));
+    }
+    {
+        NodeBuilder b = NodeBuilder.make(settings: MaterialSettings.make());
+        b.fragmentColor(node: vec4(xyz: vec3(x: constant(value: 1.0), y: constant(value: 0.5), z: constant(value: 0.0)), w: constant(value: 1.0)));
+        string all = b.wgsl();
+        found.add(name: "a material that samples no texture is given none: its WGSL declares no table",
+                  why: all.contains(substring: "texture_2d") || all.contains(substring: "sampler") ? "it declares one" : "");
+    }
+    {
+        NodeBuilder b = NodeBuilder.make(settings: roughnessAndFacing());
+        Vec2Node d = dfg(roughness: b.uniformFloat(name: "roughness"), dotNV: b.uniformFloat(name: "dotNV"));
+        b.vertexPosition(node: vec4(xyz: positionLocal() * d.x(), w: constant(value: 1.0)));
+        string all = b.wgsl();
+        found.add(name: "NodeBuilder refuses dfg() called in the vertex stage, where WGSL's textureSample cannot run",
+                  why: onlyProblem(problems: b.problems(), want: "the shader function `DFGLUT` samples a texture and is called in the vertex stage, where WGSL's textureSample cannot run: call it in the fragment stage"));
+    }
+    // The names the table's WGSL takes, and WGSL's type names for it, which a program's function cannot take.
+    {
+        NodeBuilder b = NodeBuilder.make(settings: MaterialSettings.make());
+        FloatNode one = named(name: "dfgTable", x: constant(value: 0.5));
+        FloatNode two = named(name: "dfgTable_sampler", x: one);
+        FloatNode three = named(name: "sampler", x: two);
+        FloatNode four = named(name: "texture_2d", x: three);
+        b.fragmentColor(node: vec4(xyz: vec3(x: four, y: four, z: four), w: constant(value: 1.0)));
+        string all = b.wgsl();
+        DynamicArray<string> problems = b.problems();
+        string why = hasProblem(problems: problems, want: "the shader function `dfgTable` is a name the compiler writes");
+        if (why.isEmpty()) { why = hasProblem(problems: problems, want: "the shader function `dfgTable_sampler` is a name the compiler writes"); }
+        if (why.isEmpty()) { why = hasProblem(problems: problems, want: "the shader function `sampler` is a name the compiler writes"); }
+        if (why.isEmpty()) { why = hasProblem(problems: problems, want: "the shader function `texture_2d` is a name the compiler writes"); }
+        found.add(name: "NodeBuilder refuses a function named as the table, its sampler, or WGSL's types for them", why: give why);
+    }
+    // A program's own sample, made from `Expr.make`, which can give it no coordinate: refused, never read past its end.
+    {
+        NodeBuilder b = NodeBuilder.make(settings: MaterialSettings.make());
+        Shared<Expr> e = new Expr.make(kind: ExprKind::Sample, text: "dfgTable", wgslType: "vec4f", amount: 0.0);
+        b.vertexPosition(node: Vec4Node.of(e: give e));
+        string all = b.wgsl();
+        DynamicArray<string> problems = b.problems();
+        found.add(name: "NodeBuilder refuses a texture sampled in the vertex stage itself",
+                  why: hasProblem(problems: problems, want: "the texture `dfgTable` is sampled in the vertex stage, where WGSL's textureSample cannot run: sample it in the fragment stage"));
+        found.add(name: "and a sample with no coordinate, which a program's own Expr is",
+                  why: hasProblem(problems: problems, want: "the sample of `dfgTable` takes one coordinate, a vec2f"));
+    }
+    {
+        NodeBuilder b = NodeBuilder.make(settings: MaterialSettings.make());
+        Shared<Expr> e = new Expr.make(kind: ExprKind::Sample, text: "elsewhere", wgslType: "vec4f", amount: 0.0);
+        b.fragmentColor(node: Vec4Node.of(e: give e));
+        string all = b.wgsl();
+        found.add(name: "NodeBuilder refuses a texture the renderer does not bind",
+                  why: hasProblem(problems: b.problems(), want: "`elsewhere` is no texture the renderer binds: it binds the DFG table, `dfgTable`"));
+    }
+}
+
+// ---- the table on the GPU ------------------------------------------------------------------------------------------
+
+// The sixteen points, each a multiple of 1/32 in (roughness, dotNV): texel centres, halfway between two texels across
+// and down, halfway between four, and past the table's edges.
+fn int32 pointU(isize k) {
+    InlineArray<int32>#(16) u = [1, 31, 1, 31, 11, 21, 8, 24, 17, 1, 12, 28, 2, 0, 32, 0];
+    return u[k];
+}
+fn int32 pointV(isize k) {
+    InlineArray<int32>#(16) v = [1, 31, 31, 1, 19, 7, 15, 1, 24, 16, 4, 30, 2, 0, 32, 15];
+    return v[k];
+}
+
+// One channel of the table (0 the scale, 1 the bias) at (u, v), as a linear sampler that clamps to the edge reads it:
+// the four nearest texels, mixed by how far the point lies between their centres.
+fn float64 sampledAt(const ref DynamicArray<uint16> table, float64 u, float64 v, isize channel) {
+    float64 x = u * 16.0 - 0.5;
+    float64 y = v * 16.0 - 0.5;
+    float64 x0 = floor(x: x);
+    float64 y0 = floor(x: y);
+    float64 fx = x - x0;
+    float64 fy = y - y0;
+    isize i0 = cast<isize>(x0);
+    isize j0 = cast<isize>(y0);
+    isize i1 = i0 + 1;
+    isize j1 = j0 + 1;
+    i0 = i0 < 0 ? 0 : (i0 > 15 ? 15 : i0);
+    i1 = i1 < 0 ? 0 : (i1 > 15 ? 15 : i1);
+    j0 = j0 < 0 ? 0 : (j0 > 15 ? 15 : j0);
+    j1 = j1 < 0 ? 0 : (j1 > 15 ? 15 : j1);
+    float64 a = halfValue(h: table[(j0 * 16 + i0) * 2 + channel]);
+    float64 b = halfValue(h: table[(j0 * 16 + i1) * 2 + channel]);
+    float64 c = halfValue(h: table[(j1 * 16 + i0) * 2 + channel]);
+    float64 d = halfValue(h: table[(j1 * 16 + i1) * 2 + channel]);
+    float64 top = a + (b - a) * fx;
+    float64 bottom = c + (d - c) * fx;
+    return top + (bottom - top) * fy;
+}
+
+// The texel at the centre of box `k`'s face: its column and row in the 64x64 target, the boxes 4 x 4, one unit apart,
+// their faces 5.6 units from a camera of 50 degrees.
+fn isize boxColumn(isize k) {
+    float64 x = -1.5 + cast<float64>(k % 4);
+    float64 ndc = x / (5.6 * tan(x: 25.0 * 3.14159265358979323846 / 180.0));
+    return cast<isize>(floor(x: (ndc * 0.5 + 0.5) * cast<float64>(SIDE)));
+}
+fn isize boxRow(isize k) {
+    float64 y = 1.5 - cast<float64>(k / 4);
+    float64 ndc = y / (5.6 * tan(x: 25.0 * 3.14159265358979323846 / 180.0));
+    return cast<isize>(floor(x: (0.5 - ndc * 0.5) * cast<float64>(SIDE)));
+}
+
+fn int32 apart(int32 a, int32 b) { return a > b ? a - b : b - a; }
+
+// "" when each box's centre texel shows the table at its point, within one step; else the first that does not.
+fn string heldToTable(const ref DynamicArray<uint8> frame) {
+    isize n = frame.length() / 4;
+    if (n != cast<isize>(SIDE * SIDE)) { return "the frame holds ${n} texels"; }
+    DynamicArray<uint16> table = dfgTable();
+    for (isize k = 0; k < 16; k = k + 1) {
+        float64 u = cast<float64>(pointU(k: k)) / 32.0;
+        float64 v = cast<float64>(pointV(k: k)) / 32.0;
+        int32 wantR = encoded(c: sampledAt(table: table, u: u, v: v, channel: 0));
+        int32 wantG = encoded(c: sampledAt(table: table, u: u, v: v, channel: 1));
+        isize at = (boxRow(k: k) * cast<isize>(SIDE) + boxColumn(k: k)) * 4;
+        int32 r = cast<int32>(frame[at]);
+        int32 g = cast<int32>(frame[at + 1]);
+        int32 b = cast<int32>(frame[at + 2]);
+        if (apart(a: r, b: wantR) > 1 || apart(a: g, b: wantG) > 1 || b != 0) {
+            int32 pu = pointU(k: k);
+            int32 pv = pointV(k: k);
+            return "at (${pu}/32, ${pv}/32) the box shows (${r}, ${g}, ${b}), not (${wantR}, ${wantG}, 0)";
+        }
+    }
+    return "";
+}
+
+type resource DfgRun {
+    int32 stage = 0;
+    Instant began = monotonicNow();
+    Verdicts found;
+    Device device;
+    Queue queue;
+    Optional<Renderer> renderer = Optional::None;
+    Optional<PixelRead> reading = Optional::None;
+
+    public ctor make(Device device, Queue queue) {
+        this.found = Verdicts.make();
+        this.device = give device;
+        this.queue = give queue;
+    }
+
+    public fn ref Verdicts verdicts() { return this.found; }
+
+    // The sixteen boxes, each showing the table at its point, rendered, and the read started.
+    unsafe fn void renderGrid() {
+        Renderer r = Renderer.withDevice(device: copy this.device, queue: copy this.queue);
+        r.clearColorMut() = Color.fromHex(hex: 0x000000);
+        Shared<RenderTarget> t = new RenderTarget.make(width: SIDE, height: SIDE);
+        Shared<PerspectiveCamera> cam = new PerspectiveCamera.make(fovRad: radians(deg: 50.0), aspect: 1.0, near: 0.1, far: 100.0);
+        cam.positionMut() = Vec3.of(x: 0.0, y: 0.0, z: 6.0);
+        cam.targetMut() = Optional::Some(value: copy t);
+        Shared<Scene> s = new Scene.make();
+        Shared<BoxGeometry> box = new BoxGeometry.make(width: 0.8, height: 0.8, depth: 0.8);
+        for (isize k = 0; k < 16; k = k + 1) {
+            float32 u = cast<float32>(pointU(k: k)) / 32.0;
+            float32 v = cast<float32>(pointV(k: k)) / 32.0;
+            Shared<ShowDfg> look = new ShowDfg.make(roughness: u, dotNV: v);
+            Shared<Mesh> m = new Mesh.make(geometry: copy box, material: look);
+            m.positionMut() = Vec3.of(x: -1.5 + cast<float32>(k % 4), y: 1.5 - cast<float32>(k / 4), z: 0.0);
+            s.add(object: m);
+        }
+        r.render(scene: copy s, camera: copy cam);
+        this.reading = Optional::Some(value: r.readRenderTargetPixels(target: copy t));
+        this.renderer = Optional::Some(value: give r);
+        this.began = monotonicNow();
+    }
+
+    // The read's texels once it answers; false while pending; "failed" in `why` when it failed.
+    unsafe fn bool polled(ref DynamicArray<uint8> frame, ref string why) {
+        PixelStatus s = match (this.reading) { case Some(value: r): r.poll(); case None: PixelStatus::Pending; };
+        bool pending = match (s) { case Pending: true; case _: false; };
+        if (pending && this.began.elapsed().asMillis() < SETTLE_MS) { return false; }
+        this.reading = Optional::None;
+        match (give s) {
+            case Ready(image: img): {
+                borrow img.samples8() as px { for (isize i = 0; i < px.length(); i = i + 1) { frame.add(item: px[i]); } }
+            }
+            case Failed(error: e): { why = "the read failed: " + e.message(); }
+            case Pending: { why = "the read was still pending after ${SETTLE_MS} ms"; }
+        };
+        return true;
+    }
+
+    public unsafe fn bool step() {
+        if (this.stage == 0) { this.renderGrid(); this.stage = 1; return false; }
+        if (this.stage == 1) {
+            DynamicArray<uint8> frame = DynamicArray.empty();
+            string why = "";
+            if (!this.polled(frame: ref frame, why: ref why)) { return false; }
+            if (why.isEmpty()) { why = heldToTable(frame: frame); }
+            this.found.add(name: "dfg: the table read on the GPU at texel centres, between two texels and four, and past its edges, is r187's, mixed as a linear sampler that clamps mixes it",
+                           why: give why);
+            DeviceErrors errs = this.device.takeErrors();
+            isize nerr = errs.reports().length();
+            string firstError = nerr > 0 ? errs.reports()[0].message() : "";
+            this.found.add(name: "dfg: its frame raises no WebGPU error",
+                           why: errs.isEmpty() ? "" : "the channel holds ${nerr} error(s), the first: " + firstError);
+            this.stage = 2;
+        }
+        return true;
+    }
+}

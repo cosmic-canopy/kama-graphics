@@ -82,3 +82,12 @@ package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - **Changed:** `Material` gains `graphVersion()`, which moves when a material's nodes change. A renderer compiles a
     material again before its next draw once that has moved, so a material that implements `Material` answers it, 0
     when its nodes never change.
+- GFX-1's part 3, its third part, step 1: the texture-sample node and three.js r187's DFG table.
+  - `dfgTable()`, r187's 16 x 16 table of half floats, which a renderer writes once into an RG16Float texture, read
+    through a linear sampler that clamps, and binds in group 0 beside the frame and the records. THIRD-PARTY-NOTICES.md
+    carries three.js's MIT notice for it.
+  - `dfg(roughness:, dotNV:)`, r187's `DFGLUT`, sampling the table in the fragment stage.
+  - `Vec2Node`, `vec2(x:, y:)` and a vec4's `xy()`.
+  - The compiler declares the table only to a material that reads it, and refuses a sample in the vertex stage, a
+    texture the renderer does not bind, and a function named as the table, its sampler or their WGSL types.
+  - Depends on `@kama/gpu`'s `queue.writeTexture`, its AGENTS.gpu.md item 14.

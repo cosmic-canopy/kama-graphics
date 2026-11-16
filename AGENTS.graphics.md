@@ -133,9 +133,10 @@ functions in kama, a WGSL function as text the escape, and no WESL linker at run
 - `MeshStandardMaterial`'s values and `emissiveNode`;
 - a material compiled again when its nodes change (`graphVersion()`).
 
-Its third part, the lights, is next, its three questions decided (2026-11-16, ROADMAP_DETAIL § GFX-1): the lights
+Its third part, the lights, is under way, its three questions decided (2026-11-16, ROADMAP_DETAIL § GFX-1): the lights
 reach a shader as data, a storage buffer of any length, so a light's change compiles nothing; the direct light reads
-three.js's DFG table through a texture node; a directional light points at `target()`, a world-space point. GFX-1 is
+three.js's DFG table through a texture node; a directional light points at `target()`, a world-space point. Its first
+step is built: the DFG table and the texture-sample node, on `@kama/gpu`'s `writeTexture`. GFX-1 is
 built depth-first, and every example is a test: a headless
 readback and a golden image, on web and native. A feature a program does not use drops out at link time.
 [SPEC.md](SPEC.md) is what is built so far, and grows with each part.

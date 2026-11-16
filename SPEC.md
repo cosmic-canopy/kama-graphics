@@ -82,6 +82,10 @@ a resource the program owns.
     (GFX-2).
 - **`info()` says what the last render did,** as three.js's `renderer.info`: `calls`, `triangles`, `objects` (the meshes
   the scene holds a record for) and `matrices` (the world matrices its walk made: 0 when nothing in the scene changed).
+- **A renderer makes three.js r187's DFG table once** (part 3's third part, question 2): `dfgTable()`, 16 x 16 texels of
+  two half floats, a surface's specular scale and bias, written as they are into an RG16Float texture and read through a
+  linear sampler that clamps to the edge, as r187's. Each frame binds them in group 0 (§ The compiler). The table is
+  three.js's data, under its MIT notice (THIRD-PARTY-NOTICES.md).
 
 ## Misuse
 
@@ -209,8 +213,9 @@ Decided, GFX-1's part 2, question 4), as `@kama/gpu` reports every misuse of Web
 
 What a material's shader is written in (kyoten's rendering.md § Decided, GFX-1's question 2 and part 3's question).
 
-- **One node type per WGSL type:** `FloatNode` (f32), `Vec3Node` (vec3f, a colour or a direction), `Vec4Node` (vec4f),
-  `Mat3Node` (mat3x3f) and `Mat4Node` (mat4x4f). Each implements the public node contract, `Node<T is This>`: `expr()`, `wgslType()` and
+- **One node type per WGSL type:** `FloatNode` (f32), `Vec2Node` (vec2f, a texture coordinate or two numbers read
+  together), `Vec3Node` (vec3f, a colour or a direction), `Vec4Node` (vec4f), `Mat3Node` (mat3x3f) and `Mat4Node`
+  (mat4x4f). Each implements the public node contract, `Node<T is This>`: `expr()`, `wgslType()` and
   `over(e:)`. So a program's own node type goes wherever the library takes a node, and a function generic over `Node`
   serves every type.
 - **A node is a reference, as TSL's are.** Handing one on shares it, since each is `Copyable(bare: copy)` over a shared
@@ -224,8 +229,8 @@ What a material's shader is written in (kyoten's rendering.md § Decided, GFX-1'
   - a number on either side (`0.5 * x`, `x + 1.0`).
 
   A float in a colour's place, or a vec4 used as a vec3, does not compile.
-- **Parts:** a vector's `x()`, `y()` and `z()`, and a vec4's `xyz()` and `w()`.
-- **Made from numbers and parts:** `constant(value:)`, `vec3(x:, y:, z:)` and `vec4(xyz:, w:)`.
+- **Parts:** a vector's `x()`, `y()` and `z()`, and a vec4's `xy()`, `xyz()` and `w()`.
+- **Made from numbers and parts:** `constant(value:)`, `vec2(x:, y:)`, `vec3(x:, y:, z:)` and `vec4(xyz:, w:)`.
 - **WGSL's built-ins, typed:**
   - `dot(a:, b:)` and `normalize(v:)` on vectors;
   - on any float type, the result its type: `max(a:, b:)`, `min(a:, b:)`, `saturate(x:)`, `sqrt(x:)`, `exp2(x:)`,
@@ -237,7 +242,9 @@ What a material's shader is written in (kyoten's rendering.md § Decided, GFX-1'
   - `cameraViewProjectionMatrix()`;
   - `normalWorld()`, the surface's normal in world space: the normal matrix times the vertex's normal, through a varying,
     normalized, as TSL's `normalWorldGeometry`;
-  - `positionWorld()`, the surface's position in world space through a varying, as TSL's `positionWorld`.
+  - `positionWorld()`, the surface's position in world space through a varying, as TSL's `positionWorld`;
+  - `dfg(roughness:, dotNV:)`, the DFG table at that point, its scale and bias, as three.js r187's `DFGLUT`: a typed
+    function, `DFGLUT`, that samples the table. In the fragment stage alone, since WGSL samples a texture there only.
 - **`varying(value:)` hands a vertex stage's value to the fragment stage,** interpolated, as TSL's `varying()`. A vertex
   attribute read in the fragment stage passes through a varying by itself. Two reads of a value written alike, such as
   two calls of `normalWorld()`, share one varying, since a stage passes few.
@@ -260,7 +267,9 @@ the material's nodes: `vertexPosition(node:)` and `fragmentColor(node:)`, as TSL
 `wgsl()` is the whole shader module:
 
 - **group 0, what the renderer gives:** `frame` (the view-projection) and `objects`, each mesh's `Object` (its `world`
-  and `normal` matrices);
+  and `normal` matrices); and, to a material that reads it, the DFG table, `dfgTable` (a `texture_2d<f32>` at binding 2),
+  and its sampler, `dfgTable_sampler` (binding 3), which a sample is written with: `textureSample(dfgTable,
+  dfgTable_sampler, uv)`. A material that samples nothing declares neither;
 - **the vertex's inputs:** its `position` at location 0 and its `normal` at location 1;
 - **group 1, the material's settings:** one uniform block, `material`, which both stages may read.
   - `MaterialSettings` declares each setting with its value: `addFloat`, `addVec3` and `addColor` (linear).
@@ -285,6 +294,9 @@ digits, which a float64 holds exactly. Measured over every float32 (kyoten's `.s
 
 **What the compile refuses,** in `problems()`, each said once. A material with a problem draws nothing (§ Misuse):
 - a value only the vertex stage has, read in the fragment stage;
+- a texture sampled in the vertex stage, itself or by a function the vertex stage calls, where WGSL's `textureSample`
+  cannot run;
+- a texture the renderer does not bind, and a sample with no coordinate, which a program's own `Expr` is;
 - a function's parameter read outside its function;
 - a vertex attribute or a varying read inside a function;
 - two different functions of one name;
@@ -326,7 +338,7 @@ WGSL's reserved words beyond its keywords are refused by the GPU's own compile, 
 - then `tests/`, one program, built debug and release and run natively, and built for the web and run under `kama run`
   in Edge, Firefox and the pinned Chrome for Testing, each started as `tools/browsers.mjs` says.
 
-It is 166 cases on each leg that names a software GPU, and 161 in Edge, whose leg names none.
+It is 177 cases on each leg that names a software GPU, and 172 in Edge, whose leg names none.
 
 - **The goldens** (kyoten's rendering.md § Decided, GFX-1's part 1, questions 2 and 3):
   - Each leg names its software GPU: `--golden warp` natively on Windows and in Firefox, `--golden swiftshader` in the
@@ -437,6 +449,17 @@ It is 166 cases on each leg that names a software GPU, and 161 in Edge, whose le
   - at half its intensity, half the linear value;
   - a program's own `emissiveNode`;
   - the emissive back once that node is cleared.
+- **Part 3's third part, step 1, with no GPU** (`tests/src/dfg.kama`):
+  - `dfgTable()` holding r187's 512 half floats, held to their FNV-1a hash and its first and last texel;
+  - `dfg()` spelled: `DFGLUT` written once, sampling the table group 0 declares, and read through one let; a material
+    that samples nothing declaring no texture;
+  - its refusals: `dfg()` called in the vertex stage, a sample there itself, a sample of a texture the renderer does not
+    bind or with no coordinate, and a function named `dfgTable`, `dfgTable_sampler`, `sampler` or `texture_2d`.
+- **Part 3's third part, step 1, on each leg's GPU** (`tests/src/dfg.kama`): sixteen boxes, each a program's own
+  material showing `dfg()` at its own point as (scale, bias, 0). Each centre texel is held within a step to the table's
+  half floats decoded in float64, mixed as a linear sampler that clamps mixes them, and encoded as the sRGB target holds
+  them: at texel centres, halfway between two texels across and down, between four, and past each edge. Every point is
+  a multiple of 1/32, where the GPU's own sub-texel weights are exact. No WebGPU error.
 
   Then a program's own material that counts its compiles: once at its first draw, not on an unchanged frame, once more
   after its `graphVersion()` moves, and not for a setting's change. No WebGPU error.

@@ -32,6 +32,7 @@ type resource Misread implements Material {
     public ctor make() { this.cache = MaterialGpu.make(); }
     public fn ref MaterialGpu gpuMut() { return this.cache; }
     public const fn uint32 version() { return 0; }
+    public const fn uint32 graphVersion() { return 0; }
     public const fn void settings(ref MaterialSettings into) { }
     public fn void shade(ref NodeBuilder builder) {
         builder.fragmentColor(node: modelWorldMatrix() * vec4(xyz: positionLocal(), w: constant(value: 1.0)));
@@ -44,6 +45,7 @@ type resource Shrunk implements Material {
     public ctor make() { this.cache = MaterialGpu.make(); }
     public fn ref MaterialGpu gpuMut() { return this.cache; }
     public const fn uint32 version() { return 0; }
+    public const fn uint32 graphVersion() { return 0; }
     public const fn void settings(ref MaterialSettings into) { into.addFloat(name: "shrink", value: 0.5); }
     public fn void shade(ref NodeBuilder builder) {
         FloatNode shrink = builder.uniformFloat(name: "shrink");

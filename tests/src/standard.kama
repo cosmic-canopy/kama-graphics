@@ -1,0 +1,386 @@
+// GFX-1's part 3, its second part, step 2: `MeshStandardMaterial`'s values and its first slot, `emissiveNode`, and a
+// material compiled again when its nodes change (kyoten's rendering.md § Decided, GFX-1's part 3, its second part's
+// question 2: `graphVersion()` beside `version()`).
+//
+// With no GPU: three.js r187's defaults; each value's `Mut` moving `version()` alone, and the slot's `graphVersion()`
+// alone; the settings as WGSL's uniform rules lay them out, each value's float32 bits at its offset.
+//
+// On the GPU, a step a tick on the device the check opened, one renderer for the run: with no light the material draws
+// its emissive alone, as three.js's does (r187's `NodeMaterial.setupLighting`: the scene's lights, none here, plus
+// `emissiveNode` or `emissive * emissiveIntensity`). Each want is worked here from the colour's linear value and encoded
+// as the 8-bit sRGB target holds it. Then a program's own material that counts its compiles: once at its first draw,
+// never again on an unchanged frame, once more after its graph number moves, and not for a setting's change.
+
+import {
+    std::collections::DynamicArray,
+    std::math::Vec3, std::math::radians,
+    std::time::Instant, std::time::monotonicNow,
+    gpu::Device, gpu::Queue, gpu::DeviceErrors, gpu::GpuError,
+    image::Image,
+    graphics::Color, graphics::Renderer, graphics::RenderTarget, graphics::Scene, graphics::Mesh,
+    graphics::PerspectiveCamera, graphics::BoxGeometry, graphics::Material, graphics::MaterialGpu,
+    graphics::MaterialSettings, graphics::NodeBuilder, graphics::MeshBasicMaterial, graphics::MeshStandardMaterial,
+    graphics::PixelRead, graphics::PixelStatus, graphics::FloatNode, graphics::Vec3Node, graphics::vec3, graphics::vec4,
+    graphics::constant,
+    Verdicts, encoded,
+};
+export { standardCases, StandardRun };
+
+comptime int64 SETTLE_MS = 10000;
+comptime uint32 WIDE = 64;
+comptime uint32 HIGH = 48;
+comptime uint32 BACKDROP = 0x336699;
+
+// The four bytes at `at` in `bytes`, little-endian.
+fn uint32 bitsAt(const ref DynamicArray<uint8> bytes, isize at) {
+    return cast<uint32>(bytes[at]) | (cast<uint32>(bytes[at + 1]) << 8) | (cast<uint32>(bytes[at + 2]) << 16)
+        | (cast<uint32>(bytes[at + 3]) << 24);
+}
+
+// "" when setting `i` of `s` is `named`, of WGSL type `wgslType`, at `offset`; else what it is.
+fn string declaredAs(const ref MaterialSettings s, isize i, string named, string wgslType, uint32 offset) {
+    if (i >= s.count()) { return " " + named + " is not declared;"; }
+    string has = s.nameAt(i: i);
+    string typed = s.typeAt(i: i);
+    uint32 at = s.offsetAt(i: i);
+    if (has == named && typed == wgslType && at == offset) { return ""; }
+    return " setting ${i} is " + has + ": " + typed + " at ${at};";
+}
+
+unsafe fn void standardCases(ref Verdicts found) {
+    MeshStandardMaterial m = MeshStandardMaterial.make();
+    uint32 colour = m.color().hex();
+    uint32 glow = m.emissive().hex();
+    float32 rough = m.roughness();
+    float32 metal = m.metalness();
+    float32 strength = m.emissiveIntensity();
+    bool unset = m.emissiveNode().isNone();
+    string defaults = "";
+    if (colour != 0xffffff || rough != 1.0 || metal != 0.0 || glow != 0x000000 || strength != 1.0) {
+        defaults = "color ${colour}, roughness ${rough}, metalness ${metal}, emissive ${glow}, emissiveIntensity ${strength}";
+    }
+    if (!unset) { defaults = defaults + " an emissiveNode is set"; }
+    found.add(name: "MeshStandardMaterial: three.js r187's defaults: color white, roughness 1, metalness 0, emissive black, emissiveIntensity 1, and no emissiveNode",
+              why: give defaults);
+
+    // each value's Mut moves version(), and none moves graphVersion()
+    string still = "";
+    uint32 g0 = m.graphVersion();
+    uint32 v = m.version();
+    m.colorMut() = Color.fromHex(hex: 0x336699);
+    if (m.version() == v) { still = still + " colorMut"; }
+    v = m.version();
+    m.roughnessMut() = 0.25;
+    if (m.version() == v) { still = still + " roughnessMut"; }
+    v = m.version();
+    m.metalnessMut() = 0.75;
+    if (m.version() == v) { still = still + " metalnessMut"; }
+    v = m.version();
+    m.emissiveMut() = Color.fromHex(hex: 0xff8000);
+    if (m.version() == v) { still = still + " emissiveMut"; }
+    v = m.version();
+    m.emissiveIntensityMut() = 2.5;
+    if (m.version() == v) { still = still + " emissiveIntensityMut"; }
+    uint32 g1 = m.graphVersion();
+    string moved = still.isEmpty() ? "" : "version() did not move for" + still;
+    if (g1 != g0) { moved = moved + " graphVersion() moved from ${g0} to ${g1}"; }
+    found.add(name: "MeshStandardMaterial: each value's Mut moves version(), and none moves graphVersion(), so a value's change compiles nothing",
+              why: give moved);
+
+    // the settings: names, types and offsets, then each value's bits
+    MaterialSettings s = MaterialSettings.make();
+    m.settings(into: ref s);
+    DynamicArray<uint8> bytes = s.bytes();
+    isize n = bytes.length();
+    isize declared = s.count();
+    string laid = declaredAs(s: s, i: 0, named: "color", wgslType: "vec3f", offset: 0)
+        + declaredAs(s: s, i: 1, named: "roughness", wgslType: "f32", offset: 12)
+        + declaredAs(s: s, i: 2, named: "metalness", wgslType: "f32", offset: 16)
+        + declaredAs(s: s, i: 3, named: "emissive", wgslType: "vec3f", offset: 32)
+        + declaredAs(s: s, i: 4, named: "emissiveIntensity", wgslType: "f32", offset: 44);
+    if (declared != 5) { laid = laid + " ${declared} settings are declared;"; }
+    if (n != 48) { laid = laid + " the block is ${n} bytes"; }
+    found.add(name: "MeshStandardMaterial: its settings as WGSL lays them out: color at 0, roughness at 12, metalness at 16, emissive at 32 and emissiveIntensity at 44, in 48 bytes",
+              why: give laid);
+    Color c = m.color();
+    Color e = m.emissive();
+    float32 quarter = 0.25;
+    float32 threeQuarters = 0.75;
+    float32 twoAndHalf = 2.5;
+    bool bits = n == 48
+        && bitsAt(bytes: bytes, at: 0) == bitcast<uint32>(c.linearR()) && bitsAt(bytes: bytes, at: 4) == bitcast<uint32>(c.linearG())
+        && bitsAt(bytes: bytes, at: 8) == bitcast<uint32>(c.linearB()) && bitsAt(bytes: bytes, at: 12) == bitcast<uint32>(quarter)
+        && bitsAt(bytes: bytes, at: 16) == bitcast<uint32>(threeQuarters)
+        && bitsAt(bytes: bytes, at: 20) == 0 && bitsAt(bytes: bytes, at: 24) == 0 && bitsAt(bytes: bytes, at: 28) == 0
+        && bitsAt(bytes: bytes, at: 32) == bitcast<uint32>(e.linearR()) && bitsAt(bytes: bytes, at: 36) == bitcast<uint32>(e.linearG())
+        && bitsAt(bytes: bytes, at: 40) == bitcast<uint32>(e.linearB()) && bitsAt(bytes: bytes, at: 44) == bitcast<uint32>(twoAndHalf);
+    found.add(name: "MeshStandardMaterial: each value's float32 bits at its offset, its colours linear, the padding zero",
+              why: bits ? "" : "the bytes are not laid out so");
+
+    // the slot moves graphVersion(), set or cleared, and not version()
+    uint32 v2 = m.version();
+    uint32 g2 = m.graphVersion();
+    m.emissiveNodeMut() = Optional::Some(value: vec3(x: constant(value: 0.25), y: constant(value: 0.5), z: constant(value: 0.75)));
+    uint32 g3 = m.graphVersion();
+    bool held = m.emissiveNode().isSome();
+    m.emissiveNodeMut() = Optional::None;
+    uint32 g4 = m.graphVersion();
+    uint32 v4 = m.version();
+    bool dropped = m.emissiveNode().isNone();
+    string slot = "";
+    if (g3 == g2) { slot = slot + " setting it did not move graphVersion();"; }
+    if (g4 == g3) { slot = slot + " clearing it did not move graphVersion();"; }
+    if (v4 != v2) { slot = slot + " version() moved from ${v2} to ${v4};"; }
+    if (!held) { slot = slot + " the node set was not held;"; }
+    if (!dropped) { slot = slot + " the node cleared was still held"; }
+    found.add(name: "MeshStandardMaterial: setting or clearing emissiveNode moves graphVersion() each time and not version(), so it compiles again and writes no setting",
+              why: give slot);
+
+    MeshBasicMaterial basic = MeshBasicMaterial.make();
+    uint32 b0 = basic.graphVersion();
+    basic.colorMut() = Color.fromHex(hex: 0x336699);
+    uint32 b1 = basic.graphVersion();
+    found.add(name: "MeshBasicMaterial: its nodes never change, so graphVersion() stays 0 as its colour changes",
+              why: b0 == 0 && b1 == 0 ? "" : "graphVersion() ${b0} then ${b1}");
+}
+
+// A program's own material that counts its compiles, each `shade` one: its graph number moves on `reshape()`, its
+// setting's on `retune()`. It draws its one setting as a grey.
+type resource Counting implements Material {
+    MaterialGpu cache;
+    int32 shaded = 0;
+    uint32 graph = 0;
+    uint32 tuned = 0;
+    public ctor make() { this.cache = MaterialGpu.make(); }
+    public fn ref MaterialGpu gpuMut() { return this.cache; }
+    public const fn uint32 version() { return this.tuned; }
+    public const fn uint32 graphVersion() { return this.graph; }
+    public const fn void settings(ref MaterialSettings into) { into.addFloat(name: "level", value: 0.5); }
+    public fn void shade(ref NodeBuilder builder) {
+        this.shaded = this.shaded + 1;
+        FloatNode level = builder.uniformFloat(name: "level");
+        builder.fragmentColor(node: vec4(xyz: vec3(x: level, y: level, z: level), w: constant(value: 1.0)));
+    }
+    public const fn int32 compiles() { return this.shaded; }
+    public fn void reshape() { this.graph = this.graph + 1; }
+    public fn void retune() { this.tuned = this.tuned + 1; }
+}
+
+fn int32 channelOf(uint32 c, int32 shift) { return cast<int32>((c >> cast<uint32>(shift)) & 255); }
+fn int32 stepsApart(int32 a, int32 b) { return a > b ? a - b : b - a; }
+
+// A linear colour as the 8-bit sRGB target holds it, 0xRRGGBB.
+fn uint32 storedAs(float64 r, float64 g, float64 b) {
+    return (cast<uint32>(encoded(c: r)) << 16) | (cast<uint32>(encoded(c: g)) << 8) | cast<uint32>(encoded(c: b));
+}
+
+// "" when `got` is within one step of `want` on each channel; else both.
+fn string nearTo(uint32 got, uint32 want) {
+    bool near = stepsApart(a: channelOf(c: got, shift: 16), b: channelOf(c: want, shift: 16)) <= 1
+        && stepsApart(a: channelOf(c: got, shift: 8), b: channelOf(c: want, shift: 8)) <= 1
+        && stepsApart(a: channelOf(c: got, shift: 0), b: channelOf(c: want, shift: 0)) <= 1;
+    return near ? "" : "the texel is ${got}, not ${want}";
+}
+
+// The texel at (x, y) of a frame read top row first, 0xRRGGBB.
+fn uint32 texelAt(const ref DynamicArray<uint8> frame, isize x, isize y) {
+    isize at = (y * cast<isize>(WIDE) + x) * 4;
+    if (at + 2 >= frame.length()) { return 0xffffffff; }
+    return (cast<uint32>(frame[at]) << 16) | (cast<uint32>(frame[at + 1]) << 8) | cast<uint32>(frame[at + 2]);
+}
+
+type resource StandardRun {
+    int32 stage = 0;
+    Instant began = monotonicNow();
+    Verdicts found;
+    Device device;
+    Queue queue;
+    Optional<Renderer> renderer = Optional::None;
+    Optional<Shared<RenderTarget>> target = Optional::None;
+    Optional<Shared<PerspectiveCamera>> camera = Optional::None;
+    Optional<Shared<Scene>> scene = Optional::None;
+    Optional<Shared<MeshStandardMaterial>> look = Optional::None;
+    Optional<PixelRead> reading = Optional::None;
+    DynamicArray<uint8> frame;
+    string failed = "";
+    uint32 halved = 0;   // the emissive at half its intensity, as stored
+
+    public ctor make(Device device, Queue queue) {
+        this.found = Verdicts.make();
+        this.device = give device;
+        this.queue = give queue;
+        this.frame = DynamicArray.empty();
+    }
+
+    public fn ref Verdicts verdicts() { return this.found; }
+
+    unsafe fn void next(int32 to) { this.stage = to; this.began = monotonicNow(); }
+
+    // The read's texels into `frame` once it answers; false while it is pending. A failed read leaves `failed` set.
+    unsafe fn bool settled() {
+        PixelStatus s = match (this.reading) {
+            case Some(value: r): r.poll();
+            case None: PixelStatus::Failed(error: GpuError::Refused(words: "no read was started"));
+        };
+        bool pending = match (s) { case Pending: true; case _: false; };
+        if (pending && this.began.elapsed().asMillis() < SETTLE_MS) { return false; }
+        this.frame = DynamicArray.empty();
+        this.failed = "";
+        match (give s) {
+            case Ready(image: img): {
+                borrow img.samples8() as px { for (isize i = 0; i < px.length(); i = i + 1) { this.frame.add(item: px[i]); } }
+            }
+            case Failed(error: e): { this.failed = "the read failed: " + e.message(); }
+            case Pending: { this.failed = "the read was still pending after ${SETTLE_MS} ms"; }
+        };
+        this.reading = Optional::None;
+        return true;
+    }
+
+    // "" when the frame's centre, on the box, is within a step of `want` and its corner the backdrop; else what is.
+    unsafe fn string centreIs(uint32 want) {
+        if (!this.failed.isEmpty()) { return copy this.failed; }
+        uint32 corner = texelAt(frame: this.frame, x: 1, y: 1);
+        string backdrop = nearTo(got: corner, want: BACKDROP);
+        if (!backdrop.isEmpty()) { return "the corner is not the backdrop: " + backdrop; }
+        uint32 middle = texelAt(frame: this.frame, x: cast<isize>(WIDE) / 2, y: cast<isize>(HIGH) / 2);
+        string colour = nearTo(got: middle, want: want);
+        if (!colour.isEmpty()) { return colour; }
+        // opaque, as three.js's: its opacity, 1, is the output's alpha
+        uint8 alpha = this.frame[(cast<isize>(HIGH) / 2 * cast<isize>(WIDE) + cast<isize>(WIDE) / 2) * 4 + 3];
+        return alpha == 255 ? "" : "the texel's alpha is ${alpha}, not 255";
+    }
+
+    // Render `s` with the run's camera into its target, and start reading it back when `read`.
+    unsafe fn void draw(Shared<Scene> s, bool read) {
+        match (this.renderer) {
+            case Some(value: r): {
+                match (this.camera) {
+                    case Some(value: c): {
+                        r.render(scene: s, camera: copy c);
+                        if (read) {
+                            match (this.target) {
+                                case Some(value: t): { this.reading = Optional::Some(value: r.readRenderTargetPixels(target: copy t)); }
+                                case None: { }
+                            };
+                        }
+                    }
+                    case None: { }
+                };
+            }
+            case None: { }
+        };
+    }
+
+    unsafe fn Shared<Scene> theScene() {
+        return match (this.scene) { case Some(value: s): copy s; case None: { panic(msg: "made at the first stage"); } };
+    }
+    unsafe fn Shared<MeshStandardMaterial> theLook() {
+        return match (this.look) { case Some(value: m): copy m; case None: { panic(msg: "made at the first stage"); } };
+    }
+
+    // The counting material drawn four times on the run's renderer: what each frame left its compile count at.
+    unsafe fn void compileCases() {
+        Shared<Counting> counted = new Counting.make();
+        Shared<Scene> s = new Scene.make();
+        Shared<BoxGeometry> box = new BoxGeometry.make(width: 1.0, height: 1.0, depth: 1.0);
+        Shared<Mesh> m = new Mesh.make(geometry: box, material: counted);
+        s.add(object: m);
+        this.draw(s: copy s, read: false);
+        int32 first = counted.compiles();
+        this.draw(s: copy s, read: false);
+        int32 second = counted.compiles();
+        this.found.add(name: "Renderer: a material compiles once, at its first draw, and not again on an unchanged frame",
+                       why: first == 1 && second == 1 ? "" : "compiled ${first} time(s) at the first frame, ${second} by the second");
+        counted.reshape();
+        this.draw(s: copy s, read: false);
+        int32 third = counted.compiles();
+        this.draw(s: copy s, read: false);
+        int32 fourth = counted.compiles();
+        this.found.add(name: "Renderer: a material whose graphVersion() moved compiles again before its next draw, once",
+                       why: third == 2 && fourth == 2 ? "" : "compiled ${third} time(s) after the move, ${fourth} a frame later");
+        counted.retune();
+        this.draw(s: copy s, read: false);
+        int32 fifth = counted.compiles();
+        this.found.add(name: "Renderer: a material whose version() alone moved, a setting changed, compiles nothing",
+                       why: fifth == 2 ? "" : "compiled ${fifth} time(s)");
+    }
+
+    public unsafe fn bool step() {
+        if (this.stage == 0) {
+            Renderer r = Renderer.withDevice(device: copy this.device, queue: copy this.queue);
+            r.clearColorMut() = Color.fromHex(hex: BACKDROP);
+            Shared<RenderTarget> t = new RenderTarget.make(width: WIDE, height: HIGH);
+            Shared<PerspectiveCamera> cam = new PerspectiveCamera.make(fovRad: radians(deg: 50.0),
+                                                                        aspect: cast<float32>(WIDE) / cast<float32>(HIGH),
+                                                                        near: 0.1, far: 100.0);
+            cam.positionMut() = Vec3.of(x: 0.0, y: 0.0, z: 4.0);
+            cam.targetMut() = Optional::Some(value: copy t);
+            Shared<Scene> s = new Scene.make();
+            Shared<BoxGeometry> box = new BoxGeometry.make(width: 1.0, height: 1.0, depth: 1.0);
+            Shared<MeshStandardMaterial> m = new MeshStandardMaterial.make();
+            Shared<Mesh> cube = new Mesh.make(geometry: box, material: m);
+            s.add(object: cube);
+            this.renderer = Optional::Some(value: give r);
+            this.target = Optional::Some(value: give t);
+            this.camera = Optional::Some(value: give cam);
+            this.scene = Optional::Some(value: copy s);
+            this.look = Optional::Some(value: give m);
+            this.draw(s: give s, read: true);
+            this.next(to: 1);
+        } else if (this.stage == 1) {
+            if (!this.settled()) { return false; }
+            this.found.add(name: "MeshStandardMaterial: with no light, the default draws black, its emissive, as three.js r187's does",
+                           why: this.centreIs(want: 0x000000));
+            Shared<MeshStandardMaterial> m = this.theLook();
+            m.emissiveMut() = Color.fromHex(hex: 0xff8000);
+            Shared<Scene> s = this.theScene();
+            this.draw(s: give s, read: true);
+            this.next(to: 2);
+        } else if (this.stage == 2) {
+            if (!this.settled()) { return false; }
+            Shared<MeshStandardMaterial> m = this.theLook();
+            Color e = m.emissive();
+            uint32 want = storedAs(r: cast<float64>(e.linearR()), g: cast<float64>(e.linearG()), b: cast<float64>(e.linearB()));
+            this.found.add(name: "MeshStandardMaterial: with no light it draws emissive × emissiveIntensity, written in sRGB and held linear",
+                           why: this.centreIs(want: want));
+            m.emissiveIntensityMut() = 0.5;
+            this.halved = storedAs(r: cast<float64>(e.linearR()) * 0.5, g: cast<float64>(e.linearG()) * 0.5,
+                                   b: cast<float64>(e.linearB()) * 0.5);
+            Shared<Scene> s = this.theScene();
+            this.draw(s: give s, read: true);
+            this.next(to: 3);
+        } else if (this.stage == 3) {
+            if (!this.settled()) { return false; }
+            this.found.add(name: "MeshStandardMaterial: emissiveIntensity scales the emissive in linear light: at 0.5, half its linear value",
+                           why: this.centreIs(want: this.halved));
+            Shared<MeshStandardMaterial> m = this.theLook();
+            m.emissiveNodeMut() = Optional::Some(value: vec3(x: constant(value: 0.25), y: constant(value: 0.5), z: constant(value: 0.75)));
+            Shared<Scene> s = this.theScene();
+            this.draw(s: give s, read: true);
+            this.next(to: 4);
+        } else if (this.stage == 4) {
+            if (!this.settled()) { return false; }
+            this.found.add(name: "MeshStandardMaterial: emissiveNode, a program's own node, replaces emissive × emissiveIntensity from the next draw",
+                           why: this.centreIs(want: storedAs(r: 0.25, g: 0.5, b: 0.75)));
+            Shared<MeshStandardMaterial> m = this.theLook();
+            m.emissiveNodeMut() = Optional::None;
+            Shared<Scene> s = this.theScene();
+            this.draw(s: give s, read: true);
+            this.next(to: 5);
+        } else if (this.stage == 5) {
+            if (!this.settled()) { return false; }
+            this.found.add(name: "MeshStandardMaterial: emissiveNode cleared gives emissive × emissiveIntensity back",
+                           why: this.centreIs(want: this.halved));
+            this.compileCases();
+            DeviceErrors errs = this.device.takeErrors();
+            isize nerr = errs.reports().length();
+            string firstError = nerr > 0 ? errs.reports()[0].message() : "";
+            this.found.add(name: "MeshStandardMaterial: its frames raise no WebGPU error",
+                           why: errs.isEmpty() ? "" : "the channel holds ${nerr} error(s), the first: " + firstError);
+            this.renderer = Optional::None;
+            this.stage = 999;
+        }
+        return this.stage == 999;
+    }
+}

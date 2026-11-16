@@ -22,7 +22,7 @@ import {
     graphics::constant,
     Verdicts,
 };
-export { NormalsRun };
+export { NormalsRun, encoded };
 
 comptime int64 SETTLE_MS = 10000;
 comptime uint32 WIDE = 64;
@@ -34,6 +34,7 @@ type resource ShowNormals implements Material {
     public ctor make() { this.cache = MaterialGpu.make(); }
     public fn ref MaterialGpu gpuMut() { return this.cache; }
     public const fn uint32 version() { return 0; }
+    public const fn uint32 graphVersion() { return 0; }
     public const fn void settings(ref MaterialSettings into) { }
     public fn void shade(ref NodeBuilder builder) {
         Vec3Node half = vec3(x: constant(value: 0.5), y: constant(value: 0.5), z: constant(value: 0.5));

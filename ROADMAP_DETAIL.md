@@ -140,6 +140,20 @@ natively. The library's own `examples/cube` is the same scene without an engine.
   normal under the shear. 151 cases on each golden leg, 146 in Edge. 18 of 18 mutations caught, the last after a case
   kept two varyings alike but for their operator apart. Found on the way: kyoten's KY-62, a generic's type argument
   inferred from an operator expression's left operand. Next, step 2: `MeshStandardMaterial`'s values and slots.
+- **Decided on 2026-11-15, part 3's second part, question 2** (kyoten's `docs/design/rendering.md` § Decided): the
+  `Material` contract gains `graphVersion()` beside `version()`, moved when a material's nodes change, and a renderer
+  compiles a material again before its next draw once it has moved. Settled with it: step 2 builds the five values and
+  `emissiveNode`, and `colorNode`, `roughnessNode` and `metalnessNode` come with the lights that read them, where a
+  test can hold them.
+- **Built, part 3's second part, step 2** (2026-11-15, [SPEC.md](SPEC.md) § Materials):
+  - `MeshStandardMaterial` with three.js r187's five defaults, each value a property pair, its settings 48 bytes;
+  - with no light it draws its emissive alone, emissive × emissiveIntensity, opaque, as three.js's does;
+  - `emissiveNode`, a program's own node in its place;
+  - `graphVersion()` on the contract, and the renderer compiling a material once for each graph.
+
+  Red first against a stub, 12 of the 15 new cases failing; the three that passed held what was already so. 166 cases
+  on each golden leg, 161 in Edge. 26 of 26 mutations caught (kyoten's `.scratch/gfx1-part3/step2/`), after the drawn
+  cases were sharpened to hold the texel's alpha. Next, part 3's third part: the lights.
 - **Done:**
   - `examples/cube` draws from one source on both legs;
   - its golden passes on a software GPU on each leg CI has, and perceptually on the reference machines present;

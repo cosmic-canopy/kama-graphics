@@ -244,8 +244,10 @@ type resource Renderer {
         return this.pipelines.length() - 1;
     }
 
-    // Compile `material`'s nodes to WGSL, once: what its compile refuses is reported, and no mesh draws with it.
+    // Compile `material`'s nodes to WGSL, once for each graph it names (`graphVersion()`): what its compile refuses is
+    // reported, and no mesh draws with it.
     unsafe fn void compile(Shared<Material> material) {
+        uint32 graph = material.graphVersion();
         MaterialSettings declared = MaterialSettings.make();
         material.settings(into: ref declared);
         NodeBuilder builder = NodeBuilder.make(settings: give declared);
@@ -260,7 +262,7 @@ type resource Renderer {
             }
             this.refuse(kind: GraphicsErrorKind::Material, message: give words);
         }
-        material.gpuMut().store(wgsl: give wgsl, problems: give problems);
+        material.gpuMut().store(wgsl: give wgsl, problems: give problems, graph: graph);
     }
 
     // Draw `scene` as `camera` sees it, into the target the camera names.
@@ -310,7 +312,8 @@ type resource Renderer {
             isize slot = slots[i];
             Shared<Material> material = scene.materialAt(slot: slot);
             Shared<Geometry> geometry = scene.geometryAt(slot: slot);
-            if (!material.gpuMut().isCompiled()) { this.compile(material: copy material); }
+            uint32 graph = material.graphVersion();
+            if (!material.gpuMut().compiledAt(graph: graph)) { this.compile(material: copy material); }
             DynamicArray<string> refused = material.gpuMut().refused();
             if (refused.length() > 0) { continue; }
             string source = material.gpuMut().source();

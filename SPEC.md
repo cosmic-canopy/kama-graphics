@@ -180,18 +180,30 @@ Decided, GFX-1's part 2, question 4), as `@kama/gpu` reports every misuse of Web
 ## Materials
 
 - **`Material` is the contract a mesh's look implements;** three.js's mesh materials are typed presets over it (area 3,
-  item 2). It has four members:
+  item 2). It has five members:
   - `settings(into:)`, its settings declared with their values now;
   - `shade(builder:)`, its typed nodes (§ Typed nodes);
   - `version()`, which moves whenever a setting changes;
+  - `graphVersion()`, which moves whenever its nodes change, a slot set or cleared. A material whose nodes never change
+    answers 0;
   - `gpuMut()`, what a renderer keeps of it.
 - **A setting is a value, so changing one never compiles a shader,** and every mesh using the material draws with the
   change. The settings are declared apart from the nodes, so writing them after a change builds no node.
-- **A renderer compiles a material once,** the first time a mesh draws with it, and keeps its WGSL. A material whose
-  compile is refused draws nothing (§ Misuse).
+- **A renderer compiles a material once for each graph:** the first time a mesh draws with it, and again before its next
+  draw once its `graphVersion()` has moved. It keeps the WGSL, and a program never says a material needs compiling. A
+  material whose compile is refused draws nothing (§ Misuse).
 - **`MeshBasicMaterial` is unlit:** every fragment its `color()`/`colorMut()`, white by default, opaque. Its nodes are
   three.js's: the colour setting as the fragment's colour, on every mesh's vertex stage. Part 2's golden holds them to the
   bytes its hand-written WGSL drew.
+- **`MeshStandardMaterial` is three.js's, glTF's metal-roughness.**
+  - Its five values are property pairs with three.js r187's defaults: `color` white, `roughness` 1, `metalness` 0,
+    `emissive` black and `emissiveIntensity` 1.
+  - Its settings are those five, in that order, in 48 bytes: `color` at 0, `roughness` at 12, `metalness` at 16,
+    `emissive` at 32 and `emissiveIntensity` at 44.
+  - `emissiveNode()`/`emissiveNodeMut()`, an `Optional<Vec3Node>`, replaces emissive × emissiveIntensity with a node of
+    the program's, as three.js's `emissiveNode` does. `None` gives the values back. Setting or clearing it moves
+    `graphVersion()`.
+  - With no light it draws what three.js's draws with none: its emissive alone, opaque.
 
 ## Typed nodes
 
@@ -314,7 +326,7 @@ WGSL's reserved words beyond its keywords are refused by the GPU's own compile, 
 - then `tests/`, one program, built debug and release and run natively, and built for the web and run under `kama run`
   in Edge, Firefox and the pinned Chrome for Testing, each started as `tools/browsers.mjs` says.
 
-It is 151 cases on each leg that names a software GPU, and 146 in Edge, whose leg names none.
+It is 166 cases on each leg that names a software GPU, and 161 in Edge, whose leg names none.
 
 - **The goldens** (kyoten's rendering.md § Decided, GFX-1's part 1, questions 2 and 3):
   - Each leg names its software GPU: `--golden warp` natively on Windows and in Firefox, `--golden swiftshader` in the
@@ -412,6 +424,22 @@ It is 151 cases on each leg that names a software GPU, and 146 in Edge, whose le
   y under a parent scaled (2, 0.5, 1), a shear, drawn by a program's own material showing `normalWorld()` as a colour.
   Every texel is held, within 2 steps, to a face's normal worked in float64 as S⁻¹ R n and encoded as the sRGB target
   holds it. Then the same under a parent mirrored on x, its normals still pointing out, and no WebGPU error.
+- **Part 3's second part, step 2, with no GPU** (`tests/src/standard.kama`):
+  - `MeshStandardMaterial`'s defaults;
+  - each value's `Mut` moving `version()` and not `graphVersion()`;
+  - its settings' names, types and offsets, and each value's bits;
+  - `emissiveNode` set and cleared, each moving `graphVersion()` and not `version()`;
+  - `MeshBasicMaterial`'s `graphVersion()` staying 0 as its colour changes.
+- **Part 3's second part, step 2, on each leg's GPU** (`tests/src/standard.kama`): a box drawn by `MeshStandardMaterial`
+  with no light, its centre held within a step of the want worked from the linear values, and opaque:
+  - black by default;
+  - its emissive;
+  - at half its intensity, half the linear value;
+  - a program's own `emissiveNode`;
+  - the emissive back once that node is cleared.
+
+  Then a program's own material that counts its compiles: once at its first draw, not on an unchanged frame, once more
+  after its `graphVersion()` moves, and not for a setting's change. No WebGPU error.
 - **Part 2's golden holds part 3's compiler:** `boxes/<gpu>.png` is matched byte for byte with `MeshBasicMaterial`'s
   nodes, as it was with its WGSL by hand.
 - **Printed from outside the program:** the gate counts each leg's printed lines: one for the render refused by the

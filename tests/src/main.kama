@@ -4,8 +4,10 @@
 // (tests/src/nodes.kama). Then, a step a tick on the leg's GPU, opened once (tests/src/open.kama): the harness end to end
 // (tests/src/scene.kama), the `Renderer` that clears a target and reads it back (tests/src/renderer.kama), scenes
 // rendered and read back (tests/src/boxes.kama), the nodes' WGSL compiled by the leg's own compiler, with a refused
-// material beside a drawn one (tests/src/shaders.kama), and normals in world space under a shear and a mirror
-// (tests/src/normals.kama), each on its own handle to the one device.
+// material beside a drawn one (tests/src/shaders.kama), normals in world space under a shear and a mirror
+// (tests/src/normals.kama), and `MeshStandardMaterial` drawn with no light and a material compiled again when its nodes
+// change (tests/src/standard.kama), each on its own handle to the one device. `MeshStandardMaterial`'s values and
+// settings are checked with no GPU, beside part 2's.
 //
 // A leg names its software GPU with `--golden warp` or `--golden swiftshader` (kyoten's rendering.md § Decided, GFX-1's
 // part 1, question 3). There every frame is held to its golden, `tests/goldens/<test>/<gpu>.png`, byte for byte. A leg
@@ -26,7 +28,7 @@ import {
     gpu::Device, gpu::Queue,
     std::collections::DynamicArray,
     Verdicts, harnessCases, colorCases, partCases, nodeCases, ShaderCase, GpuOpen, GoldenRun, RendererRun, BoxesRun,
-    ShaderRun, NormalsRun,
+    ShaderRun, NormalsRun, standardCases, StandardRun,
 };
 
 // The software GPUs a leg can name: WARP, natively on Windows and as Firefox's fallback adapter, and SwiftShader, as
@@ -55,7 +57,8 @@ type resource Check implements App {
     string gpu;
     int32 declared = 0;
     int32 matched = 0;
-    int32 stage = 0;     // 0 the device, 1 the scene, 2 the renderer, 3 the boxes, 4 the shaders, 5 the normals, 6 done
+    int32 stage = 0;     // 0 the device, 1 the scene, 2 the renderer, 3 the boxes, 4 the shaders, 5 the normals,
+                         // 6 the standard material, 7 done
     Optional<GpuOpen> opening = Optional::None;
     Optional<Device> device = Optional::None;
     Optional<Queue> queue = Optional::None;
@@ -65,12 +68,14 @@ type resource Check implements App {
     Optional<BoxesRun> boxes = Optional::None;
     Optional<ShaderRun> shaders = Optional::None;
     Optional<NormalsRun> normals = Optional::None;
+    Optional<StandardRun> standard = Optional::None;
 
     public unsafe ctor make() {
         Verdicts found = Verdicts.make();
         harnessCases(found: ref found);
         colorCases(found: ref found);
         partCases(found: ref found);
+        standardCases(found: ref found);
         DynamicArray<ShaderCase> compiled = DynamicArray.empty();
         nodeCases(found: ref found, shaders: ref compiled);
         this.report(found: found);
@@ -115,7 +120,8 @@ type resource Check implements App {
         if (this.stage == 3) { this.boxesStep(); }
         if (this.stage == 4) { this.shadersStep(); }
         if (this.stage == 5) { this.normalsStep(); }
-        if (this.stage == 6) { return this.finish(); }
+        if (this.stage == 6) { this.standardStep(); }
+        if (this.stage == 7) { return this.finish(); }
         return 1;
     }
 
@@ -133,7 +139,7 @@ type resource Check implements App {
         this.queue = pending.takeQueue();
         if (this.device.isNone() || this.queue.isNone()) {
             this.verdict(name: "a device for the GPU cases", why: "none was opened, so no GPU case ran");
-            this.stage = 6;
+            this.stage = 7;
             return;
         }
         this.stage = 1;
@@ -212,10 +218,25 @@ type resource Check implements App {
         this.report(found: pending.verdicts());
         pending.verdicts().clear();
         if (!done) { this.normals = Optional::Some(value: give pending); return; }
+        this.stage = 6;
+    }
+
+    // `MeshStandardMaterial` drawn with no light, and a material compiled again when its nodes change
+    // (tests/src/standard.kama), a step this tick.
+    unsafe fn void standardStep() {
+        Optional<StandardRun> taken = replace(place: this.standard, with: Optional::None);
+        StandardRun pending = match (give taken) {
+            case Some(value: r): give r;
+            case None: StandardRun.make(device: this.deviceCopy(), queue: this.queueCopy());
+        };
+        bool done = pending.step();
+        this.report(found: pending.verdicts());
+        pending.verdicts().clear();
+        if (!done) { this.standard = Optional::Some(value: give pending); return; }
         this.queue = Optional::None;
         this.device = Optional::None;
         println(s: "gpu cases: all run");
-        this.stage = 6;
+        this.stage = 7;
     }
 
     // A handle of its own to the one device, and to its queue: a copy is another reference to the same one.

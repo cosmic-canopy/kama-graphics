@@ -10,32 +10,37 @@ import {
     std::collections::DynamicArray,
     gpu::Device, gpu::Queue, gpu::Buffer, gpu::BufferDescriptor, gpu::BufferUsage, gpu::BufferBinding,
     gpu::BindGroup, gpu::BindGroupDescriptor, gpu::BindGroupLayout, gpu::BindingResource,
-    Color, Renderer, MaterialSettings, NodeBuilder, Vec3Node, vec4, constant,
+    Color, Renderer, MaterialSettings, NodeBuilder, Vec3Node, FloatNode, vec4, constant,
 };
-export { Material, MaterialGpu, MeshBasicMaterial };
+export { Material, MaterialGpu, MeshBasicMaterial, MeshStandardMaterial };
 
-// What every material is to the renderer: its settings with their values now, its typed nodes, and a number that moves
-// whenever a setting changes, so the renderer writes them again only then. Its nodes read its settings by name through
-// the builder, which writes them as group 1's uniform block, after the renderer's frame and object records in group 0.
+// What every material is to the renderer: its settings with their values now, its typed nodes, and two numbers. One,
+// `version()`, moves whenever a setting changes, so the renderer writes the settings again only then; the other,
+// `graphVersion()`, moves whenever its nodes change, a slot set or cleared, so the renderer compiles it again only then
+// (kyoten's rendering.md § Decided, GFX-1's part 3, its second part's question 2). A material whose nodes never change
+// answers 0. Its nodes read its settings by name through the builder, which writes them as group 1's uniform block,
+// after the renderer's frame and object records in group 0.
 type contract Material for resource {
     const fn void settings(ref MaterialSettings into);
     fn void shade(ref NodeBuilder builder);
     const fn uint32 version();
+    const fn uint32 graphVersion();
     fn ref MaterialGpu gpuMut();
 }
 
-// What a renderer keeps of a material: its WGSL, compiled once, or what its compile refused; and its settings on each
-// device that drew it, a uniform buffer and its bind group, written again when the material's version moved. Only a
-// renderer reaches it.
+// What a renderer keeps of a material: its WGSL, compiled from the graph its `graphVersion()` named then, or what that
+// compile refused; and its settings on each device that drew it, a uniform buffer and its bind group, written again when
+// the material's version moved. Only a renderer reaches it.
 type resource MaterialGpu {
     DynamicArray<UnsafePtr> devices;
     DynamicArray<Buffer> uniforms;
     DynamicArray<BindGroup> groups;
     DynamicArray<uint32> versions;
     Optional<string> compiled = Optional::None;
+    uint32 compiledGraph = 0;
     DynamicArray<string> refusals;
 
-    friend Renderer::render[groupOn, staleOn, isCompiled, source, refused];
+    friend Renderer::render[groupOn, staleOn, compiledAt, source, refused];
     friend Renderer::compile[store];
 
     public unsafe ctor make() {
@@ -46,9 +51,11 @@ type resource MaterialGpu {
         this.refusals = DynamicArray.empty();
     }
 
-    const fn bool isCompiled() { return this.compiled.isSome(); }
-    fn void store(string wgsl, DynamicArray<string> problems) {
+    // Whether its WGSL is compiled from the graph numbered `graph`, so it is to be compiled again when not.
+    const fn bool compiledAt(uint32 graph) { return this.compiled.isSome() && this.compiledGraph == graph; }
+    fn void store(string wgsl, DynamicArray<string> problems, uint32 graph) {
         this.compiled = Optional::Some(value: give wgsl);
+        this.compiledGraph = graph;
         this.refusals = give problems;
     }
     const fn string source() { return match (this.compiled) { case Some(value: s): copy s; case None: ""; }; }
@@ -109,11 +116,81 @@ type resource MeshBasicMaterial implements Material {
     public fn ref Color colorMut() { this.changes = this.changes + 1; return this.tint; }
 
     public const fn uint32 version() { return this.changes; }
+    // Its nodes never change.
+    public const fn uint32 graphVersion() { return 0; }
     // Its one setting, its colour, linear.
     public const fn void settings(ref MaterialSettings into) { into.addColor(name: "color", value: this.tint); }
     // As three.js's: the colour, opaque, on every mesh's vertex stage.
     public fn void shade(ref NodeBuilder builder) {
         Vec3Node colour = builder.uniformVec3(name: "color");
         builder.fragmentColor(node: vec4(xyz: colour, w: constant(value: 1.0)));
+    }
+}
+
+// The light a standard material gives off: the program's `own` node when it set one, else emissive × emissiveIntensity
+// read from its settings, as three.js r187's `materialEmissive` (MaterialNode.js) and `NodeMaterial.setupLighting`.
+fn Vec3Node emitted(ref NodeBuilder builder, Optional<Vec3Node> own) {
+    match (own) { case Some(value: node): { return copy node; } case None: { } };
+    Vec3Node colour = builder.uniformVec3(name: "emissive");
+    FloatNode intensity = builder.uniformFloat(name: "emissiveIntensity");
+    return colour * intensity;
+}
+
+// Physically based, as three.js's `MeshStandardMaterial`: glTF's metal-roughness, with three.js r187's defaults. Its five
+// values are settings, so changing one compiles nothing. A slot replaces what it names with a node of the program's, a
+// new graph, so setting or clearing one moves `graphVersion()` and the renderer compiles it again before its next draw
+// (kyoten's rendering.md § Decided, GFX-1's part 3, its second part's question 2).
+//
+// The scene's lights reach it in GFX-1's part 3, its third part, and with them the slots `colorNode`, `roughnessNode`
+// and `metalnessNode`, where a light shows what they change. Until then it draws what three.js's draws with no light:
+// its emissive alone.
+type resource MeshStandardMaterial implements Material {
+    Color tint = Color.fromHex(hex: 0xffffff);
+    float32 rough = 1.0;
+    float32 metal = 0.0;
+    Color glow = Color.fromHex(hex: 0x000000);
+    float32 glowIntensity = 1.0;
+    Optional<Vec3Node> glowNode = Optional::None;
+    uint32 changes = 0;
+    uint32 graphs = 0;
+    MaterialGpu cache;
+
+    public ctor make() { this.cache = MaterialGpu.make(); }
+    public fn ref MaterialGpu gpuMut() { return this.cache; }
+
+    // Its diffuse colour, written in sRGB and held linear, as every colour is.
+    public const fn Color color() { return this.tint; }
+    public fn ref Color colorMut() { this.changes = this.changes + 1; return this.tint; }
+    // How rough its surface is, from 0, a mirror, to 1, fully rough.
+    public const fn float32 roughness() { return this.rough; }
+    public fn ref float32 roughnessMut() { this.changes = this.changes + 1; return this.rough; }
+    // How metallic it is, from 0, a dielectric, to 1, a metal.
+    public const fn float32 metalness() { return this.metal; }
+    public fn ref float32 metalnessMut() { this.changes = this.changes + 1; return this.metal; }
+    // The light it gives off whatever lights it, written in sRGB and held linear.
+    public const fn Color emissive() { return this.glow; }
+    public fn ref Color emissiveMut() { this.changes = this.changes + 1; return this.glow; }
+    // How strong its emissive is, a factor on its linear value.
+    public const fn float32 emissiveIntensity() { return this.glowIntensity; }
+    public fn ref float32 emissiveIntensityMut() { this.changes = this.changes + 1; return this.glowIntensity; }
+    // A node of the program's giving the light it gives off, in place of emissive × emissiveIntensity, as three.js's
+    // `emissiveNode`; `None` gives the values back.
+    public const fn Optional<Vec3Node> emissiveNode() { return copy this.glowNode; }
+    public fn ref Optional<Vec3Node> emissiveNodeMut() { this.graphs = this.graphs + 1; return this.glowNode; }
+
+    public const fn uint32 version() { return this.changes; }
+    public const fn uint32 graphVersion() { return this.graphs; }
+    // Its five values, linear, in three.js's order: 48 bytes by WGSL's uniform rules.
+    public const fn void settings(ref MaterialSettings into) {
+        into.addColor(name: "color", value: this.tint);
+        into.addFloat(name: "roughness", value: this.rough);
+        into.addFloat(name: "metalness", value: this.metal);
+        into.addColor(name: "emissive", value: this.glow);
+        into.addFloat(name: "emissiveIntensity", value: this.glowIntensity);
+    }
+    // As three.js's with no light in the scene: what the lights give, nothing yet, plus its emissive, opaque.
+    public fn void shade(ref NodeBuilder builder) {
+        Vec3Node light = emitted(builder: ref builder, own: copy this.glowNode);
+        builder.fragmentColor(node: vec4(xyz: light, w: constant(value: 1.0)));
     }
 }

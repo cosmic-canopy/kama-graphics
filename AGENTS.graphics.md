@@ -128,7 +128,12 @@ functions in kama, a WGSL function as text the escape, and no WESL linker at run
 - the material compiler, with its lets, varyings and refusals;
 - `MeshBasicMaterial` rebuilt on them, part 2's golden matched byte for byte.
 
-Its second part, `MeshStandardMaterial` and normals reaching the fragment stage, is next. GFX-1 is built depth-first, and every example is a test: a headless
+**Its second part is built** (2026-11-15, SPEC § Materials and § Typed nodes):
+- normals in world space, each mesh's record carrying its normal matrix;
+- `MeshStandardMaterial`'s values and `emissiveNode`;
+- a material compiled again when its nodes change (`graphVersion()`).
+
+Its third part, the lights, is next. GFX-1 is built depth-first, and every example is a test: a headless
 readback and a golden image, on web and native. A feature a program does not use drops out at link time.
 [SPEC.md](SPEC.md) is what is built so far, and grows with each part.
 

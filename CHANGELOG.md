@@ -74,3 +74,11 @@ package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - **Changed:** `modelWorldMatrix()` reads `objects[object].world`.
 - **Fixed:** a mirrored mesh (a world matrix with a negative determinant) drew inside out. Its winding is flipped, as
   three.js r187's is, so a camera inside a mirrored box sees the backdrop.
+- GFX-1's part 3, its second part, step 2: `MeshStandardMaterial`'s values and its first slot.
+  - `MeshStandardMaterial`, with three.js r187's defaults: `color()`/`colorMut()`, `roughness()`/`roughnessMut()`,
+    `metalness()`/`metalnessMut()`, `emissive()`/`emissiveMut()` and `emissiveIntensity()`/`emissiveIntensityMut()`,
+    its settings 48 bytes. With no light it draws its emissive alone, as three.js's does.
+  - `emissiveNode()`/`emissiveNodeMut()`, a program's own node in place of emissive × emissiveIntensity.
+  - **Changed:** `Material` gains `graphVersion()`, which moves when a material's nodes change. A renderer compiles a
+    material again before its next draw once that has moved, so a material that implements `Material` answers it, 0
+    when its nodes never change.

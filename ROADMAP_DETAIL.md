@@ -154,6 +154,20 @@ natively. The library's own `examples/cube` is the same scene without an engine.
   Red first against a stub, 12 of the 15 new cases failing; the three that passed held what was already so. 166 cases
   on each golden leg, 161 in Edge. 26 of 26 mutations caught (kyoten's `.scratch/gfx1-part3/step2/`), after the drawn
   cases were sharpened to hold the texel's alpha. Next, part 3's third part: the lights.
+- **Decided on 2026-11-16, part 3's third part, its three questions** (kyoten's `docs/design/rendering.md` § Decided),
+  each as recommended:
+  1. the scene's lights reach a shader as data: each frame the renderer writes the directional lights to a storage
+     buffer of any length in the frame's group, each its direction and colour × intensity, and the ambient lights'
+     sum, so adding, removing, moving or dimming a light compiles nothing and nothing is capped. three.js compiles every
+     lit material again for a new set of lights; Bevy and Godot cap the directional lights at 10 and 8;
+  2. the direct light's multi-scattering compensation reads three.js r187's 16 × 16 RG16F DFG table, made once a device
+     and read through a texture-sample node, so the wants stay three.js's numbers. The table is three.js's data, so the
+     package carries three.js's MIT notice;
+  3. a `DirectionalLight` points from its world position to `target()`, a point in world space (the origin by default),
+     with no object to add to the scene; its default position is (0, 1, 0), as three.js's.
+
+  Built depth-first: the texture node and the table, then the lights as scene nodes and their buffer, then the direct
+  and ambient terms with `colorNode`, `roughnessNode` and `metalnessNode`, then the lit box's golden.
 - **Done:**
   - `examples/cube` draws from one source on both legs;
   - its golden passes on a software GPU on each leg CI has, and perceptually on the reference machines present;

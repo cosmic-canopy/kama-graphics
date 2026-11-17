@@ -234,6 +234,33 @@ else
             fi
         done <<< "$browsers"
         [ "$cft" = 1 ] || echo "skip no Chrome for Testing pinned under ~/browsers, so no leg compared SwiftShader's goldens"
+
+        # A leg whose device never opens ends as a failed run that says why, with its last lines, never a panic: a browser
+        # that offers no fallback adapter (Edge, an installed Chrome) asked for WARP refuses the adapter, so no device opens.
+        echo
+        echo "== a leg whose device never opens fails cleanly, saying why"
+        bare=""
+        while IFS= read -r browser; do
+            if [ -z "$(runGolden "$browser")" ]; then bare="$browser"; break; fi
+        done <<< "$browsers"
+        if [ -z "$bare" ]; then
+            echo "skip no browser that offers no fallback adapter (Edge or Chrome installed)"
+        else
+            runKama "$bare" warp tests/out/no-device.log debug > /dev/null && code=0 || code=$?
+            if [ "$code" != 0 ] \
+                    && grep -q '^FAIL an adapter for the GPU cases: refused: ' tests/out/no-device.log \
+                    && grep -qx 'FAIL a device for the GPU cases: none was opened, so no GPU case ran' tests/out/no-device.log \
+                    && grep -qx 'goldens: 0 declared, 0 matched, on warp' tests/out/no-device.log \
+                    && grep -q '^graphics tests: [0-9]* cases, [0-9]* failed$' tests/out/no-device.log \
+                    && ! grep -qx 'gpu cases: all run' tests/out/no-device.log \
+                    && ! grep -q '^golden-png ' tests/out/no-device.log; then
+                echo "ok   ${bare##*[/\\]} asked for WARP opens no device, and the run fails saying so, with its last lines"
+            else
+                grep -E '^FAIL|^goldens:|^graphics tests:|^gpu cases|panic' tests/out/no-device.log | cut -c1-160 | tail -8
+                echo "FAIL ${bare##*[/\\]} asked for WARP: the run's status is $code, or it did not end saying why with its last lines"
+                failed=1
+            fi
+        fi
     else
         echo "skip no browser for kama run (Edge or Chrome installed, Firefox or Chrome for Testing pinned under ~/browsers; or set KAMA_BROWSER)"
     fi

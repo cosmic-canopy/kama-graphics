@@ -438,6 +438,8 @@ It is 240 cases on each leg that names a software GPU, and 235 in Edge, whose le
   - `tools/update-goldens.sh`, run on purpose, writes those lines. It refuses when the legs of one GPU disagree.
   - The gate holds every leg that names a GPU to declaring and matching every golden there is for it. It holds every
     leg, whether it names a GPU or not, to running its GPU cases to the end (`gpu cases: all run`).
+  - A leg whose device never opens fails saying why, with its last lines, never a panic: the gate asks a browser that
+    offers no fallback adapter (Edge, or an installed Chrome) for WARP.
   - Natively, a run naming a GPU the harness does not know fails. So does a run naming SwiftShader on WARP, which
     compares no golden and prints no frame, so WARP's frames are never written as SwiftShader's.
 - **The harness, with no GPU:** frames made in memory, held to goldens made in memory. That covers:

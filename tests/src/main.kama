@@ -53,6 +53,10 @@ unsafe fn string goldenArgument() {
     return "";
 }
 
+// The stage that finishes the run: the last GPU case's step moves to it, and so does a leg whose device never opened,
+// named once so that a stage added before it cannot leave either pointing at a step that needs the device.
+comptime int32 DONE = 10;
+
 type resource Check implements App {
     int32 runs = 0;
     int32 failures = 0;
@@ -60,7 +64,7 @@ type resource Check implements App {
     int32 declared = 0;
     int32 matched = 0;
     int32 stage = 0;     // 0 the device, 1 the scene, 2 the renderer, 3 the boxes, 4 the shaders, 5 the normals,
-                         // 6 the standard material, 7 the DFG table, 8 the lights, 9 the physical model, 10 done
+                         // 6 the standard material, 7 the DFG table, 8 the lights, 9 the physical model, DONE
     Optional<GpuOpen> opening = Optional::None;
     Optional<Device> device = Optional::None;
     Optional<Queue> queue = Optional::None;
@@ -132,7 +136,7 @@ type resource Check implements App {
         if (this.stage == 7) { this.dfgStep(); }
         if (this.stage == 8) { this.lightsStep(); }
         if (this.stage == 9) { this.physicalStep(); }
-        if (this.stage == 10) { return this.finish(); }
+        if (this.stage == DONE) { return this.finish(); }
         return 1;
     }
 
@@ -150,7 +154,7 @@ type resource Check implements App {
         this.queue = pending.takeQueue();
         if (this.device.isNone() || this.queue.isNone()) {
             this.verdict(name: "a device for the GPU cases", why: "none was opened, so no GPU case ran");
-            this.stage = 9;
+            this.stage = DONE;
             return;
         }
         this.stage = 1;
@@ -289,7 +293,7 @@ type resource Check implements App {
         this.queue = Optional::None;
         this.device = Optional::None;
         println(s: "gpu cases: all run");
-        this.stage = 10;
+        this.stage = DONE;
     }
 
     // A handle of its own to the one device, and to its queue: a copy is another reference to the same one.

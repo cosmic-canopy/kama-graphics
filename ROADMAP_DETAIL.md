@@ -270,6 +270,30 @@ natively. The library's own `examples/cube` is the same scene without an engine.
   Settled under the design's prepass, and reported: the main pass tests depth Equal with writes off, the position
   `@invariant` in both passes. Part 4 starts with two checks: that naga and Tint honour `@invariant`, and that Blender's
   AgX formulas match its table within a step.
+- **Decided on 2026-11-17, at the thirty-fourth session** (kyoten's `docs/design/rendering.md` § Decided):
+  - tone mapping is on each camera, beside its exposure, Blender's AgX by default; the anti-aliasing method stays on the
+    renderer, which the presets set;
+  - check 1 passed: on every leg a depth prepass and an Equal shaded pass shade exactly the texels one pass does, and
+    naga and Tint write the marker (`precise`, SPIR-V's `Invariant`);
+  - check 2 failed as worded: the 2023 generator, ported, reproduces all 185,193 entries of Blender 5.3's table, but
+    Blender shows the table interpolated, up to 22 steps from the formulas. So the renderer makes the 57³ table from the
+    formulas and samples it as OpenColorIO does, and the generator, which declares no licence, is credited while a
+    licence is asked for; the first publish waits on the answer.
+- **Built, part 4's step 1, the depth prepass** (2026-11-17, [SPEC.md](SPEC.md) § The renderer and § The compiler):
+  - each material's pipeline has a depth-only twin, its own vertex stage with no fragment stage, culling the same faces;
+  - `render` gathers its draws once, draws them into depth (cleared to 0, Greater, writes on), then shades them with the
+    depth tested Equal and read only;
+  - the clip position is `@invariant`;
+  - `info()` counts both passes' draws, as three.js counts a shadow pass's.
+
+  **Settled, and reported:** the prepass reuses each material's own vertex stage; `info()` counts both passes.
+
+  Red first: the WGSL cases against a compiler writing no `@invariant`, and `info()`'s against one pass's count, 19 of
+  267 failing. Every golden is the same bytes. 267 cases natively, in Firefox and in Chrome for Testing, 259 in Edge, each
+  debug and release. 12 of 13 mutations caught (kyoten's `.scratch/s34/kg-tools/list1.py`). A camera inside a room seeing
+  a box outside it is new, and alone catches a prepass that culls nothing. The 13th, the shaded pass testing GreaterEqual,
+  is equivalent: after a full prepass no fragment is nearer than the depth kept, so the two tests take the same
+  fragments (Bevy keeps GreaterEqual).
 - **Done:**
   - `examples/cube` draws from one source on both legs;
   - its golden passes on a software GPU on each leg CI has, and perceptually on the reference machines present;

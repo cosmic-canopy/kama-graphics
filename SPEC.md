@@ -72,18 +72,27 @@ a resource the program owns.
   question 4; part 2):
   - the scene's walk makes the world matrices that changed and writes its meshes' records and its lights' slots (§ The
     scene graph);
-  - the target is cleared to the clear colour and its depth to 0, since depth is reversed: near is 1, far is 0, and a
-    fragment is kept where it is greater (GFX-1's question 1);
-  - each mesh is one draw, of its geometry's triangles, with back faces not drawn (three.js's `FrontSide`), its vertex
-    shader reading its world matrix and normal matrix from the scene's records by its instance index, and each vertex's
-    position and normal from the geometry's buffers;
+  - **a depth prepass draws every mesh into depth first** (kyoten's rendering.md § Decided, area 3 and GFX-1's part 4):
+    the depth is cleared to 0, since depth is reversed (near is 1, far is 0, GFX-1's question 1), and each mesh keeps its
+    nearest depth, the greater. Each material's pipeline has a depth-only twin, its own vertex stage with no fragment
+    stage, culling the same faces;
+  - **then the shaded pass clears the colour to the clear colour and shades each mesh where its depth is what the
+    prepass kept,** the depth tested Equal and read only, so each texel is shaded once, as Godot's Forward+. The clip
+    position is `@invariant` (§ The compiler), so both passes compute it bit for bit: naga and Tint write it as HLSL's
+    `precise` and SPIR-V's `Invariant`, and a prepass and a shaded pass shade exactly the texels one pass does on every
+    leg (kyoten's part 4 check 1);
+  - each mesh is one draw in each pass, of its geometry's triangles, with back faces not drawn (three.js's `FrontSide`),
+    its vertex shader reading its world matrix and normal matrix from the scene's records by its instance index, and
+    each vertex's position and normal from the geometry's buffers;
   - a mirrored mesh, whose world matrix's 3x3 has a negative determinant, is drawn with its winding flipped, as three.js
-    r187 flips it (`WebGPUPipelineUtils.js`), so its front faces stay its front. Its pipeline is its material's
-    other one;
+    r187 flips it (`WebGPUPipelineUtils.js`), so its front faces stay its front. Its pipelines are its material's
+    other ones;
   - sorting draws, and drawing a geometry and material in common as one instanced draw, come with automatic instancing
     (GFX-2).
-- **`info()` says what the last render did,** as three.js's `renderer.info`: `calls`, `triangles`, `objects` (the meshes
-  the scene holds a record for) and `matrices` (the world matrices its walk made: 0 when nothing in the scene changed).
+- **`info()` says what the last render did,** as three.js's `renderer.info`: `calls` and `triangles`, every draw of the
+  scene's meshes the GPU was asked for, both passes' (a mesh is two calls, as three.js counts a shadow pass's draws),
+  `objects` (the meshes the scene holds a record for) and `matrices` (the world matrices its walk made: 0 when nothing in
+  the scene changed).
 - **A renderer makes three.js r187's DFG table once** (part 3's third part, question 2): `dfgTable()`, 16 x 16 texels of
   two half floats, a surface's specular scale and bias, written as they are into an RG16Float texture and read through a
   linear sampler that clamps to the edge, as r187's. Each frame binds them in group 0 (§ The compiler). The table is
@@ -351,7 +360,9 @@ the material's nodes: `vertexPosition(node:)` and `fragmentColor(node:)`, as TSL
     multiple of 16 and never empty.
   - A material's nodes read a setting with `uniformFloat(name:)` and `uniformVec3(name:)`.
 - **each typed function the stages reach, once, its callees first;**
-- **the varyings,** one location each, in the order the fragment stage reads them;
+- **the varyings,** one location each, in the order the fragment stage reads them, after the clip position, which is
+  `@invariant`: the depth prepass runs the vertex stage with no fragment stage, and the shaded pass tests Equal against
+  what it wrote (§ The renderer);
 - **the two entry points,** `vs` and `fs`:
   - a material that sets no vertex position has every mesh's: the view-projection, times the world matrix, times the
     vertex;
@@ -516,7 +527,9 @@ It is 266 cases on each leg that names a software GPU, and 258 in Edge, whose le
   - the mesh that draws has a material whose vertex stage reads one of its settings, and it draws with no WebGPU
     error;
   - a mirrored box drawn from outside only: a camera inside it sees the backdrop, and a box not mirrored beside it,
-    drawn first by the same renderer with the same WGSL, needs a pipeline of its own; seen from outside, it shows.
+    drawn first by the same renderer with the same WGSL, needs a pipeline of its own; seen from outside, it shows;
+  - a camera inside a room, a box not mirrored, seeing a box outside it through the walls it does not draw, which a depth
+    prepass that wrote them would hide (part 4).
 - **Part 3's second part, with no GPU** (`tests/src/nodes.kama`): `normalWorld()` and `positionWorld()` spelled, two
   reads of the normal sharing one varying, and two varyings alike but for their operator kept apart; the normal matrix
   refused in the fragment stage; `Mat3Node`'s type and operators; and `normal` and `mat3x3f` refused as names.

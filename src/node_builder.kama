@@ -702,7 +702,9 @@ type resource NodeBuilder {
             written = written + "};\n@group(1) @binding(0) var<uniform> material: Material;\n";
         }
         written = written + this.functions;
-        written = written + "struct Varyings {\n  @builtin(position) clip: vec4f,\n" + varyingFields + "};\n";
+        // the clip position @invariant: the depth prepass runs this vertex stage with no fragment stage, and the main pass
+        // tests Equal against what it wrote, so both must compute it bit for bit (kyoten's rendering.md § Decided, part 4)
+        written = written + "struct Varyings {\n  @builtin(position) @invariant clip: vec4f,\n" + varyingFields + "};\n";
         written = written + "@vertex fn vs(@builtin(instance_index) object: u32, @location(0) position: vec3f, @location(1) normal: vec3f) -> Varyings {\n"
             + "  var v: Varyings;\n" + vertLets + vertLoop + vertRest + "  v.clip = " + vertOut + ";\n" + varyingWrites
             + "  return v;\n}\n";

@@ -9,9 +9,11 @@
 // @kama/gpu's are, and the poll moves the device on itself, so a program never polls the device.
 //
 // `render(scene:, camera:)` draws a scene as three.js's does (part 2): the scene's walk makes the world matrices that
-// changed and writes its meshes' records; the camera's target is cleared to the clear colour and its depth to 0, since
-// depth is reversed (GFX-1's question 1: near 1, far 0, the test Greater); and each mesh is one draw, reading its record
-// by its instance index. Sorting draws and drawing a mesh and material in common as one instanced draw come with
+// changed and writes its meshes' records. Then two passes over the same draws (kyoten's rendering.md § Decided, area 3
+// and part 4): a depth prepass, the depth cleared to 0 since depth is reversed (GFX-1's question 1: near 1, far 0, the
+// test Greater), keeps each texel's nearest depth; and the shaded pass clears the colour to the clear colour and shades
+// each mesh where its depth equals the prepass's, so each texel is shaded once. Each mesh is one draw a pass, reading its
+// record by its instance index. Sorting draws and drawing a mesh and material in common as one instanced draw come with
 // automatic instancing (GFX-2). `info()` says what the last render did, as three.js's `renderer.info`.
 //
 // The scene's lights reach every material as data in the frame's group (kyoten's rendering.md § Decided, GFX-1's part
@@ -32,7 +34,7 @@ import {
     gpu::Device, gpu::Queue, gpu::GpuError, gpu::Texture, gpu::TextureView, gpu::TextureViewDescriptor, gpu::TextureFormat,
     gpu::Buffer, gpu::BufferDescriptor, gpu::BufferUsage, gpu::BufferRead, gpu::ReadStatus, gpu::BufferBinding,
     gpu::CommandEncoder, gpu::CommandBuffer, gpu::RenderPass, gpu::RenderPassDescriptor, gpu::ColorAttachment,
-    gpu::DepthStencilAttachment, gpu::Color as GpuColor,
+    gpu::DepthStencilAttachment, gpu::DepthAccess, gpu::IndexFormat, gpu::Color as GpuColor,
     gpu::ShaderModule, gpu::ShaderModuleDescriptor, gpu::ShaderStage,
     gpu::BindGroupLayout, gpu::BindGroupLayoutDescriptor, gpu::BindingLayout, gpu::BufferBindingLayout,
     gpu::BufferBindingType, gpu::BindGroup, gpu::BindGroupDescriptor, gpu::BindingResource,
@@ -65,6 +67,37 @@ fn void putFloat(ref DynamicArray<uint8> into, float32 value) {
     into.add(item: truncate<uint8>(bits >> 8));
     into.add(item: truncate<uint8>(bits >> 16));
     into.add(item: truncate<uint8>(bits >> 24));
+}
+
+// The vertex stage of every pipeline a material's WGSL makes: its `vs`, the geometry's positions at location 0 and its
+// normals at 1. The shaded pass and the depth prepass run the same one, so the clip position is computed alike.
+fn VertexState meshVertex(ShaderModule shader) {
+    VertexBufferLayout positions = VertexBufferLayout.make(arrayStride: 12);
+    positions.attribute(format: VertexFormat::Float32x3, offset: 0, shaderLocation: 0);
+    VertexBufferLayout normals = VertexBufferLayout.make(arrayStride: 12);
+    normals.attribute(format: VertexFormat::Float32x3, offset: 0, shaderLocation: 1);
+    VertexState vertex = VertexState.make(module: give shader, entryPoint: "vs");
+    vertex.buffer(layout: give positions);
+    vertex.buffer(layout: give normals);
+    return vertex;
+}
+
+// One pass's draws, the depth prepass's or the shaded pass's: each mesh `render` gathered, with its pipeline in
+// `pipelines`, its material's group, its geometry's buffers, and its record by its instance index.
+unsafe fn void drawEach(ref RenderPass pass, const ref DynamicArray<RenderPipeline> pipelines, const ref DynamicArray<isize> chosen,
+                        const ref DynamicArray<BindGroup> looks, const ref DynamicArray<Buffer> positions,
+                        const ref DynamicArray<Buffer> normals, const ref DynamicArray<Buffer> indices,
+                        const ref DynamicArray<IndexFormat> formats, const ref DynamicArray<uint32> counts,
+                        const ref DynamicArray<uint32> slots) {
+    isize bound = -1;
+    for (isize i = 0; i < chosen.length(); i = i + 1) {
+        if (chosen[i] != bound) { pass.setPipeline(pipeline: pipelines[chosen[i]]); bound = chosen[i]; }
+        pass.setBindGroup(index: 1, group: looks[i]);
+        pass.setVertexBuffer(slot: 0, binding: BufferBinding.whole(buffer: copy positions[i]));
+        pass.setVertexBuffer(slot: 1, binding: BufferBinding.whole(buffer: copy normals[i]));
+        pass.setIndexBuffer(binding: BufferBinding.whole(buffer: copy indices[i]), format: formats[i]);
+        pass.drawIndexed(indexCount: counts[i], instanceCount: 1, firstIndex: 0, baseVertex: 0, firstInstance: slots[i]);
+    }
 }
 
 // The most misuses a renderer keeps until `takeErrors()` drains them, as @kama/gpu's channel keeps 64.
@@ -137,6 +170,7 @@ type resource Renderer {
     DynamicArray<string> sources;     // the pipelines made, by the WGSL they run
     DynamicArray<bool> flipped;       // ...and whether they draw mirrored meshes, whose front faces wind clockwise
     DynamicArray<RenderPipeline> pipelines;
+    DynamicArray<RenderPipeline> prepasses;     // ...and each one's depth-only twin, for the depth prepass
     RenderInfo last = RenderInfo.of(calls: 0, triangles: 0, objects: 0, matrices: 0);
     bool printing = true;                       // printErrors
     DynamicArray<GraphicsErrorReport> errors;   // the misuses refused since the last takeErrors, at most KEPT
@@ -199,6 +233,7 @@ type resource Renderer {
         this.sources = DynamicArray.empty();
         this.flipped = DynamicArray.empty();
         this.pipelines = DynamicArray.empty();
+        this.prepasses = DynamicArray.empty();
         this.errors = DynamicArray.empty();
         this.device = give device;
         this.queue = give queue;
@@ -261,7 +296,8 @@ type resource Renderer {
         this.queue.submit(commands: give commands);
     }
 
-    // The pipeline that runs `source`, a material's WGSL, for a mirrored mesh or not, made the first time.
+    // The pipelines that run `source`, a material's WGSL, for a mirrored mesh or not, made the first time: the shaded one,
+    // and its depth-only twin for the depth prepass, each culling the same faces.
     unsafe fn isize pipelineFor(const ref string source, bool mirrored) {
         for (isize i = 0; i < this.sources.length(); i = i + 1) {
             if (this.sources[i] == source && this.flipped[i] == mirrored) { return i; }
@@ -269,26 +305,31 @@ type resource Renderer {
         ShaderModuleDescriptor described = ShaderModuleDescriptor.make(wgsl: copy source);
         described.label(text: "a material's shader");
         ShaderModule shader = this.device.createShaderModule(descriptor: give described);
-        VertexBufferLayout positions = VertexBufferLayout.make(arrayStride: 12);
-        positions.attribute(format: VertexFormat::Float32x3, offset: 0, shaderLocation: 0);
-        VertexBufferLayout normals = VertexBufferLayout.make(arrayStride: 12);
-        normals.attribute(format: VertexFormat::Float32x3, offset: 0, shaderLocation: 1);
-        VertexState vertex = VertexState.make(module: copy shader, entryPoint: "vs");
-        vertex.buffer(layout: give positions);
-        vertex.buffer(layout: give normals);
         FragmentState fragment = FragmentState.make(module: copy shader, entryPoint: "fs");
         fragment.target(state: ColorTargetState.make(format: TextureFormat::RGBA8UnormSrgb));
         RenderPipelineDescriptor pipeline = RenderPipelineDescriptor.make(layout: Layout::Explicit(layout: copy this.layout),
-                                                                          vertex: give vertex);
+                                                                          vertex: meshVertex(shader: copy shader));
         pipeline.fragment(state: give fragment);
         pipeline.primitiveMut().cullMode = CullMode::Back;   // three.js's FrontSide: front faces wind counter-clockwise,
         if (mirrored) { pipeline.primitiveMut().frontFace = FrontFace::CW; }   // and clockwise on a mirrored mesh
-        pipeline.depthStencil(state: DepthStencilState.make(format: TextureFormat::Depth32Float, depthWriteEnabled: true,
-                                                            depthCompare: CompareFunction::Greater));
+        // shaded where the prepass left this fragment's own depth, the nearest, so each texel is shaded once: Equal, as
+        // Godot's Forward+ (kyoten's rendering.md § Decided, part 4), which `@invariant` on the clip position makes exact
+        pipeline.depthStencil(state: DepthStencilState.make(format: TextureFormat::Depth32Float, depthWriteEnabled: false,
+                                                            depthCompare: CompareFunction::Equal));
         pipeline.label(text: "a mesh");
+        // the depth prepass: the same vertex stage and culling, no fragment stage, the nearest depth kept (reversed: the
+        // greater)
+        RenderPipelineDescriptor depthOnly = RenderPipelineDescriptor.make(layout: Layout::Explicit(layout: copy this.layout),
+                                                                           vertex: meshVertex(shader: give shader));
+        depthOnly.primitiveMut().cullMode = CullMode::Back;
+        if (mirrored) { depthOnly.primitiveMut().frontFace = FrontFace::CW; }
+        depthOnly.depthStencil(state: DepthStencilState.make(format: TextureFormat::Depth32Float, depthWriteEnabled: true,
+                                                             depthCompare: CompareFunction::Greater));
+        depthOnly.label(text: "a mesh's depth");
         this.sources.add(item: copy source);
         this.flipped.add(item: mirrored);
         this.pipelines.add(item: this.device.createRenderPipeline(descriptor: give pipeline));
+        this.prepasses.add(item: this.device.createRenderPipeline(descriptor: give depthOnly));
         return this.pipelines.length() - 1;
     }
 
@@ -366,18 +407,17 @@ type resource Renderer {
         bound.label(text: "the frame, the object records, the DFG table and the lights");
         BindGroup frameGroup = this.device.createBindGroup(descriptor: give bound);
 
-        RenderPassDescriptor pass = RenderPassDescriptor.make();
-        pass.color(attachment: ColorAttachment.clearing(view: colour.createView(descriptor: TextureViewDescriptor.make()),
-                                                        color: this.clearing()));
-        pass.depthStencil(attachment: DepthStencilAttachment.clearingDepth(view: depth.createView(descriptor: TextureViewDescriptor.make()),
-                                                                          value: 0.0));
-        pass.label(text: "a scene");
-        CommandEncoder encoder = this.device.createCommandEncoder();
-        RenderPass rp = encoder.beginRenderPass(descriptor: give pass);
-        rp.setBindGroup(index: 0, group: frameGroup);
-        int32 calls = 0;
+        // Each mesh's draw, gathered once: its material compiled and its pipelines made the first time, its settings and
+        // buffers written when they changed. The depth prepass and the shaded pass then draw the same list.
+        DynamicArray<isize> chosen = DynamicArray.empty();
+        DynamicArray<BindGroup> looks = DynamicArray.empty();
+        DynamicArray<Buffer> positionsOf = DynamicArray.empty();
+        DynamicArray<Buffer> normalsOf = DynamicArray.empty();
+        DynamicArray<Buffer> indicesOf = DynamicArray.empty();
+        DynamicArray<IndexFormat> formats = DynamicArray.empty();
+        DynamicArray<uint32> counts = DynamicArray.empty();
+        DynamicArray<uint32> drawn = DynamicArray.empty();
         int32 triangles = 0;
-        isize bound2 = -1;
         DynamicArray<isize> slots = scene.drawSlots();
         for (isize i = 0; i < slots.length(); i = i + 1) {
             isize slot = slots[i];
@@ -388,33 +428,55 @@ type resource Renderer {
             DynamicArray<string> refused = material.gpuMut().refused();
             if (refused.length() > 0) { continue; }
             string source = material.gpuMut().source();
-            isize p = this.pipelineFor(source: source, mirrored: scene.mirroredAt(slot: slot));
-            if (p != bound2) { rp.setPipeline(pipeline: this.pipelines[p]); bound2 = p; }
+            chosen.add(item: this.pipelineFor(source: source, mirrored: scene.mirroredAt(slot: slot)));
             DynamicArray<uint8> settings = DynamicArray.empty();
             if (material.gpuMut().staleOn(device: this.device, version: material.version())) {
                 MaterialSettings declared = MaterialSettings.make();
                 material.settings(into: ref declared);
                 settings = declared.bytes();
             }
-            BindGroup look = material.gpuMut().groupOn(device: ref this.device, queue: ref this.queue, layout: this.materialLayout,
-                                                       settings: settings, version: material.version());
-            rp.setBindGroup(index: 1, group: look);
-            Buffer positions = geometry.buffersMut().positionsOn(device: ref this.device, queue: ref this.queue);
-            Buffer indices = geometry.buffersMut().indicesOn(device: ref this.device, queue: ref this.queue);
-            rp.setVertexBuffer(slot: 0, binding: BufferBinding.whole(buffer: give positions));
-            Buffer normals = geometry.buffersMut().normalsOn(device: ref this.device, queue: ref this.queue);
-            rp.setVertexBuffer(slot: 1, binding: BufferBinding.whole(buffer: give normals));
-            rp.setIndexBuffer(binding: BufferBinding.whole(buffer: give indices), format: geometry.buffers().indexFormat());
+            looks.add(item: material.gpuMut().groupOn(device: ref this.device, queue: ref this.queue, layout: this.materialLayout,
+                                                      settings: settings, version: material.version()));
+            positionsOf.add(item: geometry.buffersMut().positionsOn(device: ref this.device, queue: ref this.queue));
+            normalsOf.add(item: geometry.buffersMut().normalsOn(device: ref this.device, queue: ref this.queue));
+            indicesOf.add(item: geometry.buffersMut().indicesOn(device: ref this.device, queue: ref this.queue));
+            formats.add(item: geometry.buffers().indexFormat());
             isize count = geometry.buffers().indexCount();
-            rp.drawIndexed(indexCount: cast<uint32>(count), instanceCount: 1, firstIndex: 0, baseVertex: 0,
-                           firstInstance: cast<uint32>(slot));
-            calls = calls + 1;
+            counts.add(item: cast<uint32>(count));
+            drawn.add(item: cast<uint32>(slot));
             triangles = triangles + cast<int32>(count / 3);
         }
+
+        CommandEncoder encoder = this.device.createCommandEncoder();
+        // the depth prepass (kyoten's rendering.md § Decided, area 3; part 4): every mesh's nearest depth, cleared to 0
+        // first since depth is reversed, so the shaded pass shades each texel once
+        RenderPassDescriptor depthPass = RenderPassDescriptor.make();
+        depthPass.depthStencil(attachment: DepthStencilAttachment.clearingDepth(view: depth.createView(descriptor: TextureViewDescriptor.make()),
+                                                                               value: 0.0));
+        depthPass.label(text: "a scene's depth");
+        RenderPass dp = encoder.beginRenderPass(descriptor: give depthPass);
+        dp.setBindGroup(index: 0, group: frameGroup);
+        drawEach(pass: ref dp, pipelines: this.prepasses, chosen: chosen, looks: looks, positions: positionsOf,
+                 normals: normalsOf, indices: indicesOf, formats: formats, counts: counts, slots: drawn);
+        give dp.end();
+        // the shaded pass: the colour cleared, the prepass's depth read and never written
+        RenderPassDescriptor pass = RenderPassDescriptor.make();
+        pass.color(attachment: ColorAttachment.clearing(view: colour.createView(descriptor: TextureViewDescriptor.make()),
+                                                        color: this.clearing()));
+        DepthStencilAttachment tested = DepthStencilAttachment.make(view: depth.createView(descriptor: TextureViewDescriptor.make()));
+        tested.depth(access: DepthAccess::ReadOnly);
+        pass.depthStencil(attachment: give tested);
+        pass.label(text: "a scene");
+        RenderPass rp = encoder.beginRenderPass(descriptor: give pass);
+        rp.setBindGroup(index: 0, group: frameGroup);
+        drawEach(pass: ref rp, pipelines: this.pipelines, chosen: chosen, looks: looks, positions: positionsOf,
+                 normals: normalsOf, indices: indicesOf, formats: formats, counts: counts, slots: drawn);
         give rp.end();
         CommandBuffer commands = give encoder.finish();
         this.queue.submit(commands: give commands);
-        this.last = RenderInfo.of(calls: calls, triangles: triangles, objects: objects, matrices: made);
+        // every draw the GPU was asked for, both passes', as three.js's `renderer.info` counts a shadow pass's
+        int32 calls = cast<int32>(chosen.length()) * 2;
+        this.last = RenderInfo.of(calls: calls, triangles: triangles * 2, objects: objects, matrices: made);
     }
 
     // Start reading the target back, as three.js's `readRenderTargetPixelsAsync`: poll the read until it hands back its

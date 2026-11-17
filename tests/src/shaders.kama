@@ -5,7 +5,9 @@
 // - **a material whose compile is refused** draws nothing, beside a mesh that draws: the renderer reports it once, as
 //   `GraphicsErrorKind::Material`, printed, and never compiles it again;
 // - **a mirrored mesh** (a world matrix with a negative determinant) is drawn from outside only, as three.js r187 flips
-//   its winding (`WebGPUPipelineUtils.js`): a camera inside a mirrored box sees the backdrop, one outside sees the box.
+//   its winding (`WebGPUPipelineUtils.js`): a camera inside a mirrored box sees the backdrop, one outside sees the box;
+// - **the depth prepass culls as the shaded pass does** (part 4): a camera inside a room sees a box outside it through
+//   the walls it does not draw.
 
 import {
     core::println,
@@ -143,7 +145,7 @@ type resource ShaderRun {
         r.render(scene: copy s, camera: copy cam);
         RenderInfo first = r.info();
         this.found.add(name: "render: a mesh whose material is refused draws nothing, and the mesh beside it draws",
-                       why: infoIs(got: first, calls: 1, triangles: 12, objects: 2));
+                       why: infoIs(got: first, calls: 2, triangles: 24, objects: 2));
         DeviceErrors errs = this.device.takeErrors();
         isize nerr = errs.reports().length();
         string firstError = nerr > 0 ? errs.reports()[0].message() : "";
@@ -164,7 +166,7 @@ type resource ShaderRun {
         RenderInfo second = r.info();
         RendererErrors again = r.takeErrors();
         bool quiet = again.isEmpty();
-        string still = infoIs(got: second, calls: 1, triangles: 12, objects: 2);
+        string still = infoIs(got: second, calls: 2, triangles: 24, objects: 2);
         this.found.add(name: "render: a refused material is not compiled or reported again, and still draws nothing",
                        why: quiet && still.isEmpty() ? "" : "a second report, or " + still);
     }
@@ -196,6 +198,33 @@ type resource ShaderRun {
             s.add(object: plain);
         }
         s.add(object: m);
+        r.render(scene: copy s, camera: copy cam);
+        this.reading = Optional::Some(value: r.readRenderTargetPixels(target: copy t));
+        this.mirrorRenderer = Optional::Some(value: give r);
+        this.began = monotonicNow();
+    }
+
+    // A camera inside a room, a box 4 metres across not mirrored, whose walls it sees from behind, so none is drawn, and
+    // a #cc3333 box 1 metre across outside the room, 5 metres ahead, about 30 texels: the box is seen through the walls.
+    // A depth prepass that wrote the walls it does not shade would hide it.
+    unsafe fn void renderThroughRoom() {
+        Renderer r = Renderer.withDevice(device: copy this.device, queue: copy this.queue);
+        r.clearColorMut() = Color.fromHex(hex: 0x202020);
+        Shared<RenderTarget> t = new RenderTarget.make(width: 32, height: 24);
+        Shared<PerspectiveCamera> cam = new PerspectiveCamera.make(fovRad: radians(deg: 50.0), aspect: 32.0 / 24.0, near: 0.1, far: 100.0);
+        cam.targetMut() = Optional::Some(value: copy t);
+        Shared<Scene> s = new Scene.make();
+        Shared<BoxGeometry> walls = new BoxGeometry.make(width: 4.0, height: 4.0, depth: 4.0);
+        Shared<MeshBasicMaterial> grey = new MeshBasicMaterial.make();
+        grey.colorMut() = Color.fromHex(hex: 0x808080);
+        Shared<Mesh> room = new Mesh.make(geometry: walls, material: grey);
+        Shared<BoxGeometry> box = new BoxGeometry.make(width: 1.0, height: 1.0, depth: 1.0);
+        Shared<MeshBasicMaterial> look = new MeshBasicMaterial.make();
+        look.colorMut() = Color.fromHex(hex: 0xcc3333);
+        Shared<Mesh> outside = new Mesh.make(geometry: box, material: look);
+        outside.positionMut() = Vec3.of(x: 0.0, y: 0.0, z: -5.0);
+        s.add(object: room);
+        s.add(object: outside);
         r.render(scene: copy s, camera: copy cam);
         this.reading = Optional::Some(value: r.readRenderTargetPixels(target: copy t));
         this.mirrorRenderer = Optional::Some(value: give r);
@@ -254,7 +283,16 @@ type resource ShaderRun {
             if (shown == -1) { return false; }
             this.found.add(name: "render: a mirrored box seen from outside shows",
                            why: shown > 20 ? "" : shown == -2 ? "the read failed" : "${shown} texels show it");
+            this.renderThroughRoom();
             this.stage = 4;
+            return false;
+        }
+        if (this.stage == 4) {
+            isize shown = this.boxTexels();
+            if (shown == -1) { return false; }
+            this.found.add(name: "render: a camera inside a room sees a box outside it through the walls it does not draw",
+                           why: shown > 10 ? "" : shown == -2 ? "the read failed" : "${shown} texels show the box");
+            this.stage = 5;
         }
         return true;
     }

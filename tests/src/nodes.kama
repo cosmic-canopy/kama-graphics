@@ -24,7 +24,7 @@ fn string prelude() {
 }
 // Every mesh's vertex stage, with no varying.
 fn string standardVertex() {
-    return "struct Varyings {\n  @builtin(position) clip: vec4f,\n};\n"
+    return "struct Varyings {\n  @builtin(position) @invariant clip: vec4f,\n};\n"
         + "@vertex fn vs(@builtin(instance_index) object: u32, @location(0) position: vec3f, @location(1) normal: vec3f) -> Varyings {\n"
         + "  var v: Varyings;\n"
         + "  v.clip = ((frame.viewProjection * objects[object].world) * vec4f(position, 1.0));\n"
@@ -338,7 +338,7 @@ unsafe fn void compileCases(ref Verdicts found, ref DynamicArray<ShaderCase> sha
         b.fragmentColor(node: vec4(xyz: normalWorld() + positionWorld() + normalWorld(), w: constant(value: 1.0)));
         string got = b.wgsl();
         string want = prelude()
-            + "struct Varyings {\n  @builtin(position) clip: vec4f,\n  @location(0) v0: vec3f,\n  @location(1) v1: vec3f,\n};\n"
+            + "struct Varyings {\n  @builtin(position) @invariant clip: vec4f,\n  @location(0) v0: vec3f,\n  @location(1) v1: vec3f,\n};\n"
             + "@vertex fn vs(@builtin(instance_index) object: u32, @location(0) position: vec3f, @location(1) normal: vec3f) -> Varyings {\n"
             + "  var v: Varyings;\n"
             + "  v.clip = ((frame.viewProjection * objects[object].world) * vec4f(position, 1.0));\n"
@@ -378,7 +378,7 @@ unsafe fn void compileCases(ref Verdicts found, ref DynamicArray<ShaderCase> sha
         b.fragmentColor(node: vec4(xyz: mix(from: p, to: worldPos, by: shade), w: shade));
         string got = b.wgsl();
         string want = prelude()
-            + "struct Varyings {\n  @builtin(position) clip: vec4f,\n  @location(0) v0: vec3f,\n  @location(1) v1: vec3f,\n};\n"
+            + "struct Varyings {\n  @builtin(position) @invariant clip: vec4f,\n  @location(0) v0: vec3f,\n  @location(1) v1: vec3f,\n};\n"
             + "@vertex fn vs(@builtin(instance_index) object: u32, @location(0) position: vec3f, @location(1) normal: vec3f) -> Varyings {\n"
             + "  var v: Varyings;\n"
             + "  v.clip = ((frame.viewProjection * objects[object].world) * vec4f(position, 1.0));\n"
@@ -399,7 +399,7 @@ unsafe fn void compileCases(ref Verdicts found, ref DynamicArray<ShaderCase> sha
         b.fragmentColor(node: vec4(xyz: worldPos, w: constant(value: 1.0)));
         string got = b.wgsl();
         string want = prelude()
-            + "struct Varyings {\n  @builtin(position) clip: vec4f,\n  @location(0) v0: vec3f,\n};\n"
+            + "struct Varyings {\n  @builtin(position) @invariant clip: vec4f,\n  @location(0) v0: vec3f,\n};\n"
             + "@vertex fn vs(@builtin(instance_index) object: u32, @location(0) position: vec3f, @location(1) normal: vec3f) -> Varyings {\n"
             + "  var v: Varyings;\n"
             + "  let n0 = (objects[object].world * vec4f(position, 1.0));\n"

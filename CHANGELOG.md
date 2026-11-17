@@ -118,3 +118,6 @@ package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - GFX-1's part 3, its third part, step 4, which builds part 3: the lit goldens, `light-directional`, `light-ambient` and
   `material-standard`, each held byte for byte on WARP and SwiftShader, with every face they show held to r187's
   formulas on every leg. The library's API is unchanged.
+- GFX-1's part 4, step 1: the depth prepass. Every mesh is drawn into depth first by its material's depth-only pipeline,
+  then shaded where its depth equals the prepass's, so each texel is shaded once; the clip position is `@invariant`.
+  **Changed:** `info()`'s `calls` and `triangles` count both passes' draws, as three.js counts a shadow pass's.

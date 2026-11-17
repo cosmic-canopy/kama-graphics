@@ -279,7 +279,7 @@ unsafe fn void lightCases(ref Verdicts found) {
         b.fragmentColor(node: vec4(xyz: lit(model: ref toon), w: constant(value: 1.0)));
         string all = b.wgsl();
         string want = groupZero() + theLights()
-            + "struct Varyings {\n  @builtin(position) clip: vec4f,\n  @location(0) v0: vec3f,\n};\n"
+            + "struct Varyings {\n  @builtin(position) @invariant clip: vec4f,\n  @location(0) v0: vec3f,\n};\n"
             + "@vertex fn vs(@builtin(instance_index) object: u32, @location(0) position: vec3f, @location(1) normal: vec3f) -> Varyings {\n"
             + "  var v: Varyings;\n"
             + "  v.clip = ((frame.viewProjection * objects[object].world) * vec4f(position, 1.0));\n"
@@ -310,7 +310,7 @@ unsafe fn void lightCases(ref Verdicts found) {
         b.fragmentColor(node: vec4(xyz: light, w: constant(value: 1.0)));
         string all = b.wgsl();
         string want = groupZero() + theLights()
-            + "struct Varyings {\n  @builtin(position) clip: vec4f,\n  @location(0) v0: vec3f,\n};\n"
+            + "struct Varyings {\n  @builtin(position) @invariant clip: vec4f,\n  @location(0) v0: vec3f,\n};\n"
             + "@vertex fn vs(@builtin(instance_index) object: u32, @location(0) position: vec3f, @location(1) normal: vec3f) -> Varyings {\n"
             + "  var v: Varyings;\n"
             + "  let n0 = (objects[object].normal * normal);\n"

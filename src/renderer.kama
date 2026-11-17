@@ -17,6 +17,8 @@
 // The scene's lights reach every material as data in the frame's group (kyoten's rendering.md § Decided, GFX-1's part
 // 3, the lights' question 1): the frame block carries the ambient lights' sum and how many directional lights there
 // are, and binding 4 the directional lights themselves, so adding, removing, moving or dimming a light compiles nothing.
+// The frame block carries the camera's position in world space too, which a physical model's view direction reads
+// (`cameraPosition()`), so moving the camera compiles nothing either.
 //
 // A misuse the types cannot refuse is refused and reported, never ending the program (part 2, question 4), as @kama/gpu's
 // decision 9 does below it: a camera naming no target, rendered by a renderer with no window, draws nothing. The error
@@ -69,8 +71,9 @@ fn void putFloat(ref DynamicArray<uint8> into, float32 value) {
 comptime isize KEPT = 64;
 
 // The frame block as WGSL's `Frame` lays it out: the view-projection, a mat4x4f at 0; the ambient lights' sum, a vec3f at
-// 64; the directional lights' count, a u32 at 76.
-comptime uint64 FRAME_BYTES = 80;
+// 64; the directional lights' count, a u32 at 76; the camera's position in world space, a vec3f at 80, and the struct's
+// end padded to its 16-byte alignment.
+comptime uint64 FRAME_BYTES = 96;
 
 // What kind of misuse a renderer refused. `NoTarget`: a camera naming no render target was rendered by a renderer with
 // no window to draw into. `Material`: a material's nodes were refused by its compile (node_builder.kama), so no mesh
@@ -143,7 +146,8 @@ type resource Renderer {
     // its own (`copy device`) and several renderers share one device.
     public unsafe ctor withDevice(Device device, Queue queue) {
         BindGroupLayoutDescriptor g0 = BindGroupLayoutDescriptor.make();
-        // the frame, read by both stages: the camera by the vertex stage, the ambient light and the count by a lit one
+        // the frame, read by both stages: the camera by the vertex stage, the ambient light, the count and the camera's
+        // position by a lit one, or by any stage a material reads them in
         g0.entry(binding: 0, visibility: ShaderStage::Vertex | ShaderStage::Fragment,
                  layout: BindingLayout::Buffer(layout: BufferBindingLayout.make()));
         BufferBindingLayout records = BufferBindingLayout.make();
@@ -343,6 +347,13 @@ type resource Renderer {
         frameBytes.add(item: truncate<uint8>(directional >> 8));
         frameBytes.add(item: truncate<uint8>(directional >> 16));
         frameBytes.add(item: truncate<uint8>(directional >> 24));
+        // the camera's world position, the translation of its world matrix: its parent's moves included, since the
+        // scene's walk above placed it
+        Mat4 seen = camera.matrixWorld();
+        putFloat(into: ref frameBytes, value: seen.get(c: 3, r: 0));
+        putFloat(into: ref frameBytes, value: seen.get(c: 3, r: 1));
+        putFloat(into: ref frameBytes, value: seen.get(c: 3, r: 2));
+        putFloat(into: ref frameBytes, value: 0.0);
         this.queue.writeBuffer(buffer: this.frame, offset: 0, data: frameBytes.view());
         Buffer records = scene.recordsOn(device: ref this.device, queue: ref this.queue);
         Buffer lights = scene.lightsOn(device: ref this.device, queue: ref this.queue);

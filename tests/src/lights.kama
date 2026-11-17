@@ -219,7 +219,7 @@ type resource ShowLights implements Material {
 
 // What every material is given in group 0, and the lights beside it once it reads them.
 fn string groupZero() {
-    return "struct Frame { viewProjection: mat4x4f, ambient: vec3f, directionalCount: u32 };\n"
+    return "struct Frame { viewProjection: mat4x4f, ambient: vec3f, directionalCount: u32, cameraPosition: vec3f };\n"
         + "@group(0) @binding(0) var<uniform> frame: Frame;\n"
         + "struct Object { world: mat4x4f, normal: mat3x3f };\n"
         + "@group(0) @binding(1) var<storage, read> objects: array<Object>;\n";

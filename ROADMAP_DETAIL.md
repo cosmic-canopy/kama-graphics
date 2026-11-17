@@ -200,6 +200,31 @@ natively. The library's own `examples/cube` is the same scene without an engine.
   sum not counted as depending on the light, is equivalent, since a sum read in another's term is refused either way
   (kyoten's `.scratch/s31/kg-tools/list2a.py` and `list2b.py`). Next, step 3: three.js r187's physical model on the
   contract, with `colorNode`, `roughnessNode` and `metalnessNode`.
+- **Built, part 3's third part, step 3** (2026-11-17, [SPEC.md](SPEC.md) § The renderer, § Materials, § Typed nodes and
+  § The compiler):
+  - the frame block carries the camera's position in world space (`cameraPosition()`), 96 bytes;
+  - r187's BSDFs and `getRoughness` as typed functions under its names, and `PhysicalLightingModel` on the contract;
+  - `MeshStandardMaterial` lit by it, with `colorNode`, `roughnessNode` and `metalnessNode`.
+
+  **Settled under the owner's decisions, and reported** (kyoten's `docs/design/rendering.md` § Decided):
+  - the node is TSL's `cameraPosition`, and the model lights in world space, where the lights' buffer is;
+  - `PhysicalLightingModel` is public, made from nodes, so a program's own material lights physically;
+  - r187's geometry roughness waits for the first geometry whose normals vary (GFX-2): on a flat face it is 0, and every
+    geometry here is flat-faced, so no test could hold it now.
+
+  Red first against stubs: the camera's position against a frame block without it, 15 of 246 cases failing (the
+  preludes and the drawn cases); the model and the slots against a material still drawing its emissive alone with slots
+  that moved nothing, 8 of 256 failing. Each lit case is held within a step to r187's formulas worked in float64. 259
+  cases natively and on each golden leg. 35 of 35 mutations caught (kyoten's `.scratch/s32/kg-tools/list3.py`), five
+  of them after the tests were sharpened:
+  - `F_Schlick` drawn by a program's material at a grazing `dotVH` of 0.3 and an F90 of 0.5, since a camera facing the
+    box keeps Fresnel's weight near 0, and the standard material's F90 is always 1;
+  - the lit box seen from a camera off the axis, so a view direction taken from the origin is 6 degrees off;
+  - the ambient's indirect diffuse amplified, (lit − r187's float64 value) × 128: its multiple scattering is about 0.2 %
+    of it, below the 8-bit target's step, and the DFG table's corner texel, read exactly, leaves nothing inexact to
+    amplify.
+
+  Next, step 4: the lit box's golden on WARP and SwiftShader.
 - **Done:**
   - `examples/cube` draws from one source on both legs;
   - its golden passes on a software GPU on each leg CI has, and perceptually on the reference machines present;
@@ -219,7 +244,10 @@ web-and-native question 6, 2026-11-07).
   - glTF's geometry extensions: quantized and meshopt-compressed meshes, GPU instancing, and Basis-compressed textures;
   - images decoded, KTX2 transcoded to BC, ASTC or ETC2 as the device offers, mipmaps generated, and samplers;
   - automatic instancing, `InstancedMesh` and `BatchedMesh`, bounds, CPU frustum culling and render bundles;
-  - GPU time per pass and the renderer's statistics.
+  - GPU time per pass and the renderer's statistics;
+  - r187's geometry roughness in `getRoughness`, the largest change of the normal in view space across a pixel, with the
+    view matrix in the frame block that it reads: 0 on a flat face, so it comes with the first geometry whose normals
+    vary, which a test can hold (GFX-1's part 3, its third part, step 3).
 - **It needs** `@kama/gpu`'s timestamps (GPU-6), indirect draws and render bundles (GPU-7), and texture uploads (GPU-8).
 - **Questions for when it comes up:**
   - the native image decoder, given that it reads untrusted files, and its license;

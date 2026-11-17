@@ -91,6 +91,8 @@ a resource the program owns.
   question 1). Each render writes into the frame block the ambient lights' sum and the number of directional lights, and
   binds the scene's directional lights' buffer (§ The scene graph). Adding, removing, moving, aiming, recolouring or
   dimming a light compiles nothing, and no number of lights is too many.
+- **Each render writes the camera's position in world space into the frame block too,** its parents' moves included,
+  which a physical model's view direction reads (`cameraPosition()`, § Typed nodes). Moving the camera compiles nothing.
 
 ## Misuse
 
@@ -230,10 +232,14 @@ Decided, GFX-1's part 2, question 4), as `@kama/gpu` reports every misuse of Web
     `emissive` black and `emissiveIntensity` 1.
   - Its settings are those five, in that order, in 48 bytes: `color` at 0, `roughness` at 12, `metalness` at 16,
     `emissive` at 32 and `emissiveIntensity` at 44.
-  - `emissiveNode()`/`emissiveNodeMut()`, an `Optional<Vec3Node>`, replaces emissive × emissiveIntensity with a node of
-    the program's, as three.js's `emissiveNode` does. `None` gives the values back. Setting or clearing it moves
-    `graphVersion()`.
-  - With no light it draws what three.js's draws with none: its emissive alone, opaque.
+  - Four slots replace a value with a node of the program's, as three.js's do, each an `Optional`, `None` giving the
+    value back, and setting or clearing one moving `graphVersion()`:
+    - `colorNode()`/`colorNodeMut()`, a `Vec3Node`, its diffuse colour, linear;
+    - `roughnessNode()`/`roughnessNodeMut()` and `metalnessNode()`/`metalnessNodeMut()`, each a `FloatNode`;
+    - `emissiveNode()`/`emissiveNodeMut()`, a `Vec3Node`, in place of emissive × emissiveIntensity.
+  - **It is lit by three.js r187's physical model,** `PhysicalLightingModel` (§ Typed nodes), at the surface's normal in
+    world space, plus its emissive, opaque: as r187's `MeshStandardNodeMaterial`. With no light it draws its emissive
+    alone, as three.js's does with none.
 
 ## Typed nodes
 
@@ -248,7 +254,7 @@ What a material's shader is written in (kyoten's rendering.md § Decided, GFX-1'
   expression, so a node used twice is one expression.
 - **Operators by operand type, as WGSL's:**
   - `+ - * /` between two nodes of a type;
-  - a vector with a float, and a float times a vector;
+  - a vector with a float, a float times a vector, and a number less a vec3;
   - a matrix times a matrix or a vec4;
   - a mat3 times a mat3 or a vec3;
   - unary `-`;
@@ -265,7 +271,8 @@ What a material's shader is written in (kyoten's rendering.md § Decided, GFX-1'
   - `positionLocal()` and `normalLocal()`, the vertex's position and normal in its mesh;
   - `modelWorldMatrix()` and `modelNormalMatrix()`, the object's world matrix and normal matrix, read in the vertex stage
     alone;
-  - `cameraViewProjectionMatrix()`;
+  - `cameraViewProjectionMatrix()`, and `cameraPosition()`, the camera's position in world space, read by either stage
+    from the frame;
   - `normalWorld()`, the surface's normal in world space: the normal matrix times the vertex's normal, through a varying,
     normalized, as TSL's `normalWorldGeometry`;
   - `positionWorld()`, the surface's position in world space through a varying, as TSL's `positionWorld`;
@@ -274,6 +281,27 @@ What a material's shader is written in (kyoten's rendering.md § Decided, GFX-1'
 - **`varying(value:)` hands a vertex stage's value to the fragment stage,** interpolated, as TSL's `varying()`. A vertex
   attribute read in the fragment stage passes through a varying by itself. Two reads of a value written alike, such as
   two calls of `normalWorld()`, share one varying, since a stage passes few.
+- **Three.js r187's physically based lighting** (kyoten's rendering.md § Decided, part 3's third part; its sources under
+  three.js's MIT notice, THIRD-PARTY-NOTICES.md):
+  - its BSDFs, typed functions under r187's names: `brdfLambert(diffuseColor:)` (`BRDF_Lambert`), `fSchlick(f0:, f90:,
+    dotVH:)` (`F_Schlick`, Epic's spherical-Gaussian form), `vGgxSmithCorrelated(alpha:, dotNL:, dotNV:)`
+    (`V_GGX_SmithCorrelated`, at least r187's `EPSILON`, 1e-6, below its fraction), `dGgx(alpha:, dotNH:)` (`D_GGX`) and
+    `brdfGgx(lightDirection:, viewDirection:, normal:, f0:, f90:, roughness:)` (`BRDF_GGX`, its roughness at least 0.045);
+  - `getRoughness(roughness:)` (`getRoughness`): at least 0.045 and at most 1. r187 adds the geometry's roughness, the
+    largest change of its normal in view space across a pixel, which is 0 on a flat face: every geometry here is
+    flat-faced, so it comes with the first whose normals vary (ROADMAP_DETAIL.md);
+  - `PhysicalLightingModel.make(diffuseColor:, roughness:, metalness:, normal:)`, a `LightingModel`, as r187's
+    `PhysicalLightingModel` lights its standard material:
+    - the roughness through `getRoughness`, the view direction towards `cameraPosition()`, and the DFG table read at the
+      roughness and the view's angle;
+    - `direct`: the light's irradiance at its angle, Lambert's diffuse less what the dielectric's Fresnel (F0 0.04)
+      reflects, and GGX's specular with F0 mixed from 0.04 toward the colour by metalness, compensated for the energy
+      multiple scattering loses;
+    - `indirect`: the ambient irradiance through Lambert, less what the specular lobe reflects, singly and multiply
+      scattered. Its indirect specular is the environment's, and none is lit yet.
+
+    It lights in world space, where the lights are; r187 lights in view space, and the two agree but for rounding. A
+    program's own material lights with it too. In the fragment stage alone, since it reads the DFG table.
 - **A typed function is a `ShaderFunction`,** as TSL's `Fn(…).setLayout(…)`. It is written into a material's WGSL once,
   where the material reaches it:
   - a kama function makes one with `new ShaderFunction.make(name:)`;
@@ -306,8 +334,8 @@ the material's nodes: `vertexPosition(node:)` and `fragmentColor(node:)`, as TSL
 `wgsl()` is the whole shader module:
 
 - **group 0, what the renderer gives:**
-  - `frame`, at binding 0, read by both stages: the view-projection, `ambient` (the ambient lights' sum) and
-    `directionalCount`, 80 bytes;
+  - `frame`, at binding 0, read by both stages: the view-projection, `ambient` (the ambient lights' sum),
+    `directionalCount` and `cameraPosition`, 96 bytes;
   - `objects`, at binding 1: each mesh's `Object`, its `world` and `normal` matrices;
   - to a material that reads it, the DFG table, `dfgTable` (a `texture_2d<f32>` at binding 2), and its sampler,
     `dfgTable_sampler` (binding 3), which a sample is written with: `textureSample(dfgTable, dfgTable_sampler, uv)`;
@@ -520,6 +548,22 @@ It is 240 cases on each leg that names a software GPU, and 235 in Edge, whose le
 
   Then a program's own material that counts its compiles: once at its first draw, not on an unchanged frame, once more
   after its `graphVersion()` moves, and not for a setting's change. No WebGPU error.
+- **Part 3's third part, step 3, with no GPU** (`tests/src/physical.kama`):
+  - a standard material's WGSL holding each of r187's functions once under its name, the DFG table's read and the
+    camera's position before the loop over the lights, and `BRDF_GGX` inside it;
+  - the physical model lit in the vertex stage, refused in the DFG table's words;
+  - the three new slots unset by default, and each set or cleared moving `graphVersion()` and not `version()`.
+- **Part 3's third part, step 3, on each leg's GPU** (`tests/src/physical.kama`):
+  - a program's own material showing `cameraPosition()`, in either stage: the camera's position, then moved, then under a
+    moved parent, each centre texel within a step; the camera moved compiling nothing;
+  - a program's own material drawing `fSchlick` at a grazing `dotVH` of 0.3, with an F90 of 0.5, within a step;
+  - a box drawn by `MeshStandardMaterial` under r187's physical model, seen from a camera off the axis, its centre texel
+    held within a step to r187's formulas worked in float64 from the exact ray through it, the DFG table read as
+    `dfg.kama` reads it: one sun on a dielectric of roughness 0.5; the same as a metal; two suns and an ambient light at
+    roughness 0.2, half metal; the three slots set, a roughness of 1.5 among them, capped at 1; the slots cleared with an
+    emissive; and an ambient light alone on the default material;
+  - the ambient's indirect diffuse on a program's material, (lit − r187's float64 value) × 128 + 0.5, within a step of
+    mid-grey: its multiple scattering, about 0.2 % of it, is held so. No WebGPU error.
 - **Part 2's golden holds part 3's compiler:** `boxes/<gpu>.png` is matched byte for byte with `MeshBasicMaterial`'s
   nodes, as it was with its WGSL by hand.
 - **Printed from outside the program:** the gate counts each leg's printed lines: one for the render refused by the

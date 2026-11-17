@@ -105,3 +105,13 @@ package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     `direct()`, and the lights read inside a shader function.
   - `GraphicsErrorKind::Light`: a directional light at its own target lights nothing, and is reported once a change.
   - **Changed:** `ExprKind` gains `Light` and `LightSum`, so a program's exhaustive `match` on it needs two arms.
+- GFX-1's part 3, its third part, step 3: `MeshStandardMaterial` lit by three.js r187's physical model.
+  - `cameraPosition()`, the camera's position in world space, which the frame block carries at 80; the block is 96 bytes.
+  - r187's BSDFs as typed functions under its names: `brdfLambert`, `fSchlick`, `vGgxSmithCorrelated`, `dGgx` and
+    `brdfGgx`, and `getRoughness` (at least 0.045, at most 1).
+  - `PhysicalLightingModel.make(diffuseColor:, roughness:, metalness:, normal:)`, a `LightingModel`: r187's direct
+    light, Lambert's diffuse less the Fresnel and GGX's specular with the multiple-scattering compensation, and its
+    ambient indirect diffuse, read from the DFG table.
+  - `MeshStandardMaterial` lit by it, plus its emissive, and its slots `colorNode`, `roughnessNode` and
+    `metalnessNode`, each moving `graphVersion()`.
+  - `Vec3Node` takes a float added or taken, and a number less a vec3.

@@ -30,7 +30,7 @@ import {
     gpu::Device, gpu::Queue,
     std::collections::DynamicArray,
     Verdicts, harnessCases, colorCases, partCases, nodeCases, ShaderCase, GpuOpen, GoldenRun, RendererRun, BoxesRun,
-    ShaderRun, NormalsRun, standardCases, StandardRun, dfgCases, DfgRun, lightCases, LightsRun,
+    ShaderRun, NormalsRun, standardCases, StandardRun, dfgCases, DfgRun, lightCases, LightsRun, physicalCases, PhysicalRun,
 };
 
 // The software GPUs a leg can name: WARP, natively on Windows and as Firefox's fallback adapter, and SwiftShader, as
@@ -60,7 +60,7 @@ type resource Check implements App {
     int32 declared = 0;
     int32 matched = 0;
     int32 stage = 0;     // 0 the device, 1 the scene, 2 the renderer, 3 the boxes, 4 the shaders, 5 the normals,
-                         // 6 the standard material, 7 the DFG table, 8 the lights, 9 done
+                         // 6 the standard material, 7 the DFG table, 8 the lights, 9 the physical model, 10 done
     Optional<GpuOpen> opening = Optional::None;
     Optional<Device> device = Optional::None;
     Optional<Queue> queue = Optional::None;
@@ -73,6 +73,7 @@ type resource Check implements App {
     Optional<StandardRun> standard = Optional::None;
     Optional<DfgRun> dfgRun = Optional::None;
     Optional<LightsRun> lightsRun = Optional::None;
+    Optional<PhysicalRun> physicalRun = Optional::None;
 
     public unsafe ctor make() {
         Verdicts found = Verdicts.make();
@@ -82,6 +83,7 @@ type resource Check implements App {
         standardCases(found: ref found);
         dfgCases(found: ref found);
         lightCases(found: ref found);
+        physicalCases(found: ref found);
         DynamicArray<ShaderCase> compiled = DynamicArray.empty();
         nodeCases(found: ref found, shaders: ref compiled);
         this.report(found: found);
@@ -129,7 +131,8 @@ type resource Check implements App {
         if (this.stage == 6) { this.standardStep(); }
         if (this.stage == 7) { this.dfgStep(); }
         if (this.stage == 8) { this.lightsStep(); }
-        if (this.stage == 9) { return this.finish(); }
+        if (this.stage == 9) { this.physicalStep(); }
+        if (this.stage == 10) { return this.finish(); }
         return 1;
     }
 
@@ -269,10 +272,24 @@ type resource Check implements App {
         this.report(found: pending.verdicts());
         pending.verdicts().clear();
         if (!done) { this.lightsRun = Optional::Some(value: give pending); return; }
+        this.stage = 9;
+    }
+
+    // The physical lighting model and what it reads (tests/src/physical.kama), a step this tick.
+    unsafe fn void physicalStep() {
+        Optional<PhysicalRun> taken = replace(place: this.physicalRun, with: Optional::None);
+        PhysicalRun pending = match (give taken) {
+            case Some(value: r): give r;
+            case None: PhysicalRun.make(device: this.deviceCopy(), queue: this.queueCopy());
+        };
+        bool done = pending.step();
+        this.report(found: pending.verdicts());
+        pending.verdicts().clear();
+        if (!done) { this.physicalRun = Optional::Some(value: give pending); return; }
         this.queue = Optional::None;
         this.device = Optional::None;
         println(s: "gpu cases: all run");
-        this.stage = 9;
+        this.stage = 10;
     }
 
     // A handle of its own to the one device, and to its queue: a copy is another reference to the same one.

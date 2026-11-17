@@ -209,11 +209,11 @@ fn string nameProblem(const ref string name, const ref string what) {
 }
 
 // What the renderer gives every material's WGSL in group 0: the frame (the camera's view and projection, the ambient
-// lights' sum and how many directional lights there are) and the object records, a world matrix and a normal matrix
+// lights' sum, how many directional lights there are, and the camera's position in world space) and the object records, a world matrix and a normal matrix
 // each, indexed by the draw's instance; and, to a material that reads it, the DFG table and its sampler, and the scene's
 // directional lights, each its direction and its colour × intensity.
 fn string prelude(bool dfgRead, bool lightsRead) {
-    string written = "struct Frame { viewProjection: mat4x4f, ambient: vec3f, directionalCount: u32 };\n"
+    string written = "struct Frame { viewProjection: mat4x4f, ambient: vec3f, directionalCount: u32, cameraPosition: vec3f };\n"
         + "@group(0) @binding(0) var<uniform> frame: Frame;\n"
         + "struct Object { world: mat4x4f, normal: mat3x3f };\n"
         + "@group(0) @binding(1) var<storage, read> objects: array<Object>;\n";

@@ -1,0 +1,173 @@
+// three.js r187's physically based lighting, as its `MeshStandardMaterial` lights a surface (its
+// `nodes/functions/PhysicalLightingModel.js`, `nodes/functions/BSDF/` and `nodes/functions/material/getRoughness.js`, MIT,
+// © 2010-2026 three.js authors; THIRD-PARTY-NOTICES.md): kyoten's rendering.md § Decided, GFX-1's part 3, the lights'
+// questions and the `LightingModel` contract.
+//
+// Its BSDFs are typed functions, each written into a material's WGSL once, under r187's names: `BRDF_Lambert`,
+// `F_Schlick`, `V_GGX_SmithCorrelated`, `D_GGX`, `BRDF_GGX` and `getRoughness`, with `DFGLUT` (nodes.kama). The model
+// is a `LightingModel`, so the compiler writes its `direct` once, inside the loop over the scene's directional lights, and
+// what depends on no light, the view direction and the DFG table's read among it, once before the loop.
+//
+// It lights in world space, where the scene's lights are (the lights' question 1); r187 lights in view space. The two
+// agree but for rounding. What r187's standard material does not use is not here: clearcoat, sheen, iridescence,
+// anisotropy, transmission, a diffuse roughness, and the environment's light, which comes with environment maps.
+
+import {
+    std::memory::Shared,
+    Vec2Node, Vec3Node, FloatNode, ShaderFunction, param, called, constant, vec3, dot, normalize, max, min, mix, saturate,
+    sqrt, exp2, dfg, cameraPosition, positionWorld, ReflectedLight, LightingModel,
+};
+export { brdfLambert, fSchlick, vGgxSmithCorrelated, dGgx, brdfGgx, getRoughness, PhysicalLightingModel };
+
+comptime float32 RECIPROCAL_PI = 0.3183098861837907;
+// r187's `EPSILON` (nodes/math/MathNode.js), which keeps the visibility term finite at grazing angles
+comptime float32 EPSILON = 0.000001;
+
+// One number in all three components.
+fn Vec3Node splat(float32 v) { return vec3(x: constant(value: v), y: constant(value: v), z: constant(value: v)); }
+
+// r187's `BRDF_Lambert`: a diffuse surface's reflectance under a punctual light, its colour over π.
+fn Vec3Node brdfLambert(Vec3Node diffuseColor) {
+    Shared<ShaderFunction> f = new ShaderFunction.make(name: "BRDF_Lambert");
+    Vec3Node c = param(function: f, name: "diffuseColor", value: diffuseColor);
+    return called(function: f, body: c * RECIPROCAL_PI);
+}
+
+// r187's `F_Schlick`: the reflectance at the half-vector's angle, from `f0` at normal incidence to `f90` at grazing, by
+// Schlick's approximation in the spherical-Gaussian form Epic gave (SIGGRAPH 2013).
+fn Vec3Node fSchlick(Vec3Node f0, FloatNode f90, FloatNode dotVH) {
+    Shared<ShaderFunction> f = new ShaderFunction.make(name: "F_Schlick");
+    Vec3Node at0 = param(function: f, name: "f0", value: f0);
+    FloatNode at90 = param(function: f, name: "f90", value: f90);
+    FloatNode vh = param(function: f, name: "dotVH", value: dotVH);
+    FloatNode fresnel = exp2(x: (vh * -5.55473 - 6.98316) * vh);
+    return called(function: f, body: at0 * (1.0 - fresnel) + at90 * fresnel);
+}
+
+// r187's `V_GGX_SmithCorrelated`: the height-correlated Smith visibility term, the shadowing and masking of GGX's
+// microfacets with the BRDF's denominator folded in (Frostbite, "Moving Frostbite to PBR" 3.0, listing 2).
+fn FloatNode vGgxSmithCorrelated(FloatNode alpha, FloatNode dotNL, FloatNode dotNV) {
+    Shared<ShaderFunction> f = new ShaderFunction.make(name: "V_GGX_SmithCorrelated");
+    FloatNode a = param(function: f, name: "alpha", value: alpha);
+    FloatNode nl = param(function: f, name: "dotNL", value: dotNL);
+    FloatNode nv = param(function: f, name: "dotNV", value: dotNV);
+    FloatNode a2 = a * a;
+    FloatNode gv = nl * sqrt(x: a2 + (1.0 - a2) * (nv * nv));
+    FloatNode gl = nv * sqrt(x: a2 + (1.0 - a2) * (nl * nl));
+    return called(function: f, body: 0.5 / max(a: gv + gl, b: constant(value: EPSILON)));
+}
+
+// r187's `D_GGX`: GGX's distribution of microfacet normals (Walter et al. 2007, equation 33), its denominator in the form
+// r187 writes it so a roughness of 0 at the highlight's centre stays finite. `alpha` is the roughness squared.
+fn FloatNode dGgx(FloatNode alpha, FloatNode dotNH) {
+    Shared<ShaderFunction> f = new ShaderFunction.make(name: "D_GGX");
+    FloatNode a = param(function: f, name: "alpha", value: alpha);
+    FloatNode nh = param(function: f, name: "dotNH", value: dotNH);
+    FloatNode a2 = a * a;
+    FloatNode denom = 1.0 - (nh * nh) * (1.0 - a2);
+    return called(function: f, body: a2 / (denom * denom) * RECIPROCAL_PI);
+}
+
+// r187's `BRDF_GGX`: the specular reflectance a light gives towards the viewer, Fresnel × visibility × distribution, its
+// roughness at least 0.045, since a punctual light needs a minimum roughness to show a highlight. Each direction is of
+// length 1, towards the light and towards the viewer, in the space `normal` is in.
+fn Vec3Node brdfGgx(Vec3Node lightDirection, Vec3Node viewDirection, Vec3Node normal, Vec3Node f0, FloatNode f90,
+                    FloatNode roughness) {
+    Shared<ShaderFunction> f = new ShaderFunction.make(name: "BRDF_GGX");
+    Vec3Node l = param(function: f, name: "lightDirection", value: lightDirection);
+    Vec3Node toViewer = param(function: f, name: "viewDirection", value: viewDirection);
+    Vec3Node n = param(function: f, name: "surfaceNormal", value: normal);
+    Vec3Node at0 = param(function: f, name: "f0", value: f0);
+    FloatNode at90 = param(function: f, name: "f90", value: f90);
+    FloatNode r = param(function: f, name: "roughness", value: roughness);
+    FloatNode least = max(a: r, b: constant(value: 0.045));
+    FloatNode alpha = least * least;
+    Vec3Node half = normalize(v: l + toViewer);
+    FloatNode nl = saturate(x: dot(a: n, b: l));
+    FloatNode nv = saturate(x: dot(a: n, b: toViewer));
+    FloatNode nh = saturate(x: dot(a: n, b: half));
+    FloatNode vh = saturate(x: dot(a: toViewer, b: half));
+    Vec3Node fresnel = fSchlick(f0: at0, f90: at90, dotVH: vh);
+    FloatNode visibility = vGgxSmithCorrelated(alpha: alpha, dotNL: nl, dotNV: nv);
+    FloatNode distribution = dGgx(alpha: alpha, dotNH: nh);
+    return called(function: f, body: fresnel * visibility * distribution);
+}
+
+// r187's `getRoughness`, which its standard material applies before its model reads the roughness: at least 0.045, as
+// Filament's desktop minimum, and at most 1. r187 adds the geometry's own roughness, the largest screen-space change of
+// its normal in view space, which is 0 on a flat face; every geometry this library has is flat-faced, so the term comes
+// with the first whose normals vary (ROADMAP_DETAIL.md), with the view matrix it reads.
+fn FloatNode getRoughness(FloatNode roughness) {
+    Shared<ShaderFunction> f = new ShaderFunction.make(name: "getRoughness");
+    FloatNode r = param(function: f, name: "roughness", value: roughness);
+    return called(function: f, body: min(a: max(a: r, b: constant(value: 0.045)), b: constant(value: 1.0)));
+}
+
+// How light reaches a physically based surface, as three.js r187's `PhysicalLightingModel` lights its
+// `MeshStandardMaterial`: glTF's metal-roughness model, a Lambert diffuse and a GGX specular, with the energy GGX loses to
+// multiple scattering put back (Turquin's compensation for the direct light, Fdez-Agüera's for the ambient), both read
+// from the DFG table (nodes.kama, `dfg`). A program's own material lights with it too.
+//
+// `diffuseColor` is the surface's colour, linear; `roughness` its perceptual roughness, from 0, a mirror, to 1, which the
+// model passes through `getRoughness` as r187's material does; `metalness` from 0, a dielectric, to 1, a metal;
+// `normal` its normal in world space, of length 1. The view direction is the camera's (`cameraPosition()`).
+//
+// The ambient light reaches it as r187's does: its irradiance through Lambert's reflectance, less what the specular lobe
+// reflects. A scene's environment, its indirect specular, comes with environment maps.
+type resource PhysicalLightingModel implements LightingModel {
+    Vec3Node diffuseContribution;   // the colour × (1 − metalness): what a metal does not diffuse
+    Vec3Node specularColorBlended;  // the reflectance at normal incidence, 0.04 mixed toward the colour by metalness
+    FloatNode surfaceRoughness;     // through getRoughness
+    Vec3Node surfaceNormal;
+    Vec3Node toCamera;              // towards the camera, of length 1
+    Vec3Node compensation;          // r187's multiScatteringCompensation: the direct specular's lost energy put back
+    Vec3Node scattered;             // r187's singleScatteringDielectric + multiScatteringDielectric
+
+    public ctor make(Vec3Node diffuseColor, FloatNode roughness, FloatNode metalness, Vec3Node normal) {
+        FloatNode r = getRoughness(roughness: roughness);
+        Vec3Node v = normalize(v: cameraPosition() - positionWorld());
+        FloatNode dotNV = saturate(x: dot(a: normal, b: v));
+        Vec2Node fab = dfg(roughness: r, dotNV: dotNV);
+        FloatNode scale = fab.x();
+        FloatNode bias = fab.y();
+        // r187's `start()`: the single-scattering lobe's energy in a white furnace (F0 = F90 = 1), and the compensation
+        // for what multiple scattering loses, tinted by F0 ("Practical Multiple Scattering Compensation", equation 16)
+        FloatNode ess = scale + bias;
+        Vec3Node blended = mix(from: splat(v: 0.04), to: diffuseColor, by: metalness);
+        this.compensation = blended * (1.0 / ess - 1.0) + 1.0;
+        // r187's `computeMultiscattering` for the dielectric's F0, 0.04, with F90 1 (Fdez-Agüera 2019)
+        Vec3Node fr = splat(v: 0.04);
+        Vec3Node fssEss = fr * scale + bias;
+        FloatNode ems = 1.0 - ess;
+        Vec3Node favg = fr + (1.0 - fr) * 0.047619;
+        Vec3Node fms = fssEss * favg / (1.0 - ems * favg);
+        this.scattered = fssEss + fms * ems;
+        this.diffuseContribution = diffuseColor * (1.0 - metalness);
+        this.specularColorBlended = blended;
+        this.surfaceRoughness = r;
+        this.surfaceNormal = normal;
+        this.toCamera = v;
+    }
+
+    // r187's `direct`: the irradiance at the light's angle, its diffuse part through Lambert less what the dielectric's
+    // Fresnel reflects (glTF's fresnel_mix), its specular part through GGX with the compensation.
+    public fn ReflectedLight direct(Vec3Node lightDirection, Vec3Node lightColor) {
+        FloatNode dotNL = saturate(x: dot(a: this.surfaceNormal, b: lightDirection));
+        Vec3Node irradiance = lightColor * dotNL;
+        Vec3Node half = normalize(v: lightDirection + this.toCamera);
+        FloatNode dotVH = saturate(x: dot(a: this.toCamera, b: half));
+        Vec3Node fresnel = fSchlick(f0: splat(v: 0.04), f90: constant(value: 1.0), dotVH: dotVH);
+        Vec3Node specular = brdfGgx(lightDirection: lightDirection, viewDirection: this.toCamera, normal: this.surfaceNormal,
+                                    f0: this.specularColorBlended, f90: constant(value: 1.0),
+                                    roughness: this.surfaceRoughness);
+        return ReflectedLight.of(diffuse: irradiance * brdfLambert(diffuseColor: this.diffuseContribution) * (1.0 - fresnel),
+                                 specular: irradiance * specular * this.compensation);
+    }
+
+    // r187's `indirectDiffuse`: the ambient irradiance through Lambert, less what the specular lobe reflects, singly and
+    // multiply scattered. Its indirect specular is the environment's, which no scene has yet.
+    public fn ReflectedLight indirect(Vec3Node irradiance) {
+        return ReflectedLight.of(diffuse: irradiance * brdfLambert(diffuseColor: this.diffuseContribution) * (1.0 - this.scattered),
+                                 specular: splat(v: 0.0));
+    }
+}

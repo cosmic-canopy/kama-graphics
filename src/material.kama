@@ -10,7 +10,8 @@ import {
     std::collections::DynamicArray,
     gpu::Device, gpu::Queue, gpu::Buffer, gpu::BufferDescriptor, gpu::BufferUsage, gpu::BufferBinding,
     gpu::BindGroup, gpu::BindGroupDescriptor, gpu::BindGroupLayout, gpu::BindingResource,
-    Color, Renderer, MaterialSettings, NodeBuilder, Vec3Node, FloatNode, vec4, constant,
+    Color, Renderer, MaterialSettings, NodeBuilder, Vec3Node, FloatNode, vec4, constant, normalWorld, lit,
+    PhysicalLightingModel,
 };
 export { Material, MaterialGpu, MeshBasicMaterial, MeshStandardMaterial };
 
@@ -136,14 +137,12 @@ fn Vec3Node emitted(ref NodeBuilder builder, Optional<Vec3Node> own) {
     return colour * intensity;
 }
 
-// Physically based, as three.js's `MeshStandardMaterial`: glTF's metal-roughness, with three.js r187's defaults. Its five
+// Physically based, as three.js's `MeshStandardMaterial`: glTF's metal-roughness, with three.js r187's defaults, lit by
+// the scene's lights through r187's physical model (physical.kama, `PhysicalLightingModel`), plus its emissive. Its five
 // values are settings, so changing one compiles nothing. A slot replaces what it names with a node of the program's, a
 // new graph, so setting or clearing one moves `graphVersion()` and the renderer compiles it again before its next draw
-// (kyoten's rendering.md § Decided, GFX-1's part 3, its second part's question 2).
-//
-// The scene's lights reach it in GFX-1's part 3, its third part, and with them the slots `colorNode`, `roughnessNode`
-// and `metalnessNode`, where a light shows what they change. Until then it draws what three.js's draws with no light:
-// its emissive alone.
+// (kyoten's rendering.md § Decided, GFX-1's part 3, its second part's question 2). With no light in the scene it draws
+// its emissive alone, as three.js's does.
 type resource MeshStandardMaterial implements Material {
     Color tint = Color.fromHex(hex: 0xffffff);
     float32 rough = 1.0;
@@ -151,6 +150,9 @@ type resource MeshStandardMaterial implements Material {
     Color glow = Color.fromHex(hex: 0x000000);
     float32 glowIntensity = 1.0;
     Optional<Vec3Node> glowNode = Optional::None;
+    Optional<Vec3Node> tintNode = Optional::None;
+    Optional<FloatNode> roughNode = Optional::None;
+    Optional<FloatNode> metalNode = Optional::None;
     uint32 changes = 0;
     uint32 graphs = 0;
     MaterialGpu cache;
@@ -177,6 +179,15 @@ type resource MeshStandardMaterial implements Material {
     // `emissiveNode`; `None` gives the values back.
     public const fn Optional<Vec3Node> emissiveNode() { return copy this.glowNode; }
     public fn ref Optional<Vec3Node> emissiveNodeMut() { this.graphs = this.graphs + 1; return this.glowNode; }
+    // A node of the program's giving its diffuse colour, linear, in place of `color`, as three.js's `colorNode`.
+    public const fn Optional<Vec3Node> colorNode() { return copy this.tintNode; }
+    public fn ref Optional<Vec3Node> colorNodeMut() { this.graphs = this.graphs + 1; return this.tintNode; }
+    // A node of the program's giving its roughness in place of `roughness`, as three.js's `roughnessNode`.
+    public const fn Optional<FloatNode> roughnessNode() { return copy this.roughNode; }
+    public fn ref Optional<FloatNode> roughnessNodeMut() { this.graphs = this.graphs + 1; return this.roughNode; }
+    // A node of the program's giving its metalness in place of `metalness`, as three.js's `metalnessNode`.
+    public const fn Optional<FloatNode> metalnessNode() { return copy this.metalNode; }
+    public fn ref Optional<FloatNode> metalnessNodeMut() { this.graphs = this.graphs + 1; return this.metalNode; }
 
     public const fn uint32 version() { return this.changes; }
     public const fn uint32 graphVersion() { return this.graphs; }
@@ -188,9 +199,15 @@ type resource MeshStandardMaterial implements Material {
         into.addColor(name: "emissive", value: this.glow);
         into.addFloat(name: "emissiveIntensity", value: this.glowIntensity);
     }
-    // As three.js's with no light in the scene: what the lights give, nothing yet, plus its emissive, opaque.
+    // As three.js r187's `MeshStandardNodeMaterial`: its colour, roughness and metalness, each its slot's node or its
+    // setting, lit by the physical model at the surface's normal in world space, plus its emissive, opaque.
     public fn void shade(ref NodeBuilder builder) {
-        Vec3Node light = emitted(builder: ref builder, own: copy this.glowNode);
+        Vec3Node colour = match (this.tintNode) { case Some(value: n): copy n; case None: builder.uniformVec3(name: "color"); };
+        FloatNode roughness = match (this.roughNode) { case Some(value: n): copy n; case None: builder.uniformFloat(name: "roughness"); };
+        FloatNode metalness = match (this.metalNode) { case Some(value: n): copy n; case None: builder.uniformFloat(name: "metalness"); };
+        PhysicalLightingModel model = PhysicalLightingModel.make(diffuseColor: colour, roughness: roughness, metalness: metalness,
+                                                                 normal: normalWorld());
+        Vec3Node light = lit(model: ref model) + emitted(builder: ref builder, own: copy this.glowNode);
         builder.fragmentColor(node: vec4(xyz: light, w: constant(value: 1.0)));
     }
 }

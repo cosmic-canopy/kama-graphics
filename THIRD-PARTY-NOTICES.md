@@ -7,7 +7,9 @@ people's work that the library carries, which travel with every copy of a progra
 
 `src/dfg.kama` holds three.js r187's DFG table, its `src/nodes/functions/BSDF/DFGLUT.js` (16 x 16 texels of two half
 floats, the scale and bias of a surface's specular reflectance), copied as it is. The direct light reads it as three.js's
-does. The text below is three.js r187's `LICENSE`, verbatim.
+does. `src/physical.kama` ports r187's physical lighting: its `src/nodes/functions/PhysicalLightingModel.js`, the
+BSDFs in `src/nodes/functions/BSDF/` (`BRDF_Lambert`, `F_Schlick`, `V_GGX_SmithCorrelated`, `D_GGX`, `BRDF_GGX`) and
+`src/nodes/functions/material/getRoughness.js`. The text below is three.js r187's `LICENSE`, verbatim.
 
 ```
 The MIT License

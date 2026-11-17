@@ -11,7 +11,8 @@ import { std::collections::DynamicArray, std::memory::Shared };
 export {
     Node, Expr, ExprKind, FloatNode, Vec2Node, Vec3Node, Vec4Node, Mat3Node, Mat4Node, ShaderFunction, param, called,
     constant, vec2, vec3, vec4, dfg, dot, normalize, max, min, mix, saturate, sqrt, exp2, pow, varying,
-    positionLocal, normalLocal, modelWorldMatrix, modelNormalMatrix, cameraViewProjectionMatrix, normalWorld, positionWorld,
+    positionLocal, normalLocal, modelWorldMatrix, modelNormalMatrix, cameraViewProjectionMatrix, cameraPosition, normalWorld,
+    positionWorld,
     ReflectedLight, LightingModel, lit,
 };
 
@@ -165,6 +166,12 @@ type resource Vec3Node implements Copyable<This>(bare: copy), Node<This> {
     public Vec3Node operator/(Vec3Node rhs) { return Vec3Node.of(e: binary(op: "/", wgslType: "vec3f", a: this.expr(), b: rhs.expr())); }
     public Vec3Node operator*(FloatNode rhs) { return Vec3Node.of(e: binary(op: "*", wgslType: "vec3f", a: this.expr(), b: rhs.expr())); }
     public Vec3Node operator/(FloatNode rhs) { return Vec3Node.of(e: binary(op: "/", wgslType: "vec3f", a: this.expr(), b: rhs.expr())); }
+    // a float added to or taken from each component, and a number less a vector, as WGSL's vector-scalar forms
+    public Vec3Node operator+(FloatNode rhs) { return Vec3Node.of(e: binary(op: "+", wgslType: "vec3f", a: this.expr(), b: rhs.expr())); }
+    public Vec3Node operator-(FloatNode rhs) { return Vec3Node.of(e: binary(op: "-", wgslType: "vec3f", a: this.expr(), b: rhs.expr())); }
+    public Vec3Node operator+(float32 s) { return Vec3Node.of(e: binary(op: "+", wgslType: "vec3f", a: this.expr(), b: numberExpr(v: s))); }
+    public Vec3Node operator-(float32 s) { return Vec3Node.of(e: binary(op: "-", wgslType: "vec3f", a: this.expr(), b: numberExpr(v: s))); }
+    public Vec3Node operator-(float32 s, Vec3Node v) { return Vec3Node.of(e: binary(op: "-", wgslType: "vec3f", a: numberExpr(v: s), b: v.expr())); }
     public Vec3Node operator*(float32 s) { return Vec3Node.of(e: binary(op: "*", wgslType: "vec3f", a: this.expr(), b: numberExpr(v: s))); }
     public Vec3Node operator*(float32 s, Vec3Node v) { return Vec3Node.of(e: binary(op: "*", wgslType: "vec3f", a: numberExpr(v: s), b: v.expr())); }
     public Vec3Node operator-() { return Vec3Node.of(e: unary(op: "-", wgslType: "vec3f", a: this.expr())); }
@@ -255,6 +262,9 @@ fn Mat4Node modelWorldMatrix() { return Mat4Node.of(e: exprOf(kind: ExprKind::Ve
 // `modelNormalMatrix`), so a normal stays at right angles to its surface under any scale, shear or mirror.
 fn Mat3Node modelNormalMatrix() { return Mat3Node.of(e: exprOf(kind: ExprKind::VertexName, text: "objects[object].normal", wgslType: "mat3x3f")); }
 fn Mat4Node cameraViewProjectionMatrix() { return Mat4Node.of(e: exprOf(kind: ExprKind::Name, text: "frame.viewProjection", wgslType: "mat4x4f")); }
+// The camera's position in world space, as TSL's `cameraPosition`, read by either stage from the frame: where the view
+// direction `normalize(cameraPosition() - positionWorld())` points.
+fn Vec3Node cameraPosition() { return Vec3Node.of(e: exprOf(kind: ExprKind::Name, text: "frame.cameraPosition", wgslType: "vec3f")); }
 
 // The surface's normal in world space, interpolated across the triangle and of length 1, as TSL's
 // `normalWorldGeometry`: the normal matrix times the vertex's normal, through a varying, normalized.

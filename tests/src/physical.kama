@@ -1,0 +1,719 @@
+// GFX-1's part 3, its third part, step 3: the physical lighting model three.js r187's `MeshStandardMaterial` lights with
+// (kyoten's rendering.md § Decided, GFX-1's part 3: the lights' three questions and the `LightingModel` contract).
+//
+// First the one new piece of data it reads, the camera's position in world space (`cameraPosition()`, TSL's): the frame
+// block carries it, after the directional lights' count, so a material reads it in either stage. On the GPU, a step a
+// tick on the device the check opened, one renderer for the run: a program's own material shows the position, scaled
+// into the target's range, and the camera is moved, then put under a moved parent, each frame's centre held to the
+// position's colour worked here. Moving the camera compiles nothing.
+//
+// Then the model, three.js r187's `PhysicalLightingModel` on the `LightingModel` contract, and `MeshStandardMaterial` lit
+// by it, with its three slots, `colorNode`, `roughnessNode` and `metalnessNode`. With no GPU: the WGSL a standard
+// material compiles to, each of r187's functions once, what depends on no light before the loop over the lights and the
+// specular term inside it; a model lit in the vertex stage refused, since the DFG table is sampled; and each slot moving
+// `graphVersion()` alone. On the GPU: a box lit by suns and an ambient light, its centre texel held to r187's formulas
+// worked here in float64, from the exact ray through that texel, the DFG table read as the GPU reads it (dfg.kama's
+// `sampledAt`), within one step of the 8-bit target, at several roughnesses and metalnesses, and with the slots set.
+
+import {
+    std::collections::DynamicArray,
+    std::math::Vec3, std::math::radians, std::math::tan, std::math::sqrt as squareRoot, std::math::pow as power,
+    std::time::Instant, std::time::monotonicNow,
+    gpu::Device, gpu::Queue, gpu::DeviceErrors, gpu::GpuError,
+    graphics::Color, graphics::Renderer, graphics::RenderTarget, graphics::Scene, graphics::Mesh, graphics::Group,
+    graphics::PerspectiveCamera, graphics::BoxGeometry, graphics::Material, graphics::MaterialGpu,
+    graphics::MaterialSettings, graphics::NodeBuilder, graphics::PixelRead, graphics::PixelStatus, graphics::Vec3Node,
+    graphics::FloatNode, graphics::vec3, graphics::vec4, graphics::constant, graphics::varying, graphics::cameraPosition,
+    graphics::normalWorld, graphics::lit, graphics::PhysicalLightingModel, graphics::MeshStandardMaterial,
+    graphics::DirectionalLight, graphics::AmbientLight, graphics::dfgTable, graphics::fSchlick,
+    Verdicts, encoded, sampledAt,
+};
+export { physicalCases, PhysicalRun };
+
+comptime int64 SETTLE_MS = 10000;
+comptime uint32 WIDE = 64;
+comptime uint32 HIGH = 48;
+comptime uint32 BACKDROP = 0x336699;
+comptime float64 PI64 = 3.141592653589793;
+
+// How many times `needle` occurs in `hay`.
+fn isize occurrences(const ref string hay, const ref string needle) {
+    isize n = 0;
+    isize from = 0;
+    while (from <= hay.length()) {
+        string rest = hay.substring(start: from, end: hay.length());
+        match (rest.find(substring: needle)) {
+            case Some(value: at): { n = n + 1; from = from + at + needle.length(); }
+            case None: { return n; }
+        };
+    }
+    return n;
+}
+
+// Where `needle` first occurs in `hay` after `from`, or -1.
+fn isize firstAfter(const ref string hay, const ref string needle, isize from) {
+    string rest = hay.substring(start: from, end: hay.length());
+    return match (rest.find(substring: needle)) { case Some(value: at): from + at; case None: -1; };
+}
+
+// A program's own material lit by the physical model in the vertex stage, through a varying.
+type resource VertexPhysical implements Material {
+    MaterialGpu cache;
+    public ctor make() { this.cache = MaterialGpu.make(); }
+    public fn ref MaterialGpu gpuMut() { return this.cache; }
+    public const fn uint32 version() { return 0; }
+    public const fn uint32 graphVersion() { return 0; }
+    public const fn void settings(ref MaterialSettings into) { }
+    public fn void shade(ref NodeBuilder builder) {
+        PhysicalLightingModel model = PhysicalLightingModel.make(diffuseColor: vec3Of(v: 0.5), roughness: constant(value: 0.5),
+                                                                 metalness: constant(value: 0.0), normal: normalWorld());
+        builder.fragmentColor(node: vec4(xyz: varying(value: lit(model: ref model)), w: constant(value: 1.0)));
+    }
+}
+
+unsafe fn void physicalCases(ref Verdicts found) {
+    {
+        MeshStandardMaterial m = MeshStandardMaterial.make();
+        MaterialSettings s = MaterialSettings.make();
+        m.settings(into: ref s);
+        NodeBuilder b = NodeBuilder.make(settings: s);
+        m.shade(builder: ref b);
+        string wgsl = b.wgsl();
+        DynamicArray<string> problems = b.problems();
+        string why = "";
+        isize np = problems.length();
+        if (np > 0) { why = why + " ${np} problem(s), the first: " + problems[0] + ";"; }
+        DynamicArray<string> named = DynamicArray.empty();
+        named.add(item: "BRDF_Lambert");
+        named.add(item: "F_Schlick");
+        named.add(item: "V_GGX_SmithCorrelated");
+        named.add(item: "D_GGX");
+        named.add(item: "BRDF_GGX");
+        named.add(item: "getRoughness");
+        named.add(item: "DFGLUT");
+        for (isize i = 0; i < named.length(); i = i + 1) {
+            string declared = "fn " + named[i] + "(";
+            isize n = occurrences(hay: wgsl, needle: declared);
+            if (n != 1) { why = why + " `" + declared + "` is written ${n} time(s);"; }
+        }
+        found.add(name: "PhysicalLightingModel: a standard material's WGSL holds each of r187's functions once, under its name: BRDF_Lambert, F_Schlick, V_GGX_SmithCorrelated, D_GGX, BRDF_GGX, getRoughness and DFGLUT",
+                  why: give why);
+        isize fs = firstAfter(hay: wgsl, needle: "@fragment fn fs(", from: 0);
+        isize loop = fs < 0 ? -1 : firstAfter(hay: wgsl, needle: "for (var ", from: fs);
+        isize readTable = fs < 0 ? -1 : firstAfter(hay: wgsl, needle: "DFGLUT(", from: fs);
+        isize readCamera = fs < 0 ? -1 : firstAfter(hay: wgsl, needle: "frame.cameraPosition", from: fs);
+        isize specular = loop < 0 ? -1 : firstAfter(hay: wgsl, needle: "BRDF_GGX(", from: loop);
+        string placed = "";
+        if (loop < 0) { placed = "the fragment stage has no loop over the lights"; }
+        else if (readTable < 0 || readTable > loop) { placed = "the DFG table is not read before the loop"; }
+        else if (readCamera < 0 || readCamera > loop) { placed = "the camera's position is not read before the loop"; }
+        else if (specular < 0) { placed = "BRDF_GGX is not called inside the loop"; }
+        found.add(name: "PhysicalLightingModel: what depends on no light, the view direction and the DFG table's read, is written once before the loop over the lights, and the specular term inside it",
+                  why: give placed);
+    }
+    {
+        VertexPhysical m = VertexPhysical.make();
+        NodeBuilder b = NodeBuilder.make(settings: MaterialSettings.make());
+        m.shade(builder: ref b);
+        string wgsl = b.wgsl();
+        DynamicArray<string> problems = b.problems();
+        string want = "the shader function `DFGLUT` samples a texture and is called in the vertex stage, where WGSL's textureSample cannot run: call it in the fragment stage";
+        bool held = false;
+        for (isize i = 0; i < problems.length(); i = i + 1) { if (problems[i] == want) { held = true; } }
+        isize np = problems.length();
+        found.add(name: "PhysicalLightingModel: lit in the vertex stage it is refused, since it samples the DFG table, in words that say so",
+                  why: held ? "" : "${np} problem(s), none the sampling's");
+    }
+    {
+        MeshStandardMaterial m = MeshStandardMaterial.make();
+        bool unset = m.colorNode().isNone() && m.roughnessNode().isNone() && m.metalnessNode().isNone();
+        found.add(name: "MeshStandardMaterial: no colorNode, roughnessNode or metalnessNode by default, as three.js r187's",
+                  why: unset ? "" : "a slot is set");
+        string still = "";
+        uint32 v0 = m.version();
+        uint32 g = m.graphVersion();
+        m.colorNodeMut() = Optional::Some(value: vec3Of(v: 0.5));
+        if (m.graphVersion() == g) { still = still + " setting colorNode;"; }
+        g = m.graphVersion();
+        m.roughnessNodeMut() = Optional::Some(value: constant(value: 0.5));
+        if (m.graphVersion() == g) { still = still + " setting roughnessNode;"; }
+        g = m.graphVersion();
+        m.metalnessNodeMut() = Optional::Some(value: constant(value: 0.5));
+        if (m.graphVersion() == g) { still = still + " setting metalnessNode;"; }
+        bool held = m.colorNode().isSome() && m.roughnessNode().isSome() && m.metalnessNode().isSome();
+        g = m.graphVersion();
+        m.colorNodeMut() = Optional::None;
+        if (m.graphVersion() == g) { still = still + " clearing colorNode;"; }
+        g = m.graphVersion();
+        m.roughnessNodeMut() = Optional::None;
+        if (m.graphVersion() == g) { still = still + " clearing roughnessNode;"; }
+        g = m.graphVersion();
+        m.metalnessNodeMut() = Optional::None;
+        if (m.graphVersion() == g) { still = still + " clearing metalnessNode;"; }
+        uint32 v1 = m.version();
+        string why = still.isEmpty() ? "" : "graphVersion() did not move on" + still;
+        if (v1 != v0) { why = why + " version() moved from ${v0} to ${v1};"; }
+        if (!held) { why = why + " a slot set was not held"; }
+        found.add(name: "MeshStandardMaterial: setting or clearing colorNode, roughnessNode or metalnessNode moves graphVersion() each time and not version()",
+                  why: give why);
+    }
+}
+
+// A program's own material showing the camera's position, × 0.1 + 0.5 so a position within 5 of the origin is a colour,
+// in the fragment stage or, `perVertex`, through a varying from the vertex stage. It counts its compiles.
+type resource ShowCamera implements Material {
+    MaterialGpu cache;
+    bool perVertex;
+    int32 shaded = 0;
+    public ctor make(bool perVertex) {
+        this.cache = MaterialGpu.make();
+        this.perVertex = perVertex;
+    }
+    public fn ref MaterialGpu gpuMut() { return this.cache; }
+    public const fn uint32 version() { return 0; }
+    public const fn uint32 graphVersion() { return 0; }
+    public const fn void settings(ref MaterialSettings into) { }
+    public fn void shade(ref NodeBuilder builder) {
+        this.shaded = this.shaded + 1;
+        Vec3Node shown = cameraPosition() * 0.1 + vec3Of(v: 0.5);
+        if (this.perVertex) { shown = varying(value: shown); }
+        builder.fragmentColor(node: vec4(xyz: shown, w: constant(value: 1.0)));
+    }
+    public const fn int32 compiles() { return this.shaded; }
+}
+
+// A program's own material showing r187's `F_Schlick` × 2 at a grazing half-vector, dotVH 0.3, with F0 (0, 0.2, 0.4)
+// and F90 0.5: where Fresnel's weight is large, and its F90 is not the standard material's 1.
+type resource ShowSchlick implements Material {
+    MaterialGpu cache;
+    public ctor make() { this.cache = MaterialGpu.make(); }
+    public fn ref MaterialGpu gpuMut() { return this.cache; }
+    public const fn uint32 version() { return 0; }
+    public const fn uint32 graphVersion() { return 0; }
+    public const fn void settings(ref MaterialSettings into) { }
+    public fn void shade(ref NodeBuilder builder) {
+        Vec3Node f0 = vec3(x: constant(value: 0.0), y: constant(value: 0.2), z: constant(value: 0.4));
+        Vec3Node shown = fSchlick(f0: f0, f90: constant(value: 0.5), dotVH: constant(value: 0.3)) * 2.0;
+        builder.fragmentColor(node: vec4(xyz: shown, w: constant(value: 1.0)));
+    }
+}
+
+// A program's own material lit by the physical model, white, roughness 1, a dielectric, showing (lit − `want`) × 128 +
+// 0.5: r187's multiple scattering in the ambient's indirect diffuse is about 0.2 % of it, below the 8-bit target's step,
+// and amplified it is many. With the ambient light alone the DFG table is read at its corner texel, roughness 1 and
+// the view's angle near 0, where every filter weight gives the texel itself, so nothing inexact is amplified.
+type resource AmplifiedAmbient implements Material {
+    MaterialGpu cache;
+    float32 expected;
+    public ctor make(float32 want) {
+        this.cache = MaterialGpu.make();
+        this.expected = want;
+    }
+    public fn ref MaterialGpu gpuMut() { return this.cache; }
+    public const fn uint32 version() { return 0; }
+    public const fn uint32 graphVersion() { return 0; }
+    public const fn void settings(ref MaterialSettings into) { }
+    public fn void shade(ref NodeBuilder builder) {
+        PhysicalLightingModel model = PhysicalLightingModel.make(diffuseColor: vec3Of(v: 1.0), roughness: constant(value: 1.0),
+                                                                 metalness: constant(value: 0.0), normal: normalWorld());
+        Vec3Node light = lit(model: ref model);
+        Vec3Node shown = (light - vec3Of(v: this.expected)) * 128.0 + 0.5;
+        builder.fragmentColor(node: vec4(xyz: shown, w: constant(value: 1.0)));
+    }
+}
+
+// What `ShowSchlick` draws, worked in float64 by r187's formula.
+fn uint32 schlickShown() {
+    float64 vh = 0.3;
+    float64 w = power(x: 2.0, y: (vh * -5.55473 - 6.98316) * vh);
+    return storedAs(r: 2.0 * (0.0 * (1.0 - w) + 0.5 * w), g: 2.0 * (0.2 * (1.0 - w) + 0.5 * w),
+                    b: 2.0 * (0.4 * (1.0 - w) + 0.5 * w));
+}
+
+fn Vec3Node vec3Of(float32 v) {
+    return vec3(x: constant(value: v), y: constant(value: v), z: constant(value: v));
+}
+
+// ---- r187's physical lighting, in float64 ----
+
+fn float64 clamped(float64 x) { return x < 0.0 ? 0.0 : (x > 1.0 ? 1.0 : x); }
+fn float64 dGgxRef(float64 alpha, float64 nh) {
+    float64 a2 = alpha * alpha;
+    float64 denom = 1.0 - nh * nh * (1.0 - a2);
+    return a2 / (denom * denom) / PI64;
+}
+fn float64 vGgxRef(float64 alpha, float64 nl, float64 nv) {
+    float64 a2 = alpha * alpha;
+    float64 gv = nl * squareRoot(x: a2 + (1.0 - a2) * nv * nv);
+    float64 gl = nv * squareRoot(x: a2 + (1.0 - a2) * nl * nl);
+    float64 sum = gv + gl;
+    return 0.5 / (sum > 0.000001 ? sum : 0.000001);
+}
+// F_Schlick's weight on f90 at `vh`
+fn float64 fresnelWeight(float64 vh) { return power(x: 2.0, y: (vh * -5.55473 - 6.98316) * vh); }
+
+// A lit box's centre, as the reference works it: the surface and its lights, and what one channel shows.
+type resource Lighting {
+    DynamicArray<float64> colour;     // linear r, g, b
+    DynamicArray<float64> glow;       // the emissive × its intensity, linear
+    DynamicArray<float64> ambient;    // the ambient lights' sum, linear
+    DynamicArray<float64> suns;       // six a light: towards it (x, y, z), of length 1; its linear colour × intensity
+    float64 rough = 1.0;
+    float64 metal = 0.0;
+
+    public ctor make() {
+        this.colour = DynamicArray.empty();
+        this.glow = DynamicArray.empty();
+        this.ambient = DynamicArray.empty();
+        this.suns = DynamicArray.empty();
+        for (int32 c = 0; c < 3; c = c + 1) { this.colour.add(item: 1.0); this.glow.add(item: 0.0); this.ambient.add(item: 0.0); }
+    }
+    public fn void surface(uint32 hex, float64 roughness, float64 metalness) {
+        Color c = Color.fromHex(hex: hex);
+        this.colour[0] = cast<float64>(c.linearR());
+        this.colour[1] = cast<float64>(c.linearG());
+        this.colour[2] = cast<float64>(c.linearB());
+        this.rough = roughness;
+        this.metal = metalness;
+    }
+    public fn void linearSurface(float64 r, float64 g, float64 b, float64 roughness, float64 metalness) {
+        this.colour[0] = r;
+        this.colour[1] = g;
+        this.colour[2] = b;
+        this.rough = roughness;
+        this.metal = metalness;
+    }
+    public fn void emissive(uint32 hex) {
+        Color c = Color.fromHex(hex: hex);
+        this.glow[0] = cast<float64>(c.linearR());
+        this.glow[1] = cast<float64>(c.linearG());
+        this.glow[2] = cast<float64>(c.linearB());
+    }
+    // a sun at (x, y, z) pointing at the origin, its colour × intensity as the renderer writes it, in float32
+    public fn void sun(float64 x, float64 y, float64 z, uint32 hex, float32 intensity) {
+        float64 len = squareRoot(x: x * x + y * y + z * z);
+        this.suns.add(item: x / len);
+        this.suns.add(item: y / len);
+        this.suns.add(item: z / len);
+        Color c = Color.fromHex(hex: hex);
+        this.suns.add(item: cast<float64>(c.linearR() * intensity));
+        this.suns.add(item: cast<float64>(c.linearG() * intensity));
+        this.suns.add(item: cast<float64>(c.linearB() * intensity));
+    }
+    public fn void ambientLight(uint32 hex, float32 intensity) {
+        Color c = Color.fromHex(hex: hex);
+        this.ambient[0] = this.ambient[0] + cast<float64>(c.linearR() * intensity);
+        this.ambient[1] = this.ambient[1] + cast<float64>(c.linearG() * intensity);
+        this.ambient[2] = this.ambient[2] + cast<float64>(c.linearB() * intensity);
+    }
+
+    // What channel `c` shows on the box's front face, normal +Z, seen along the ray through the target's centre texel from
+    // a camera at (x, y, 4) looking down -Z, whatever its x and y, as r187 lights it: its direct diffuse and specular from each sun, its ambient's indirect diffuse,
+    // and the emissive.
+    public const fn float64 channel(const ref DynamicArray<uint16> table, isize c) {
+        // the ray through texel (WIDE / 2, HIGH / 2)'s centre, in a 50-degree camera, meets the face z = 0.5 at p
+        float64 fovHalf = tan(x: 25.0 * PI64 / 180.0);
+        float64 aspect = cast<float64>(WIDE) / cast<float64>(HIGH);
+        float64 ndcX = (cast<float64>(WIDE / 2) + 0.5) / cast<float64>(WIDE) * 2.0 - 1.0;
+        float64 ndcY = 1.0 - (cast<float64>(HIGH / 2) + 0.5) / cast<float64>(HIGH) * 2.0;
+        float64 px = 3.5 * ndcX * fovHalf * aspect;
+        float64 py = 3.5 * ndcY * fovHalf;
+        // towards the camera from p, of length 1; the normal is +Z
+        float64 vx = -px;
+        float64 vy = -py;
+        float64 vz = 3.5;
+        float64 vl = squareRoot(x: vx * vx + vy * vy + vz * vz);
+        vx = vx / vl;
+        vy = vy / vl;
+        vz = vz / vl;
+        float64 r = this.rough < 0.045 ? 0.045 : (this.rough > 1.0 ? 1.0 : this.rough);
+        float64 nv = clamped(x: vz);
+        float64 scale = sampledAt(table: table, u: r, v: nv, channel: 0);
+        float64 bias = sampledAt(table: table, u: r, v: nv, channel: 1);
+        float64 ess = scale + bias;
+        float64 col = this.colour[c];
+        float64 blended = 0.04 + (col - 0.04) * this.metal;
+        float64 compensation = blended * (1.0 / ess - 1.0) + 1.0;
+        float64 fssEss = 0.04 * scale + bias;
+        float64 ems = 1.0 - ess;
+        float64 favg = 0.04 + (1.0 - 0.04) * 0.047619;
+        float64 fms = fssEss * favg / (1.0 - ems * favg);
+        float64 scattered = fssEss + fms * ems;
+        float64 lambert = col * (1.0 - this.metal) / PI64;
+        float64 alpha = r * r;
+        float64 total = 0.0;
+        isize count = this.suns.length() / 6;
+        for (isize i = 0; i < count; i = i + 1) {
+            float64 lx = this.suns[i * 6];
+            float64 ly = this.suns[i * 6 + 1];
+            float64 lz = this.suns[i * 6 + 2];
+            float64 lc = this.suns[i * 6 + 3 + c];
+            float64 nl = clamped(x: lz);
+            float64 irradiance = lc * nl;
+            float64 hx = lx + vx;
+            float64 hy = ly + vy;
+            float64 hz = lz + vz;
+            float64 hl = squareRoot(x: hx * hx + hy * hy + hz * hz);
+            hx = hx / hl;
+            hy = hy / hl;
+            hz = hz / hl;
+            float64 vh = clamped(x: vx * hx + vy * hy + vz * hz);
+            float64 nh = clamped(x: hz);
+            float64 w = fresnelWeight(vh: vh);
+            float64 dielectric = 0.04 * (1.0 - w) + w;
+            float64 reflected = blended * (1.0 - w) + w;
+            float64 specular = reflected * vGgxRef(alpha: alpha, nl: nl, nv: nv) * dGgxRef(alpha: alpha, nh: nh);
+            total = total + irradiance * lambert * (1.0 - dielectric) + irradiance * specular * compensation;
+        }
+        total = total + this.ambient[c] * lambert * (1.0 - scattered);
+        return total + this.glow[c];
+    }
+    public const fn uint32 stored(const ref DynamicArray<uint16> table) {
+        return storedAs(r: this.channel(table: table, c: 0), g: this.channel(table: table, c: 1), b: this.channel(table: table, c: 2));
+    }
+}
+
+fn int32 channelOf(uint32 c, int32 shift) { return cast<int32>((c >> cast<uint32>(shift)) & 255); }
+fn int32 stepsApart(int32 a, int32 b) { return a > b ? a - b : b - a; }
+
+// A linear colour as the 8-bit sRGB target holds it, 0xRRGGBB.
+fn uint32 storedAs(float64 r, float64 g, float64 b) {
+    return (cast<uint32>(encoded(c: r)) << 16) | (cast<uint32>(encoded(c: g)) << 8) | cast<uint32>(encoded(c: b));
+}
+
+// What `ShowCamera` draws for a camera at (x, y, z) in world space, as stored.
+fn uint32 cameraShown(float64 x, float64 y, float64 z) { return storedAs(r: x * 0.1 + 0.5, g: y * 0.1 + 0.5, b: z * 0.1 + 0.5); }
+
+// "" when `got` is within one step of `want` on each channel; else both.
+fn string nearTo(uint32 got, uint32 want) {
+    bool near = stepsApart(a: channelOf(c: got, shift: 16), b: channelOf(c: want, shift: 16)) <= 1
+        && stepsApart(a: channelOf(c: got, shift: 8), b: channelOf(c: want, shift: 8)) <= 1
+        && stepsApart(a: channelOf(c: got, shift: 0), b: channelOf(c: want, shift: 0)) <= 1;
+    return near ? "" : "the texel is ${got}, not ${want}";
+}
+
+// The texel at (x, y) of a frame read top row first, 0xRRGGBB.
+fn uint32 texelAt(const ref DynamicArray<uint8> frame, isize x, isize y) {
+    isize at = (y * cast<isize>(WIDE) + x) * 4;
+    if (at + 2 >= frame.length()) { return 0xffffffff; }
+    return (cast<uint32>(frame[at]) << 16) | (cast<uint32>(frame[at + 1]) << 8) | cast<uint32>(frame[at + 2]);
+}
+
+type resource PhysicalRun {
+    int32 stage = 0;
+    Instant began = monotonicNow();
+    Verdicts found;
+    Device device;
+    Queue queue;
+    Optional<Renderer> renderer = Optional::None;
+    Optional<Shared<RenderTarget>> target = Optional::None;
+    Optional<Shared<PerspectiveCamera>> camera = Optional::None;
+    Optional<Shared<Scene>> scene = Optional::None;
+    Optional<Shared<ShowCamera>> shower = Optional::None;
+    Optional<Shared<MeshStandardMaterial>> standard = Optional::None;
+    Optional<Shared<Scene>> litScene = Optional::None;
+    Lighting expected;
+    DynamicArray<uint16> table;
+    Optional<PixelRead> reading = Optional::None;
+    DynamicArray<uint8> frame;
+    string failed = "";
+
+    public ctor make(Device device, Queue queue) {
+        this.found = Verdicts.make();
+        this.device = give device;
+        this.queue = give queue;
+        this.frame = DynamicArray.empty();
+        this.expected = Lighting.make();
+        this.table = dfgTable();
+    }
+
+    public fn ref Verdicts verdicts() { return this.found; }
+
+    unsafe fn void next(int32 to) { this.stage = to; this.began = monotonicNow(); }
+
+    // The read's texels into `frame` once it answers; false while it is pending. A failed read leaves `failed` set.
+    unsafe fn bool settled() {
+        PixelStatus s = match (this.reading) {
+            case Some(value: r): r.poll();
+            case None: PixelStatus::Failed(error: GpuError::Refused(words: "no read was started"));
+        };
+        bool pending = match (s) { case Pending: true; case _: false; };
+        if (pending && this.began.elapsed().asMillis() < SETTLE_MS) { return false; }
+        this.frame = DynamicArray.empty();
+        this.failed = "";
+        match (give s) {
+            case Ready(image: img): {
+                borrow img.samples8() as px { for (isize i = 0; i < px.length(); i = i + 1) { this.frame.add(item: px[i]); } }
+            }
+            case Failed(error: e): { this.failed = "the read failed: " + e.message(); }
+            case Pending: { this.failed = "the read was still pending after ${SETTLE_MS} ms"; }
+        };
+        this.reading = Optional::None;
+        return true;
+    }
+
+    // "" when the frame's centre, on the box, is within a step of `want` and its corner the backdrop; else what is.
+    unsafe fn string centreIs(uint32 want) {
+        if (!this.failed.isEmpty()) { return copy this.failed; }
+        uint32 corner = texelAt(frame: this.frame, x: 1, y: 1);
+        string backdrop = nearTo(got: corner, want: BACKDROP);
+        if (!backdrop.isEmpty()) { return "the corner is not the backdrop: " + backdrop; }
+        uint32 middle = texelAt(frame: this.frame, x: cast<isize>(WIDE) / 2, y: cast<isize>(HIGH) / 2);
+        return nearTo(got: middle, want: want);
+    }
+
+    // Render `s` with the run's camera into its target, and start reading it back.
+    unsafe fn void draw(Shared<Scene> s) {
+        match (this.renderer) {
+            case Some(value: r): {
+                match (this.camera) {
+                    case Some(value: c): {
+                        r.render(scene: s, camera: copy c);
+                        match (this.target) {
+                            case Some(value: t): { this.reading = Optional::Some(value: r.readRenderTargetPixels(target: copy t)); }
+                            case None: { }
+                        };
+                    }
+                    case None: { }
+                };
+            }
+            case None: { }
+        };
+    }
+
+    unsafe fn Shared<Scene> theScene() {
+        return match (this.scene) { case Some(value: s): copy s; case None: { panic(msg: "made at the first stage"); } };
+    }
+    unsafe fn Shared<PerspectiveCamera> theCamera() {
+        return match (this.camera) { case Some(value: c): copy c; case None: { panic(msg: "made at the first stage"); } };
+    }
+    unsafe fn Shared<MeshStandardMaterial> theStandard() {
+        return match (this.standard) { case Some(value: m): copy m; case None: { panic(msg: "made at the lit stage"); } };
+    }
+    unsafe fn Shared<Scene> theLitScene() {
+        return match (this.litScene) { case Some(value: s): copy s; case None: { panic(msg: "made at the lit stage"); } };
+    }
+    unsafe fn int32 compiled() {
+        return match (this.shower) { case Some(value: m): m.compiles(); case None: 0; };
+    }
+
+    // A scene of one unit box drawn with `look`, the run's scene from then on.
+    unsafe fn Shared<Scene> boxWith(Shared<ShowCamera> look) {
+        Shared<Scene> s = new Scene.make();
+        Shared<BoxGeometry> box = new BoxGeometry.make(width: 1.0, height: 1.0, depth: 1.0);
+        Shared<Mesh> cube = new Mesh.make(geometry: box, material: copy look);
+        s.add(object: cube);
+        this.shower = Optional::Some(value: give look);
+        this.scene = Optional::Some(value: copy s);
+        return s;
+    }
+
+    public unsafe fn bool step() {
+        if (this.stage == 0) {
+            Renderer r = Renderer.withDevice(device: copy this.device, queue: copy this.queue);
+            r.clearColorMut() = Color.fromHex(hex: BACKDROP);
+            Shared<RenderTarget> t = new RenderTarget.make(width: WIDE, height: HIGH);
+            Shared<PerspectiveCamera> cam = new PerspectiveCamera.make(fovRad: radians(deg: 50.0),
+                                                                        aspect: cast<float32>(WIDE) / cast<float32>(HIGH),
+                                                                        near: 0.1, far: 100.0);
+            // off the axis, looking down -Z, so its centre ray still meets the box's front face
+            cam.positionMut() = Vec3.of(x: 0.3, y: 0.2, z: 4.0);
+            cam.targetMut() = Optional::Some(value: copy t);
+            this.renderer = Optional::Some(value: give r);
+            this.target = Optional::Some(value: give t);
+            this.camera = Optional::Some(value: give cam);
+            Shared<Scene> s = this.boxWith(look: new ShowCamera.make(perVertex: false));
+            this.draw(s: give s);
+            this.next(to: 1);
+        } else if (this.stage == 1) {
+            if (!this.settled()) { return false; }
+            this.found.add(name: "cameraPosition(): a material reads the camera's position in world space from the frame",
+                           why: this.centreIs(want: cameraShown(x: 0.3, y: 0.2, z: 4.0)));
+            Shared<PerspectiveCamera> cam = this.theCamera();
+            cam.positionMut() = Vec3.of(x: -0.2, y: 0.1, z: 3.0);
+            Shared<Scene> s = this.theScene();
+            this.draw(s: give s);
+            this.next(to: 2);
+        } else if (this.stage == 2) {
+            if (!this.settled()) { return false; }
+            this.found.add(name: "cameraPosition(): the camera moved is read at its new position the next frame",
+                           why: this.centreIs(want: cameraShown(x: -0.2, y: 0.1, z: 3.0)));
+            int32 n = this.compiled();
+            this.found.add(name: "cameraPosition(): moving the camera compiles nothing: the position is data in the frame",
+                           why: n == 1 ? "" : "the material compiled ${n} time(s)");
+            // the camera under a group moved by (0.1, -0.1, 0.5): its world position is the group's plus its own
+            Shared<Scene> s = this.theScene();
+            Shared<Group> holder = new Group.make();
+            holder.positionMut() = Vec3.of(x: 0.1, y: -0.1, z: 0.5);
+            Shared<PerspectiveCamera> cam = this.theCamera();
+            cam.positionMut() = Vec3.of(x: 0.2, y: 0.3, z: 3.0);
+            holder.add(object: copy cam);
+            s.add(object: holder);
+            this.draw(s: give s);
+            this.next(to: 3);
+        } else if (this.stage == 3) {
+            if (!this.settled()) { return false; }
+            this.found.add(name: "cameraPosition(): a camera under a moved parent is read at its world position",
+                           why: this.centreIs(want: cameraShown(x: 0.3, y: 0.2, z: 3.5)));
+            Shared<Scene> s = this.boxWith(look: new ShowCamera.make(perVertex: true));
+            Shared<Group> holder = new Group.make();
+            holder.positionMut() = Vec3.of(x: 0.1, y: -0.1, z: 0.5);
+            Shared<PerspectiveCamera> cam = this.theCamera();
+            holder.add(object: copy cam);
+            s.add(object: holder);
+            this.draw(s: give s);
+            this.next(to: 4);
+        } else if (this.stage == 4) {
+            if (!this.settled()) { return false; }
+            this.found.add(name: "cameraPosition(): the vertex stage reads it too, through a varying",
+                           why: this.centreIs(want: cameraShown(x: 0.3, y: 0.2, z: 3.5)));
+            Shared<Scene> shown = new Scene.make();
+            Shared<BoxGeometry> plainBox = new BoxGeometry.make(width: 1.0, height: 1.0, depth: 1.0);
+            Shared<ShowSchlick> schlick = new ShowSchlick.make();
+            Shared<Mesh> schlickBox = new Mesh.make(geometry: plainBox, material: schlick);
+            shown.add(object: schlickBox);
+            this.draw(s: give shown);
+            this.next(to: 11);
+        } else if (this.stage == 11) {
+            if (!this.settled()) { return false; }
+            this.found.add(name: "fSchlick(): r187's F_Schlick at a grazing dotVH of 0.3, its F0 a vec3 and its F90 0.5, within a step",
+                           why: this.centreIs(want: schlickShown()));
+            // the lit box: a fresh camera at (0.35, 0.25, 4) on the scene's root, looking down -Z, so the ray through the
+            // centre texel meets the face as it would from (0, 0, 4), but the camera's position from the origin is 6
+            // degrees from that ray; one sun, a dielectric of roughness 0.5
+            Shared<PerspectiveCamera> cam = new PerspectiveCamera.make(fovRad: radians(deg: 50.0),
+                                                                        aspect: cast<float32>(WIDE) / cast<float32>(HIGH),
+                                                                        near: 0.1, far: 100.0);
+            cam.positionMut() = Vec3.of(x: 0.35, y: 0.25, z: 4.0);
+            match (this.target) { case Some(value: t): { cam.targetMut() = Optional::Some(value: copy t); } case None: { } };
+            this.camera = Optional::Some(value: give cam);
+            Shared<Scene> s = new Scene.make();
+            Shared<BoxGeometry> box = new BoxGeometry.make(width: 1.0, height: 1.0, depth: 1.0);
+            Shared<MeshStandardMaterial> m = new MeshStandardMaterial.make();
+            m.colorMut() = Color.fromHex(hex: 0xc08040);
+            m.roughnessMut() = 0.5;
+            Shared<Mesh> cube = new Mesh.make(geometry: box, material: copy m);
+            s.add(object: cube);
+            Shared<DirectionalLight> sun = new DirectionalLight.make();
+            sun.positionMut() = Vec3.of(x: 1.0, y: 2.0, z: 3.0);
+            s.add(object: sun);
+            this.expected.surface(hex: 0xc08040, roughness: 0.5, metalness: 0.0);
+            this.expected.sun(x: 1.0, y: 2.0, z: 3.0, hex: 0xffffff, intensity: 1.0);
+            this.standard = Optional::Some(value: give m);
+            this.litScene = Optional::Some(value: copy s);
+            this.draw(s: give s);
+            this.next(to: 5);
+        } else if (this.stage == 5) {
+            if (!this.settled()) { return false; }
+            uint32 want = this.expected.stored(table: this.table);
+            this.found.add(name: "MeshStandardMaterial: lit by one sun, a dielectric of roughness 0.5 shows r187's direct diffuse and specular, within a step",
+                           why: this.centreIs(want: want));
+            Shared<MeshStandardMaterial> m = this.theStandard();
+            m.metalnessMut() = 1.0;
+            this.expected.surface(hex: 0xc08040, roughness: 0.5, metalness: 1.0);
+            Shared<Scene> s = this.theLitScene();
+            this.draw(s: give s);
+            this.next(to: 6);
+        } else if (this.stage == 6) {
+            if (!this.settled()) { return false; }
+            uint32 want = this.expected.stored(table: this.table);
+            this.found.add(name: "MeshStandardMaterial: a metal diffuses nothing, its specular tinted by its colour and compensated for multiple scattering, within a step",
+                           why: this.centreIs(want: want));
+            // a rougher mix: roughness 0.2, half metal, a second sun and an ambient light
+            Shared<MeshStandardMaterial> m = this.theStandard();
+            m.roughnessMut() = 0.2;
+            m.metalnessMut() = 0.5;
+            Shared<Scene> s = this.theLitScene();
+            Shared<DirectionalLight> second = new DirectionalLight.make();
+            second.positionMut() = Vec3.of(x: -2.0, y: 1.0, z: 4.0);
+            second.colorMut() = Color.fromHex(hex: 0x80c0ff);
+            second.intensityMut() = 2.0;
+            s.add(object: second);
+            Shared<AmbientLight> glow = new AmbientLight.make();
+            glow.colorMut() = Color.fromHex(hex: 0x404040);
+            s.add(object: glow);
+            this.expected.surface(hex: 0xc08040, roughness: 0.2, metalness: 0.5);
+            this.expected.sun(x: -2.0, y: 1.0, z: 4.0, hex: 0x80c0ff, intensity: 2.0);
+            this.expected.ambientLight(hex: 0x404040, intensity: 1.0);
+            this.draw(s: give s);
+            this.next(to: 7);
+        } else if (this.stage == 7) {
+            if (!this.settled()) { return false; }
+            uint32 want = this.expected.stored(table: this.table);
+            this.found.add(name: "MeshStandardMaterial: two suns and an ambient light, roughness 0.2, half metal: each sun's terms summed, and the ambient's indirect diffuse less what the specular lobe reflects, within a step",
+                           why: this.centreIs(want: want));
+            Shared<MeshStandardMaterial> m = this.theStandard();
+            m.colorNodeMut() = Optional::Some(value: vec3(x: constant(value: 0.2), y: constant(value: 0.5), z: constant(value: 0.8)));
+            // a roughness past 1, which getRoughness caps at 1, as r187's does
+            m.roughnessNodeMut() = Optional::Some(value: constant(value: 1.5));
+            m.metalnessNodeMut() = Optional::Some(value: constant(value: 0.25));
+            this.expected.linearSurface(r: 0.2, g: 0.5, b: 0.8, roughness: 1.5, metalness: 0.25);
+            Shared<Scene> s = this.theLitScene();
+            this.draw(s: give s);
+            this.next(to: 8);
+        } else if (this.stage == 8) {
+            if (!this.settled()) { return false; }
+            uint32 want = this.expected.stored(table: this.table);
+            this.found.add(name: "MeshStandardMaterial: colorNode, roughnessNode and metalnessNode, a program's own nodes, replace the colour, roughness and metalness, a roughness past 1 capped at 1",
+                           why: this.centreIs(want: want));
+            Shared<MeshStandardMaterial> m = this.theStandard();
+            m.colorNodeMut() = Optional::None;
+            m.roughnessNodeMut() = Optional::None;
+            m.metalnessNodeMut() = Optional::None;
+            m.emissiveMut() = Color.fromHex(hex: 0x202020);
+            this.expected.surface(hex: 0xc08040, roughness: 0.2, metalness: 0.5);
+            this.expected.emissive(hex: 0x202020);
+            Shared<Scene> s = this.theLitScene();
+            this.draw(s: give s);
+            this.next(to: 9);
+        } else if (this.stage == 9) {
+            if (!this.settled()) { return false; }
+            uint32 want = this.expected.stored(table: this.table);
+            this.found.add(name: "MeshStandardMaterial: its slots cleared give its values back, and its emissive adds to what the lights give",
+                           why: this.centreIs(want: want));
+            // an ambient light alone, intensity 3, on the default material: white, roughness 1, a dielectric
+            Shared<Scene> s = new Scene.make();
+            Shared<BoxGeometry> box = new BoxGeometry.make(width: 1.0, height: 1.0, depth: 1.0);
+            Shared<MeshStandardMaterial> plain = new MeshStandardMaterial.make();
+            Shared<Mesh> cube = new Mesh.make(geometry: box, material: plain);
+            s.add(object: cube);
+            Shared<AmbientLight> glow = new AmbientLight.make();
+            glow.intensityMut() = 3.0;
+            s.add(object: glow);
+            this.expected = Lighting.make();
+            this.expected.ambientLight(hex: 0xffffff, intensity: 3.0);
+            this.draw(s: give s);
+            this.next(to: 10);
+        } else if (this.stage == 10) {
+            if (!this.settled()) { return false; }
+            uint32 want = this.expected.stored(table: this.table);
+            this.found.add(name: "MeshStandardMaterial: an ambient light alone gives r187's indirect diffuse, its irradiance through Lambert less what the specular lobe reflects, singly and multiply, within a step",
+                           why: this.centreIs(want: want));
+            // the same lighting at intensity 1, amplified: what the model gives less r187's float64 value, × 128
+            Lighting alone = Lighting.make();
+            alone.ambientLight(hex: 0xffffff, intensity: 1.0);
+            float32 reference = cast<float32>(alone.channel(table: this.table, c: 0));
+            Shared<Scene> s = new Scene.make();
+            Shared<BoxGeometry> box = new BoxGeometry.make(width: 1.0, height: 1.0, depth: 1.0);
+            Shared<AmplifiedAmbient> amplified = new AmplifiedAmbient.make(want: reference);
+            Shared<Mesh> cube = new Mesh.make(geometry: box, material: amplified);
+            s.add(object: cube);
+            Shared<AmbientLight> glow = new AmbientLight.make();
+            s.add(object: glow);
+            this.draw(s: give s);
+            this.next(to: 12);
+        } else if (this.stage == 12) {
+            if (!this.settled()) { return false; }
+            this.found.add(name: "PhysicalLightingModel: the ambient's indirect diffuse matches r187's in float64 to 1/128 of a step, its multiple scattering among it",
+                           why: this.centreIs(want: storedAs(r: 0.5, g: 0.5, b: 0.5)));
+            DeviceErrors errs = this.device.takeErrors();
+            isize nerr = errs.reports().length();
+            string firstError = nerr > 0 ? errs.reports()[0].message() : "";
+            this.found.add(name: "PhysicalLightingModel: the run's frames raise no WebGPU error",
+                           why: errs.isEmpty() ? "" : "the channel holds ${nerr} error(s), the first: " + firstError);
+            this.renderer = Optional::None;
+            this.stage = 999;
+        }
+        return this.stage == 999;
+    }
+}

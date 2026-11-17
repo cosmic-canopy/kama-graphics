@@ -254,6 +254,22 @@ natively. The library's own `examples/cube` is the same scene without an engine.
 
   **Part 3 is built.** Next, part 4: the frame (the depth prepass, 4x MSAA, the 16-bit float target and AgX), where
   three.js's `max(0)` on every output becomes visible.
+- **Decided on 2026-11-17, part 4's three questions** (kyoten's `docs/design/rendering.md` § Decided), each as
+  recommended and confirmed as the production answer:
+  1. 4x MSAA resolves by a ladder: a tone-mapped resolve (each sample weighted by 1/(1 + its brightness), averaged, the
+     weight undone, so the result stays linear) is best, and the GPU's own resolve next, each with its golden. The
+     presets choose, and a tiled GPU's is set by measurement at GFX-5. The GPU's resolve alone shows a highlight's edge
+     as a hard staircase: 242, 250 and 254 of 255 for 1, 2 and 3 of 4 samples on it, where the tone-mapped resolve shows
+     162, 202 and 231;
+  2. AgX is both: `AgX` is three.js r187's, held to its formulas, and Blender's AgX goes under its own name, held to
+     the table Blender ships, its formulas ported from that table's generator. Blender's is the default. The two differ
+     by up to 45 steps on saturated colours;
+  3. exposure is on each camera, in EV100 (exposure = 2^−EV100 / 1.2), its default three.js's exposure of 1, with named
+     values for sunlight, overcast, indoor and Blender's calibration.
+
+  Settled under the design's prepass, and reported: the main pass tests depth Equal with writes off, the position
+  `@invariant` in both passes. Part 4 starts with two checks: that naga and Tint honour `@invariant`, and that Blender's
+  AgX formulas match its table within a step.
 - **Done:**
   - `examples/cube` draws from one source on both legs;
   - its golden passes on a software GPU on each leg CI has, and perceptually on the reference machines present;

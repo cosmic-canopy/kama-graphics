@@ -133,16 +133,20 @@ functions in kama, a WGSL function as text the escape, and no WESL linker at run
 - `MeshStandardMaterial`'s values and `emissiveNode`;
 - a material compiled again when its nodes change (`graphVersion()`).
 
-Its third part, the lights, is under way, its three questions decided (2026-11-16, ROADMAP_DETAIL § GFX-1): the lights
+Its third part, the lights, is built, its three questions decided (2026-11-16, ROADMAP_DETAIL § GFX-1): the lights
 reach a shader as data, a storage buffer of any length, so a light's change compiles nothing; the direct light reads
-three.js's DFG table through a texture node; a directional light points at `target()`, a world-space point. Its first
-step is built: the DFG table and the texture-sample node, on `@kama/gpu`'s `writeTexture`. Its second is built too
-(SPEC § The scene graph, § Typed nodes and § The compiler): the lights as scene nodes and their buffer, and, as the
-owner decided at the step's start, a `LightingModel` contract that the compiler writes once inside a loop over the
-lights. Next, the physical model on it and the three slots. GFX-1 is
-built depth-first, and every example is a test: a headless
-readback and a golden image, on web and native. A feature a program does not use drops out at link time.
-[SPEC.md](SPEC.md) is what is built so far, and grows with each part.
+three.js's DFG table through a texture node; a directional light points at `target()`, a world-space point. In four
+steps (SPEC § The renderer, § Materials, § The scene graph, § Typed nodes, § The compiler and § Tests):
+- the DFG table and the texture-sample node, on `@kama/gpu`'s `writeTexture`;
+- the lights as scene nodes and their buffer, and, as the owner decided at the step's start, a `LightingModel` contract
+  that the compiler writes once inside a loop over the lights;
+- three.js r187's physical model on it, lighting `MeshStandardMaterial`, with its three slots;
+- the lit goldens, one for each feature the part built, named as FEATURES.md names its test.
+
+**Part 3 is built** (2026-11-17). Next, part 4, the frame: the depth prepass, 4x MSAA, the 16-bit float target and AgX.
+GFX-1 is built depth-first, and every example is a test: a headless readback and a golden image, on web and native. A
+feature a program does not use drops out at link time. [SPEC.md](SPEC.md) is what is built so far, and grows with each
+part.
 
 ## Where the truth is
 

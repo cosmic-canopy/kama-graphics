@@ -225,6 +225,35 @@ natively. The library's own `examples/cube` is the same scene without an engine.
     amplify.
 
   Next, step 4: the lit box's golden on WARP and SwiftShader.
+- **Built, part 3's third part, step 4, the lit goldens, and so part 3** (2026-11-17, [SPEC.md](SPEC.md) § Tests): one
+  golden for each feature the part built, named as FEATURES.md names its test, each on WARP and SwiftShader:
+  - `light-directional`: the default box seen from a corner under two suns of different colours and intensities, one
+    aimed at a target off the origin;
+  - `light-ambient`: the same box under two ambient lights;
+  - `material-standard`: three boxes under a sun and an ambient light: a rough dielectric with an emissive, a smooth
+    dielectric and a metal.
+
+  On every leg, hardware included, each face the camera sees well is held at the texel its centre falls in, within a
+  step of r187's formulas worked in float64 along the exact ray through that texel. That is step 3's reference, taken to
+  any point, normal and eye. WARP draws the same bytes natively and in Firefox, so the lit shading needs no golden per
+  leg. SwiftShader's frames differ from WARP's in 4, 32 and 380 of their texels.
+
+  **Settled under the owner's decisions, and reported:** "the lit box's golden" is one golden for each feature the part
+  built, as FEATURES.md § How to read a row has each feature's test, so their rows hold tests that exist once a budget
+  makes them `built` (part 6).
+
+  Red first: each golden failed with "no golden yet" and printed its frame on every golden leg, and
+  `tools/update-goldens.sh` wrote them. 266 cases on each golden leg, 258 in Edge, each debug and release. 7 of 7
+  mutations caught (kyoten's `.scratch/s33/list4.py`), each by the golden and the face check of the feature it breaks
+  alone: a sun's intensity dropped, a sun aimed at the origin, only the first sun read, only the last ambient light
+  summed, a metal diffusing, the emissive dropped, and a metal's specular left untinted.
+
+  **Found while building, and fixed first** (kama-graphics `ef418f2`): step 3 left the tests' no-device path pointing at
+  its new stage, so a leg whose device never opened panicked. The gate now asks Edge, which offers no fallback adapter,
+  for WARP, and holds the run to failing cleanly.
+
+  **Part 3 is built.** Next, part 4: the frame (the depth prepass, 4x MSAA, the 16-bit float target and AgX), where
+  three.js's `max(0)` on every output becomes visible.
 - **Done:**
   - `examples/cube` draws from one source on both legs;
   - its golden passes on a software GPU on each leg CI has, and perceptually on the reference machines present;

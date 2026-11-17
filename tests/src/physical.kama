@@ -28,7 +28,7 @@ import {
     graphics::DirectionalLight, graphics::AmbientLight, graphics::dfgTable, graphics::fSchlick,
     Verdicts, encoded, sampledAt,
 };
-export { physicalCases, PhysicalRun };
+export { physicalCases, PhysicalRun, Lighting, storedAs, nearTo };
 
 comptime int64 SETTLE_MS = 10000;
 comptime uint32 WIDE = 64;
@@ -291,10 +291,17 @@ type resource Lighting {
     }
     // a sun at (x, y, z) pointing at the origin, its colour × intensity as the renderer writes it, in float32
     public fn void sun(float64 x, float64 y, float64 z, uint32 hex, float32 intensity) {
-        float64 len = squareRoot(x: x * x + y * y + z * z);
-        this.suns.add(item: x / len);
-        this.suns.add(item: y / len);
-        this.suns.add(item: z / len);
+        this.sunToward(x: x, y: y, z: z, tx: 0.0, ty: 0.0, tz: 0.0, hex: hex, intensity: intensity);
+    }
+    // a sun at (x, y, z) pointing at the world-space point (tx, ty, tz), its `target()`
+    public fn void sunToward(float64 x, float64 y, float64 z, float64 tx, float64 ty, float64 tz, uint32 hex, float32 intensity) {
+        float64 dx = x - tx;
+        float64 dy = y - ty;
+        float64 dz = z - tz;
+        float64 len = squareRoot(x: dx * dx + dy * dy + dz * dz);
+        this.suns.add(item: dx / len);
+        this.suns.add(item: dy / len);
+        this.suns.add(item: dz / len);
         Color c = Color.fromHex(hex: hex);
         this.suns.add(item: cast<float64>(c.linearR() * intensity));
         this.suns.add(item: cast<float64>(c.linearG() * intensity));
@@ -318,16 +325,25 @@ type resource Lighting {
         float64 ndcY = 1.0 - (cast<float64>(HIGH / 2) + 0.5) / cast<float64>(HIGH) * 2.0;
         float64 px = 3.5 * ndcX * fovHalf * aspect;
         float64 py = 3.5 * ndcY * fovHalf;
-        // towards the camera from p, of length 1; the normal is +Z
-        float64 vx = -px;
-        float64 vy = -py;
-        float64 vz = 3.5;
+        // p on the face z = 0.5, relative to the camera's axis, seen from (0, 0, 4); the normal is +Z
+        return this.seen(table: table, c: c, nx: 0.0, ny: 0.0, nz: 1.0, px: px, py: py, pz: 0.5, ex: 0.0, ey: 0.0, ez: 4.0);
+    }
+
+    // What channel `c` shows at the point (px, py, pz) of a surface whose normal (nx, ny, nz) is of length 1, seen from an
+    // eye at (ex, ey, ez), as r187 lights it: its direct diffuse and specular from each sun, its ambient's indirect
+    // diffuse, and the emissive.
+    public const fn float64 seen(const ref DynamicArray<uint16> table, isize c, float64 nx, float64 ny, float64 nz,
+                                 float64 px, float64 py, float64 pz, float64 ex, float64 ey, float64 ez) {
+        // towards the eye from p, of length 1
+        float64 vx = ex - px;
+        float64 vy = ey - py;
+        float64 vz = ez - pz;
         float64 vl = squareRoot(x: vx * vx + vy * vy + vz * vz);
         vx = vx / vl;
         vy = vy / vl;
         vz = vz / vl;
         float64 r = this.rough < 0.045 ? 0.045 : (this.rough > 1.0 ? 1.0 : this.rough);
-        float64 nv = clamped(x: vz);
+        float64 nv = clamped(x: nx * vx + ny * vy + nz * vz);
         float64 scale = sampledAt(table: table, u: r, v: nv, channel: 0);
         float64 bias = sampledAt(table: table, u: r, v: nv, channel: 1);
         float64 ess = scale + bias;
@@ -348,7 +364,7 @@ type resource Lighting {
             float64 ly = this.suns[i * 6 + 1];
             float64 lz = this.suns[i * 6 + 2];
             float64 lc = this.suns[i * 6 + 3 + c];
-            float64 nl = clamped(x: lz);
+            float64 nl = clamped(x: nx * lx + ny * ly + nz * lz);
             float64 irradiance = lc * nl;
             float64 hx = lx + vx;
             float64 hy = ly + vy;
@@ -358,7 +374,7 @@ type resource Lighting {
             hy = hy / hl;
             hz = hz / hl;
             float64 vh = clamped(x: vx * hx + vy * hy + vz * hz);
-            float64 nh = clamped(x: hz);
+            float64 nh = clamped(x: nx * hx + ny * hy + nz * hz);
             float64 w = fresnelWeight(vh: vh);
             float64 dielectric = 0.04 * (1.0 - w) + w;
             float64 reflected = blended * (1.0 - w) + w;

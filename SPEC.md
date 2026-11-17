@@ -5,12 +5,13 @@ tested. What comes next is [ROADMAP.md](ROADMAP.md), every feature it will have 
 decided design and the library's departures from kama's are [AGENTS.graphics.md](AGENTS.graphics.md), and its history
 is the git log and [CHANGELOG.md](CHANGELOG.md).
 
-**Where it stands** (2026-11-15, kama 0.9.960): GFX-1's parts 1 and 2, and part 3's first part. A `Renderer` with no
-window draws a scene of unlit boxes through a perspective camera into a render target, with reversed depth, and reads it
-back as an `@kama/image` `Image`, natively on Windows on wgpu-native v29.0.1.1 and on the web in headless Edge 157,
-Chrome for Testing 157 and Firefox 160. A material's shader is typed nodes compiled to WGSL at run time. A misuse the
-types cannot refuse is refused and reported, never ending the program. Every frame in the tests is held to its software
-GPU's golden. Not published.
+**Where it stands** (2026-11-17, kama 0.9.966): GFX-1's parts 1 to 3. A `Renderer` with no window draws a scene of boxes
+through a perspective camera into a render target, with reversed depth, and reads it back as an `@kama/image` `Image`,
+natively on Windows on wgpu-native v29.0.1.1 and on the web in headless Edge 157, Chrome for Testing 157 and Firefox 160.
+A box is lit by directional and ambient lights through three.js r187's physical model (`MeshStandardMaterial`), or drawn
+unlit (`MeshBasicMaterial`). A material's shader is typed nodes compiled to WGSL at run time. A misuse the types cannot
+refuse is refused and reported, never ending the program. Every frame in the tests is held to its software GPU's golden.
+Not published.
 
 ## Using it
 
@@ -423,7 +424,7 @@ WGSL's reserved words beyond its keywords are refused by the GPU's own compile, 
 - then `tests/`, one program, built debug and release and run natively, and built for the web and run under `kama run`
   in Edge, Firefox and the pinned Chrome for Testing, each started as `tools/browsers.mjs` says.
 
-It is 240 cases on each leg that names a software GPU, and 235 in Edge, whose leg names none.
+It is 266 cases on each leg that names a software GPU, and 258 in Edge, whose leg names none.
 
 - **The goldens** (kyoten's rendering.md § Decided, GFX-1's part 1, questions 2 and 3):
   - Each leg names its software GPU: `--golden warp` natively on Windows and in Firefox, `--golden swiftshader` in the
@@ -566,8 +567,20 @@ It is 240 cases on each leg that names a software GPU, and 235 in Edge, whose le
     emissive; and an ambient light alone on the default material;
   - the ambient's indirect diffuse on a program's material, (lit − r187's float64 value) × 128 + 0.5, within a step of
     mid-grey: its multiple scattering, about 0.2 % of it, is held so. No WebGPU error.
+- **Part 3's third part, step 4, the lit goldens, on each leg's GPU** (`tests/src/lit.kama`): one for each feature part 3
+  built, named as FEATURES.md names its test:
+  - `light-directional/<gpu>.png`: the default box seen from a corner under two suns of different colours and
+    intensities, one aimed at a target off the origin;
+  - `light-ambient/<gpu>.png`: the same box under two ambient lights;
+  - `material-standard/<gpu>.png`: three boxes under a sun and an ambient light: a rough dielectric with an emissive, a
+    smooth dielectric and a metal.
+
+  On every leg, hardware included, each face the camera sees well is held at the texel its centre falls in, within a
+  step of r187's formulas worked in float64 along the exact ray through that texel (`physical.kama`'s reference, at any
+  point, normal and eye). WARP draws the same bytes natively and in Firefox. SwiftShader's frames differ from WARP's in
+  4, 32 and 380 texels. No WebGPU error.
 - **Part 2's golden holds part 3's compiler:** `boxes/<gpu>.png` is matched byte for byte with `MeshBasicMaterial`'s
   nodes, as it was with its WGSL by hand.
 - **Printed from outside the program:** the gate counts each leg's printed lines: one for the render refused by the
-  renderer that prints, five for the refused adds, one for the refused material, and none from the renderer told not to
-  print.
+  renderer that prints, five for the refused adds, one for the refused material, one for the directional light at its
+  own target, and none from the renderer told not to print.

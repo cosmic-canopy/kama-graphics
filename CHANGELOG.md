@@ -115,3 +115,6 @@ package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - `MeshStandardMaterial` lit by it, plus its emissive, and its slots `colorNode`, `roughnessNode` and
     `metalnessNode`, each moving `graphVersion()`.
   - `Vec3Node` takes a float added or taken, and a number less a vec3.
+- GFX-1's part 3, its third part, step 4, which builds part 3: the lit goldens, `light-directional`, `light-ambient` and
+  `material-standard`, each held byte for byte on WARP and SwiftShader, with every face they show held to r187's
+  formulas on every leg. The library's API is unchanged.

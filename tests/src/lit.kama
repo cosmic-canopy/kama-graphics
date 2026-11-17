@@ -1,0 +1,441 @@
+// GFX-1's part 3, its third part, step 4: the lit goldens (kyoten's rendering.md § Decided, GFX-1's four questions and
+// part 3's). Each feature part 3 built is held by the golden FEATURES.md names for it, a frame drawn on the leg's software
+// GPU and compared byte for byte with `tests/goldens/<test>/<gpu>.png`:
+// - `light-directional`: the default white box seen from a corner, lit by two suns of different colours and intensities,
+//   one aimed at a target off the origin, and no ambient light;
+// - `light-ambient`: the same box under two ambient lights and no sun;
+// - `material-standard`: three boxes in a row under one sun and an ambient light: a rough dielectric with an emissive, a
+//   smooth dielectric and a metal, seen from above the sun's reflection so the tops carry its highlight.
+//
+// On every leg, hardware too, each face the camera sees well is held at the texel its centre falls in, within a step of
+// r187's formulas worked in float64 (physical.kama's `Lighting`) along the exact ray through that texel, so a leg that
+// compares no golden still holds what each frame shows. A step a tick, on the device the check opened.
+
+import {
+    std::collections::DynamicArray,
+    std::math::Vec3, std::math::radians, std::math::tan, std::math::floor, std::math::sqrt as squareRoot,
+    std::time::Instant, std::time::monotonicNow,
+    gpu::Device, gpu::Queue, gpu::DeviceErrors, gpu::GpuError,
+    graphics::Color, graphics::Renderer, graphics::RenderTarget, graphics::Scene, graphics::Mesh,
+    graphics::PerspectiveCamera, graphics::BoxGeometry, graphics::MeshStandardMaterial, graphics::DirectionalLight,
+    graphics::AmbientLight, graphics::PixelRead, graphics::PixelStatus, graphics::dfgTable,
+    Verdicts, checkGolden, Lighting, storedAs, nearTo,
+};
+export { LitRun };
+
+comptime int64 SETTLE_MS = 10000;
+comptime uint32 BACKDROP = 0x202830;
+comptime float64 PI64 = 3.141592653589793;
+comptime float64 HALF = 0.5;        // half a unit box's side
+comptime float64 MARGIN = 0.06;     // how far inside its face's edges a held texel's point must be, in world units
+comptime float64 WELL_SEEN = 0.3;   // a face is held when the cosine between its normal and its centre's way to the eye is above this
+comptime float64 FAR = 1000000.0;
+
+// A point or a direction, in float64.
+@generate(of)
+type value D3 {
+    public float64 x;
+    public float64 y;
+    public float64 z;
+}
+
+fn D3 plus3(D3 a, D3 b) { return D3.of(x: a.x + b.x, y: a.y + b.y, z: a.z + b.z); }
+fn D3 minus3(D3 a, D3 b) { return D3.of(x: a.x - b.x, y: a.y - b.y, z: a.z - b.z); }
+fn D3 scaled3(D3 a, float64 s) { return D3.of(x: a.x * s, y: a.y * s, z: a.z * s); }
+fn float64 dot3(D3 a, D3 b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
+fn D3 cross3(D3 a, D3 b) { return D3.of(x: a.y * b.z - a.z * b.y, y: a.z * b.x - a.x * b.z, z: a.x * b.y - a.y * b.x); }
+fn D3 unit3(D3 a) { float64 l = squareRoot(x: dot3(a: a, b: a)); return scaled3(a: a, s: 1.0 / l); }
+fn float64 along(D3 v, int32 axis) { return axis == 0 ? v.x : (axis == 1 ? v.y : v.z); }
+// A float32 point, as the renderer holds it, widened exactly.
+fn D3 widened(Vec3 v) { return D3.of(x: cast<float64>(v.x), y: cast<float64>(v.y), z: cast<float64>(v.z)); }
+
+// The six faces' normals by index: +X, -X, +Y, -Y, +Z, -Z.
+fn D3 normalOf(int32 face) {
+    float64 s = face % 2 == 0 ? 1.0 : -1.0;
+    int32 axis = face / 2;
+    return D3.of(x: axis == 0 ? s : 0.0, y: axis == 1 ? s : 0.0, z: axis == 2 ? s : 0.0);
+}
+fn string faceName(int32 face) {
+    string sign = face % 2 == 0 ? "+" : "-";
+    int32 axis = face / 2;
+    return sign + (axis == 0 ? "X" : (axis == 1 ? "Y" : "Z"));
+}
+
+// A texel, (x, y), the top row first.
+@generate(of)
+type value Texel {
+    public isize x;
+    public isize y;
+}
+
+// A 50-degree camera at `eye` looking at `at`, Y up, turned as three.js's lookAt turns it: where a point falls, and the
+// ray through a texel's centre.
+@generate(of)
+type value View {
+    public D3 eye;
+    public D3 forward;
+    public D3 right;
+    public D3 up;
+    public float64 tanHalf;
+    public float64 aspect;
+    public float64 wide;
+    public float64 high;
+}
+
+fn View viewFrom(D3 eye, D3 at, uint32 wide, uint32 high) {
+    D3 f = unit3(a: minus3(a: at, b: eye));
+    D3 r = unit3(a: cross3(a: f, b: D3.of(x: 0.0, y: 1.0, z: 0.0)));
+    D3 u = cross3(a: r, b: f);
+    float64 w = cast<float64>(wide);
+    float64 h = cast<float64>(high);
+    return View.of(eye: eye, forward: f, right: r, up: u, tanHalf: tan(x: 25.0 * PI64 / 180.0), aspect: w / h, wide: w, high: h);
+}
+
+// The texel `p` falls in.
+fn Texel texelOf(View v, D3 p) {
+    D3 q = minus3(a: p, b: v.eye);
+    float64 depth = dot3(a: q, b: v.forward);
+    float64 nx = dot3(a: q, b: v.right) / (depth * v.tanHalf * v.aspect);
+    float64 ny = dot3(a: q, b: v.up) / (depth * v.tanHalf);
+    float64 tx = floor(x: (nx + 1.0) * 0.5 * v.wide);
+    float64 ty = floor(x: (1.0 - ny) * 0.5 * v.high);
+    return Texel.of(x: cast<isize>(tx), y: cast<isize>(ty));
+}
+
+// The ray from the eye through texel `t`'s centre, of length 1.
+fn D3 rayThrough(View v, Texel t) {
+    float64 nx = (cast<float64>(t.x) + 0.5) / v.wide * 2.0 - 1.0;
+    float64 ny = 1.0 - (cast<float64>(t.y) + 0.5) / v.high * 2.0;
+    D3 side = scaled3(a: v.right, s: nx * v.tanHalf * v.aspect);
+    D3 rise = scaled3(a: v.up, s: ny * v.tanHalf);
+    return unit3(a: plus3(a: v.forward, b: plus3(a: side, b: rise)));
+}
+
+// Where a ray first meets a unit box: how far along it, which box, and the face it enters by; box -1 when it meets none.
+@generate(of)
+type value Hit {
+    public float64 t;
+    public isize box;
+    public int32 face;
+}
+
+fn Hit nearest(const ref DynamicArray<D3> centres, D3 from, D3 dir) {
+    Hit best = Hit.of(t: FAR, box: -1, face: -1);
+    for (isize b = 0; b < centres.length(); b = b + 1) {
+        D3 c = centres[b];
+        float64 enter = -FAR;
+        float64 leave = FAR;
+        int32 face = -1;
+        bool missed = false;
+        for (int32 axis = 0; axis < 3; axis = axis + 1) {
+            float64 o = along(v: from, axis: axis);
+            float64 d = along(v: dir, axis: axis);
+            float64 lo = along(v: c, axis: axis) - HALF;
+            float64 hi = along(v: c, axis: axis) + HALF;
+            if (d == 0.0) {
+                if (o < lo || o > hi) { missed = true; }
+            } else {
+                float64 t1 = (lo - o) / d;
+                float64 t2 = (hi - o) / d;
+                float64 tNear = t1 < t2 ? t1 : t2;
+                float64 tFar = t1 < t2 ? t2 : t1;
+                // a ray going +axis enters by the face whose normal is -axis
+                if (tNear > enter) { enter = tNear; face = d > 0.0 ? axis * 2 + 1 : axis * 2; }
+                if (tFar < leave) { leave = tFar; }
+            }
+        }
+        if (!missed && face >= 0 && enter <= leave && enter > 0.0 && enter < best.t) { best = Hit.of(t: enter, box: b, face: face); }
+    }
+    return best;
+}
+
+// Whether `p`, on face `face` of the box at `c`, is at least MARGIN inside the face's edges.
+fn bool wellInside(D3 p, D3 c, int32 face) {
+    int32 normalAxis = face / 2;
+    for (int32 axis = 0; axis < 3; axis = axis + 1) {
+        if (axis == normalAxis) { continue; }
+        float64 off = along(v: p, axis: axis) - along(v: c, axis: axis);
+        if (off < MARGIN - HALF || off > HALF - MARGIN) { return false; }
+    }
+    return true;
+}
+
+type resource LitRun {
+    int32 stage = 0;
+    Instant began = monotonicNow();
+    string gpu;
+    bool software;
+    int32 declaredCount = 0;
+    int32 matchedCount = 0;
+    Verdicts found;
+    Device device;
+    Queue queue;
+    Optional<Renderer> renderer = Optional::None;
+    Optional<PixelRead> reading = Optional::None;
+    DynamicArray<uint8> frame;
+    string failed = "";
+    DynamicArray<uint16> table;
+    // the frame being drawn: its size, the camera that drew it, its boxes' centres, and how the reference lights each
+    uint32 wide = 0;
+    uint32 high = 0;
+    View view;
+    DynamicArray<D3> centres;
+    DynamicArray<Lighting> lit;
+
+    public ctor make(string gpu, bool software, Device device, Queue queue) {
+        this.gpu = give gpu;
+        this.software = software;
+        this.found = Verdicts.make();
+        this.device = give device;
+        this.queue = give queue;
+        this.frame = DynamicArray.empty();
+        this.table = dfgTable();
+        this.view = viewFrom(eye: D3.of(x: 0.0, y: 0.0, z: 1.0), at: D3.of(x: 0.0, y: 0.0, z: 0.0), wide: 1, high: 1);
+        this.centres = DynamicArray.empty();
+        this.lit = DynamicArray.empty();
+    }
+
+    public fn ref Verdicts verdicts() { return this.found; }
+    public const fn int32 declared() { return this.declaredCount; }
+    public const fn int32 matched() { return this.matchedCount; }
+
+    unsafe fn void next(int32 to) { this.stage = to; this.began = monotonicNow(); }
+
+    // The read's texels into `frame` once it answers; false while it is pending. A failed read leaves `failed` set.
+    unsafe fn bool settled() {
+        PixelStatus s = match (this.reading) {
+            case Some(value: r): r.poll();
+            case None: PixelStatus::Failed(error: GpuError::Refused(words: "no read was started"));
+        };
+        bool pending = match (s) { case Pending: true; case _: false; };
+        if (pending && this.began.elapsed().asMillis() < SETTLE_MS) { return false; }
+        this.frame = DynamicArray.empty();
+        this.failed = "";
+        match (give s) {
+            case Ready(image: img): {
+                borrow img.samples8() as px { for (isize i = 0; i < px.length(); i = i + 1) { this.frame.add(item: px[i]); } }
+            }
+            case Failed(error: e): { this.failed = "the read failed: " + e.message(); }
+            case Pending: { this.failed = "the read was still pending after ${SETTLE_MS} ms"; }
+        };
+        this.reading = Optional::None;
+        return true;
+    }
+
+    // The frame's texel `t`, 0xRRGGBB, or 0xffffffff off the frame.
+    unsafe fn uint32 texelAt(Texel t) {
+        isize w = cast<isize>(this.wide);
+        isize h = cast<isize>(this.high);
+        if (t.x < 0 || t.y < 0 || t.x >= w || t.y >= h) { return 0xffffffff; }
+        isize at = (t.y * w + t.x) * 4;
+        if (at + 2 >= this.frame.length()) { return 0xffffffff; }
+        return (cast<uint32>(this.frame[at]) << 16) | (cast<uint32>(this.frame[at + 1]) << 8) | cast<uint32>(this.frame[at + 2]);
+    }
+
+    // Draw `s` from `eye`, looking at the origin, into a new `wide` x `high` target, and start reading it back. `centres`
+    // and `lit` are its boxes and how the reference lights each.
+    unsafe fn void draw(Shared<Scene> s, Vec3 eye, uint32 wide, uint32 high, DynamicArray<D3> centres, DynamicArray<Lighting> lit) {
+        Shared<RenderTarget> t = new RenderTarget.make(width: wide, height: high);
+        Shared<PerspectiveCamera> cam = new PerspectiveCamera.make(fovRad: radians(deg: 50.0),
+                                                                    aspect: cast<float32>(wide) / cast<float32>(high),
+                                                                    near: 0.1, far: 100.0);
+        cam.positionMut() = eye;
+        cam.lookAt(target: Vec3.zero());
+        cam.targetMut() = Optional::Some(value: copy t);
+        match (this.renderer) {
+            case Some(value: r): {
+                r.render(scene: s, camera: copy cam);
+                this.reading = Optional::Some(value: r.readRenderTargetPixels(target: copy t));
+            }
+            case None: { }
+        };
+        this.wide = wide;
+        this.high = high;
+        this.view = viewFrom(eye: widened(v: eye), at: D3.of(x: 0.0, y: 0.0, z: 0.0), wide: wide, high: high);
+        this.centres = give centres;
+        this.lit = give lit;
+    }
+
+    // "" when the frame's corner is the backdrop and each face of each box the camera sees well, at the texel its centre
+    // falls in, is within a step of r187's formulas in float64 along the ray through that texel; otherwise what is not.
+    unsafe fn string facesHeld() {
+        if (!this.failed.isEmpty()) { return copy this.failed; }
+        string why = "";
+        uint32 corner = this.texelAt(t: Texel.of(x: 0, y: 0));
+        string backdrop = nearTo(got: corner, want: BACKDROP);
+        if (!backdrop.isEmpty()) { why = " the corner is not the backdrop: " + backdrop + ";"; }
+        isize held = 0;
+        for (isize b = 0; b < this.centres.length(); b = b + 1) {
+            D3 c = this.centres[b];
+            for (int32 face = 0; face < 6; face = face + 1) {
+                D3 n = normalOf(face: face);
+                D3 middle = plus3(a: c, b: scaled3(a: n, s: HALF));
+                D3 toEye = unit3(a: minus3(a: this.view.eye, b: middle));
+                if (dot3(a: n, b: toEye) <= WELL_SEEN) { continue; }
+                Texel t = texelOf(v: this.view, p: middle);
+                string named = faceName(face: face);
+                string where = "box ${b}'s " + named + " face at (${t.x}, ${t.y})";
+                D3 dir = rayThrough(v: this.view, t: t);
+                Hit h = nearest(centres: this.centres, from: this.view.eye, dir: dir);
+                if (h.box != b || h.face != face) { why = why + " " + where + ": the ray through it meets another face;"; continue; }
+                D3 p = plus3(a: this.view.eye, b: scaled3(a: dir, s: h.t));
+                if (!wellInside(p: p, c: c, face: face)) { why = why + " " + where + ": it is within ${MARGIN} of an edge;"; continue; }
+                D3 e = this.view.eye;
+                float64 r = this.lit[b].seen(table: this.table, c: 0, nx: n.x, ny: n.y, nz: n.z, px: p.x, py: p.y, pz: p.z, ex: e.x, ey: e.y, ez: e.z);
+                float64 g = this.lit[b].seen(table: this.table, c: 1, nx: n.x, ny: n.y, nz: n.z, px: p.x, py: p.y, pz: p.z, ex: e.x, ey: e.y, ez: e.z);
+                float64 bl = this.lit[b].seen(table: this.table, c: 2, nx: n.x, ny: n.y, nz: n.z, px: p.x, py: p.y, pz: p.z, ex: e.x, ey: e.y, ez: e.z);
+                string apart = nearTo(got: this.texelAt(t: t), want: storedAs(r: r, g: g, b: bl));
+                if (!apart.isEmpty()) { why = why + " " + where + ": " + apart + ";"; }
+                held = held + 1;
+            }
+        }
+        if (held == 0) { why = why + " no face was held"; }
+        return why;
+    }
+
+    // The frame held to its golden on a leg that names a software GPU.
+    unsafe fn void golden(string test) {
+        if (this.gpu.isEmpty()) { return; }
+        this.declaredCount = this.declaredCount + 1;
+        string said = "the frame was not read: " + this.failed;
+        if (this.failed.isEmpty()) {
+            said = this.software ? checkGolden(test: test, gpu: this.gpu, width: cast<isize>(this.wide), height: cast<isize>(this.high), frame: this.frame)
+                 : "the adapter is not the software GPU the leg names, so its frame is not compared";
+        }
+        if (said.isEmpty()) { this.matchedCount = this.matchedCount + 1; }
+        this.found.add(name: "golden " + test + " on " + this.gpu, why: give said);
+    }
+
+    // A unit box at `at` drawn with `look`, added to `s`.
+    unsafe fn void boxAt(Shared<Scene> s, Vec3 at, Shared<MeshStandardMaterial> look) {
+        Shared<BoxGeometry> box = new BoxGeometry.make(width: 1.0, height: 1.0, depth: 1.0);
+        Shared<Mesh> cube = new Mesh.make(geometry: box, material: look);
+        cube.positionMut() = at;
+        s.add(object: cube);
+    }
+
+    public unsafe fn bool step() {
+        if (this.stage == 0) {
+            Renderer made = Renderer.withDevice(device: copy this.device, queue: copy this.queue);
+            made.clearColorMut() = Color.fromHex(hex: BACKDROP);
+            this.renderer = Optional::Some(value: give made);
+            // light-directional: the default box, a warm sun aimed off the origin and a cool one at it, no ambient light
+            Shared<Scene> s = new Scene.make();
+            this.boxAt(s: copy s, at: Vec3.zero(), look: new MeshStandardMaterial.make());
+            Shared<DirectionalLight> warm = new DirectionalLight.make();
+            warm.positionMut() = Vec3.of(x: 2.0, y: 3.0, z: 1.0);
+            warm.targetMut() = Vec3.of(x: 0.5, y: 0.0, z: -0.5);
+            warm.colorMut() = Color.fromHex(hex: 0xffd8a0);
+            warm.intensityMut() = 2.5;
+            s.add(object: warm);
+            Shared<DirectionalLight> cool = new DirectionalLight.make();
+            cool.positionMut() = Vec3.of(x: -3.0, y: 0.5, z: 2.0);
+            cool.colorMut() = Color.fromHex(hex: 0x6080ff);
+            cool.intensityMut() = 1.2;
+            s.add(object: cool);
+            Lighting l = Lighting.make();
+            l.sunToward(x: 2.0, y: 3.0, z: 1.0, tx: 0.5, ty: 0.0, tz: -0.5, hex: 0xffd8a0, intensity: 2.5);
+            l.sun(x: -3.0, y: 0.5, z: 2.0, hex: 0x6080ff, intensity: 1.2);
+            DynamicArray<D3> boxes = DynamicArray.empty();
+            boxes.add(item: D3.of(x: 0.0, y: 0.0, z: 0.0));
+            DynamicArray<Lighting> lighting = DynamicArray.empty();
+            lighting.add(item: give l);
+            this.draw(s: give s, eye: Vec3.of(x: 1.8, y: 1.8, z: 1.8), wide: 64, high: 48, centres: give boxes, lit: give lighting);
+            this.next(to: 1);
+        } else if (this.stage == 1) {
+            if (!this.settled()) { return false; }
+            this.found.add(name: "light-directional: a box under two suns, one aimed off the origin, each face it shows within a step of r187's formulas in float64",
+                           why: this.facesHeld());
+            this.golden(test: "light-directional");
+            // light-ambient: the same box under two ambient lights, no sun
+            Shared<Scene> s = new Scene.make();
+            this.boxAt(s: copy s, at: Vec3.zero(), look: new MeshStandardMaterial.make());
+            Shared<AmbientLight> blue = new AmbientLight.make();
+            blue.colorMut() = Color.fromHex(hex: 0x8080ff);
+            blue.intensityMut() = 0.6;
+            s.add(object: blue);
+            Shared<AmbientLight> amber = new AmbientLight.make();
+            amber.colorMut() = Color.fromHex(hex: 0xffc080);
+            amber.intensityMut() = 0.8;
+            s.add(object: amber);
+            Lighting l = Lighting.make();
+            l.ambientLight(hex: 0x8080ff, intensity: 0.6);
+            l.ambientLight(hex: 0xffc080, intensity: 0.8);
+            DynamicArray<D3> boxes = DynamicArray.empty();
+            boxes.add(item: D3.of(x: 0.0, y: 0.0, z: 0.0));
+            DynamicArray<Lighting> lighting = DynamicArray.empty();
+            lighting.add(item: give l);
+            this.draw(s: give s, eye: Vec3.of(x: 1.8, y: 1.8, z: 1.8), wide: 64, high: 48, centres: give boxes, lit: give lighting);
+            this.next(to: 2);
+        } else if (this.stage == 2) {
+            if (!this.settled()) { return false; }
+            this.found.add(name: "light-ambient: a box under two ambient lights, each face it shows within a step of r187's formulas in float64",
+                           why: this.facesHeld());
+            this.golden(test: "light-ambient");
+            // material-standard: three boxes in a row, a sun behind and above them, and an ambient light. Each value the
+            // GPU is given in float32 reaches the reference widened from that float32.
+            Vec3 leftAt = Vec3.of(x: -1.3, y: 0.0, z: 0.0);
+            Vec3 rightAt = Vec3.of(x: 1.3, y: 0.0, z: 0.0);
+            Vec3 sunAt = Vec3.of(x: 1.2, y: 3.0, z: -2.0);
+            float32 smoothness = 0.25;
+            float32 metalRoughness = 0.4;
+            Shared<Scene> s = new Scene.make();
+            Shared<MeshStandardMaterial> rough = new MeshStandardMaterial.make();
+            rough.colorMut() = Color.fromHex(hex: 0xc04030);
+            rough.emissiveMut() = Color.fromHex(hex: 0x102040);
+            this.boxAt(s: copy s, at: leftAt, look: rough);
+            Shared<MeshStandardMaterial> smooth = new MeshStandardMaterial.make();
+            smooth.colorMut() = Color.fromHex(hex: 0x3070c0);
+            smooth.roughnessMut() = smoothness;
+            this.boxAt(s: copy s, at: Vec3.zero(), look: smooth);
+            Shared<MeshStandardMaterial> metal = new MeshStandardMaterial.make();
+            metal.colorMut() = Color.fromHex(hex: 0xe0c080);
+            metal.roughnessMut() = metalRoughness;
+            metal.metalnessMut() = 1.0;
+            this.boxAt(s: copy s, at: rightAt, look: metal);
+            Shared<DirectionalLight> sun = new DirectionalLight.make();
+            sun.positionMut() = sunAt;
+            sun.intensityMut() = 2.0;
+            s.add(object: sun);
+            Shared<AmbientLight> sky = new AmbientLight.make();
+            sky.colorMut() = Color.fromHex(hex: 0x8090a0);
+            sky.intensityMut() = 0.6;
+            s.add(object: sky);
+            DynamicArray<D3> boxes = DynamicArray.empty();
+            boxes.add(item: widened(v: leftAt));
+            boxes.add(item: D3.of(x: 0.0, y: 0.0, z: 0.0));
+            boxes.add(item: widened(v: rightAt));
+            DynamicArray<Lighting> lighting = DynamicArray.empty();
+            Lighting first = Lighting.make();
+            first.surface(hex: 0xc04030, roughness: 1.0, metalness: 0.0);
+            first.emissive(hex: 0x102040);
+            lighting.add(item: give first);
+            Lighting second = Lighting.make();
+            second.surface(hex: 0x3070c0, roughness: cast<float64>(smoothness), metalness: 0.0);
+            lighting.add(item: give second);
+            Lighting third = Lighting.make();
+            third.surface(hex: 0xe0c080, roughness: cast<float64>(metalRoughness), metalness: 1.0);
+            lighting.add(item: give third);
+            D3 towards = widened(v: sunAt);
+            for (isize i = 0; i < lighting.length(); i = i + 1) {
+                lighting[i].sun(x: towards.x, y: towards.y, z: towards.z, hex: 0xffffff, intensity: 2.0);
+                lighting[i].ambientLight(hex: 0x8090a0, intensity: 0.6);
+            }
+            this.draw(s: give s, eye: Vec3.of(x: 0.0, y: 2.2, z: 3.0), wide: 128, high: 64, centres: give boxes, lit: give lighting);
+            this.next(to: 3);
+        } else if (this.stage == 3) {
+            if (!this.settled()) { return false; }
+            this.found.add(name: "material-standard: a rough dielectric with an emissive, a smooth dielectric and a metal under a sun and an ambient light, each face they show within a step of r187's formulas in float64",
+                           why: this.facesHeld());
+            this.golden(test: "material-standard");
+            DeviceErrors errs = this.device.takeErrors();
+            isize n = errs.reports().length();
+            string firstError = n > 0 ? errs.reports()[0].message() : "";
+            this.found.add(name: "lit goldens: their frames raise no WebGPU error",
+                           why: errs.isEmpty() ? "" : "the channel holds ${n} error(s), the first: " + firstError);
+            this.renderer = Optional::None;
+            this.stage = 999;
+        }
+        return this.stage == 999;
+    }
+}

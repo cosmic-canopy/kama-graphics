@@ -24,7 +24,7 @@ import {
     graphics::constant,
     Verdicts, encoded,
 };
-export { standardCases, StandardRun };
+export { standardCases, StandardRun, Counting };
 
 comptime int64 SETTLE_MS = 10000;
 comptime uint32 WIDE = 64;

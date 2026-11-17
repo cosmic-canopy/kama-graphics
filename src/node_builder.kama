@@ -3,13 +3,19 @@
 // as one uniform block (group 1), each typed function a stage reaches once, its callees first, a `let` for a node a
 // function or a stage uses more than once, the varyings, and the two entry points, `vs` and `fs`.
 //
+// A stage that reads the scene's lights (a lighting model, through `lit`) is written with one loop over the scene's
+// directional lights (kyoten's rendering.md § Decided, GFX-1's part 3, the owner's (A) of 2026-11-16): first a `let` for
+// each part of the loop's terms that depends on no light, so it is computed once; then a `var` for each sum and the loop,
+// whose own lets are the parts that depend on the light; then the rest of the stage, which reads the sums.
+//
 // A material's settings are declared apart from its nodes (`MaterialSettings`), with their values, so writing them again
 // after a change builds no node. Its nodes read them by name through the builder.
 //
 // A misuse the node types cannot refuse is refused and reported in `problems()`, never ending the program, as
 // `@kama/gpu`'s decision 9: a vertex-only value read in the fragment stage, a parameter read outside its function, two
 // different functions of one name, a name WGSL or the compiler already uses, a setting read that the material never
-// declared, a number WGSL cannot write. The renderer draws nothing with a material whose compile found one.
+// declared, a number WGSL cannot write, a light's value read outside the loop over the lights. The renderer draws nothing
+// with a material whose compile found one.
 
 import {
     std::collections::DynamicArray, std::memory::Shared, std::fmt::ParseError, std::fmt::Parseable,
@@ -147,14 +153,23 @@ fn string shapeOf(Shared<Expr> e) {
 // A node's identity: where its expression lives, as a number. Two nodes are one when they share an expression.
 unsafe fn usize identity(const ref Expr e) { return cast<usize>(addr(of: e)); }
 
-// Where an expression is written: a stage, or a function's body.
-type enum Scope { Vertex, Fragment, Function }
+// Where an expression is written: a stage, a function's body, or a stage's loop over the scene's directional lights.
+type enum Scope { Vertex, Fragment, Function, VertexLoop, FragmentLoop }
+
+// The stage a scope is written in: a loop's is its stage's, and a function's is none (`Function`).
+fn Scope stageOf(Scope where) {
+    if (where == Scope::VertexLoop) { return Scope::Vertex; }
+    if (where == Scope::FragmentLoop) { return Scope::Fragment; }
+    return where;
+}
+fn bool inLoop(Scope where) { return where == Scope::VertexLoop || where == Scope::FragmentLoop; }
 
 // The names the compiler writes: no function or parameter may take one. A let is `n` and a number.
 fn bool compilerName(const ref string name) {
     return name == "vs" || name == "fs" || name == "v" || name == "object" || name == "position" || name == "frame"
         || name == "objects" || name == "material" || name == "Frame" || name == "Material" || name == "Varyings"
-        || name == "normal" || name == "Object" || name == "dfgTable" || name == "dfgTable_sampler";
+        || name == "normal" || name == "Object" || name == "dfgTable" || name == "dfgTable_sampler"
+        || name == "DirectionalLight" || name == "directionalLights";
 }
 fn bool isLetName(const ref string name) {
     if (name.length() < 2 || name[0] != 110) { return false; }   // 'n'
@@ -193,17 +208,22 @@ fn string nameProblem(const ref string name, const ref string what) {
     return "";
 }
 
-// What the renderer gives every material's WGSL in group 0: the frame (the camera's view and projection) and the
-// object records, a world matrix and a normal matrix each, indexed by the draw's instance; and, to a material that reads
-// it, the DFG table and its sampler.
-fn string prelude(bool dfgRead) {
-    string written = "struct Frame { viewProjection: mat4x4f };\n"
+// What the renderer gives every material's WGSL in group 0: the frame (the camera's view and projection, the ambient
+// lights' sum and how many directional lights there are) and the object records, a world matrix and a normal matrix
+// each, indexed by the draw's instance; and, to a material that reads it, the DFG table and its sampler, and the scene's
+// directional lights, each its direction and its colour × intensity.
+fn string prelude(bool dfgRead, bool lightsRead) {
+    string written = "struct Frame { viewProjection: mat4x4f, ambient: vec3f, directionalCount: u32 };\n"
         + "@group(0) @binding(0) var<uniform> frame: Frame;\n"
         + "struct Object { world: mat4x4f, normal: mat3x3f };\n"
         + "@group(0) @binding(1) var<storage, read> objects: array<Object>;\n";
     if (dfgRead) {
         written = written + "@group(0) @binding(2) var dfgTable: texture_2d<f32>;\n"
             + "@group(0) @binding(3) var dfgTable_sampler: sampler;\n";
+    }
+    if (lightsRead) {
+        written = written + "struct DirectionalLight { direction: vec3f, color: vec3f };\n"
+            + "@group(0) @binding(4) var<storage, read> directionalLights: array<DirectionalLight>;\n";
     }
     return written;
 }
@@ -238,13 +258,20 @@ type resource NodeBuilder {
     DynamicArray<string> found;
     int32 letsMade = 0;
     int32 lets = 0;
-    bool dfgRead = false;   // a stage or a function samples the DFG table
+    bool dfgRead = false;      // a stage or a function samples the DFG table
+    bool lightsRead = false;   // a stage loops over the scene's directional lights
+    DynamicArray<Shared<Expr>> sums;   // the light sums the stage being written reads, each once
+    string lightIndex = "";            // the loop's index, while its body is written
+    string pad = "  ";                 // a let's indent: a stage's, or deeper, inside its loop
+    DynamicArray<usize> dependKeys;    // the nodes asked whether they depend on a light...
+    DynamicArray<bool> dependValues;   // ...and the answers
 
     public ctor make(MaterialSettings settings) {
         this.declared = give settings;
         this.varyingSources = DynamicArray.empty(); this.varyingKeys = DynamicArray.empty(); this.varyingShapes = DynamicArray.empty();
         this.functionNames = DynamicArray.empty(); this.functionTexts = DynamicArray.empty();
         this.builtins = DynamicArray.empty(); this.found = DynamicArray.empty();
+        this.sums = DynamicArray.empty(); this.dependKeys = DynamicArray.empty(); this.dependValues = DynamicArray.empty();
     }
 
     // ---- what a material's nodes read and set ----
@@ -289,13 +316,134 @@ type resource NodeBuilder {
     }
 
     // Counts every use in `e`, not entering a called function's body, which is a scope of its own, nor, in the fragment
-    // stage, a varying's source, which is the vertex stage's.
+    // stage, a varying's source, which is the vertex stage's. A stage's light sum is kept for its loop, and only the parts
+    // of its term that depend on no light are counted in the stage, where they are written once, before the loop.
     fn void countIn(ref Uses uses, Shared<Expr> e, Scope where) {
         usize at = identity(e: e.deref());
         if (!uses.count(at: at)) { return; }
         ExprKind kind = e.exprKind();
-        if (where == Scope::Fragment && (kind == ExprKind::Varying || kind == ExprKind::Attribute)) { return; }
+        if (stageOf(where: where) == Scope::Fragment && (kind == ExprKind::Varying || kind == ExprKind::Attribute)) { return; }
+        if (kind == ExprKind::LightSum) {
+            if (where == Scope::Vertex || where == Scope::Fragment) {
+                this.sums.add(item: copy e);
+                this.countSteady(uses: ref uses, e: e.argAt(i: 0), where: where);
+            }
+            return;
+        }
         for (isize i = 0; i < e.argCount(); i = i + 1) { this.countIn(uses: ref uses, e: e.argAt(i: i), where: where); }
+    }
+
+    // Whether `e` must be written inside the loop over the lights: it reads a light's value, or a light sum, itself or
+    // through an argument. A sum read in another sum's term is never moved before the loop, where its `var` is not yet
+    // written: it stays in the loop's body, which refuses it.
+    fn bool dependsOnLight(Shared<Expr> e) {
+        usize at = identity(e: e.deref());
+        for (isize i = 0; i < this.dependKeys.length(); i = i + 1) { if (this.dependKeys[i] == at) { return this.dependValues[i]; } }
+        ExprKind kind = e.exprKind();
+        bool depends = kind == ExprKind::Light || kind == ExprKind::LightSum;
+        for (isize i = 0; i < e.argCount(); i = i + 1) { if (this.dependsOnLight(e: e.argAt(i: i))) { depends = true; } }
+        this.dependKeys.add(item: at);
+        this.dependValues.add(item: depends);
+        return depends;
+    }
+
+    // Counts, in the stage, each part of a loop's term `e` that depends on no light, the largest such parts.
+    fn void countSteady(ref Uses uses, Shared<Expr> e, Scope where) {
+        if (!this.dependsOnLight(e: copy e)) { this.countIn(uses: ref uses, e: copy e, where: where); return; }
+        for (isize i = 0; i < e.argCount(); i = i + 1) { this.countSteady(uses: ref uses, e: e.argAt(i: i), where: where); }
+    }
+
+    // Whether `e` is written where it is read, never as a let, in `where`.
+    fn bool leafIn(Shared<Expr> e, Scope where) {
+        ExprKind kind = e.exprKind();
+        return kind == ExprKind::Number || kind == ExprKind::Name || kind == ExprKind::VertexName
+            || kind == ExprKind::Param || kind == ExprKind::Attribute || kind == ExprKind::Light
+            || (stageOf(where: where) == Scope::Fragment && kind == ExprKind::Varying);
+    }
+
+    // Writes, before the loop, each part of a loop's term `e` that depends on no light: a let, unless it is a leaf, so it
+    // is computed once whatever the number of lights. Each let's node and name are added to `keys` and `names`, for the
+    // loop's body to read.
+    fn void hoist(ref Uses uses, ref string letsOut, Shared<Expr> e, Scope where, ref DynamicArray<usize> keys,
+                  ref DynamicArray<string> names) {
+        usize at = identity(e: e.deref());
+        for (isize i = 0; i < keys.length(); i = i + 1) { if (keys[i] == at) { return; } }
+        if (this.dependsOnLight(e: copy e)) {
+            for (isize i = 0; i < e.argCount(); i = i + 1) {
+                this.hoist(uses: ref uses, letsOut: ref letsOut, e: e.argAt(i: i), where: where, keys: ref keys, names: ref names);
+            }
+            return;
+        }
+        if (this.leafIn(e: copy e, where: where)) { return; }
+        isize u = uses.find(at: at);
+        string known = u >= 0 ? uses.nameOf(i: u) : "";
+        if (known.isEmpty()) {
+            string plain = this.spelled(uses: ref uses, letsOut: ref letsOut, e: copy e, where: where);
+            int32 n = this.lets;
+            known = "n${n}";
+            this.lets = this.lets + 1;
+            this.letsMade = this.letsMade + 1;
+            letsOut = letsOut + this.pad + "let " + known + " = " + plain + ";\n";
+            if (u >= 0) { uses.nameAt(i: u, name: copy known); }
+        }
+        keys.add(item: at);
+        names.add(item: give known);
+    }
+
+    // The stage's loop over the scene's directional lights, for the light sums its counting kept: the lets of what their
+    // terms read that depends on no light, written into `letsOut`, then, returned, a `var` for each sum and the loop
+    // adding each term to it. "" when the stage reads no light. Each sum is then read by its `var`'s name.
+    fn string loops(ref Uses uses, ref string letsOut, Scope stage) {
+        if (this.sums.length() == 0) { return ""; }
+        this.lightsRead = true;
+        Scope inner = stage == Scope::Vertex ? Scope::VertexLoop : Scope::FragmentLoop;
+        DynamicArray<usize> keys = DynamicArray.empty();
+        DynamicArray<string> names = DynamicArray.empty();
+        for (isize s = 0; s < this.sums.length(); s = s + 1) {
+            this.hoist(uses: ref uses, letsOut: ref letsOut, e: this.sums[s].argAt(i: 0), where: stage, keys: ref keys,
+                       names: ref names);
+        }
+        // the loop's own scope reads each hoisted part by its let's name
+        Uses inside = Uses.make();
+        for (isize i = 0; i < keys.length(); i = i + 1) {
+            inside.count(at: keys[i]);
+            isize u = inside.find(at: keys[i]);
+            inside.nameAt(i: u, name: copy names[i]);
+        }
+        for (isize s = 0; s < this.sums.length(); s = s + 1) {
+            this.countIn(uses: ref inside, e: this.sums[s].argAt(i: 0), where: inner);
+        }
+        string totalsDeclared = "";
+        DynamicArray<string> totals = DynamicArray.empty();
+        for (isize s = 0; s < this.sums.length(); s = s + 1) {
+            int32 n = this.lets;
+            string total = "n${n}";
+            this.lets = this.lets + 1;
+            string typed = this.sums[s].wgslType();
+            totalsDeclared = totalsDeclared + "  var " + total + " = " + typed + "();\n";
+            totals.add(item: give total);
+        }
+        int32 k = this.lets;
+        string index = "n${k}";
+        this.lets = this.lets + 1;
+        this.lightIndex = copy index;
+        this.pad = "    ";
+        string bodyLets = "";
+        string adds = "";
+        for (isize s = 0; s < this.sums.length(); s = s + 1) {
+            string term = this.emit(uses: ref inside, letsOut: ref bodyLets, e: this.sums[s].argAt(i: 0), where: inner);
+            string total = copy totals[s];
+            adds = adds + "    " + total + " = " + total + " + " + term + ";\n";
+        }
+        this.pad = "  ";
+        this.lightIndex = "";
+        for (isize s = 0; s < this.sums.length(); s = s + 1) {
+            isize u = uses.find(at: identity(e: this.sums[s].deref()));
+            if (u >= 0) { uses.nameAt(i: u, name: copy totals[s]); }
+        }
+        this.sums = DynamicArray.empty();
+        return totalsDeclared + "  for (var " + index + " = 0u; " + index + " < frame.directionalCount; " + index + " = " + index
+            + " + 1u) {\n" + bodyLets + adds + "  }\n";
     }
 
     // The varying the fragment stage reads for `e`: its index, added the first time. Two reads of the same value, such as
@@ -322,16 +470,13 @@ type resource NodeBuilder {
             if (known != "") { return known; }
         }
         string plain = this.spelled(uses: ref uses, letsOut: ref letsOut, e: copy e, where: where);
-        ExprKind kind = e.exprKind();
-        bool leaf = kind == ExprKind::Number || kind == ExprKind::Name || kind == ExprKind::VertexName
-            || kind == ExprKind::Param || kind == ExprKind::Attribute
-            || (where == Scope::Fragment && kind == ExprKind::Varying);
+        bool leaf = this.leafIn(e: copy e, where: where);
         if (u >= 0 && uses.usesOf(i: u) > 1 && !leaf) {
             int32 n = this.lets;
             string named = "n${n}";
             this.lets = this.lets + 1;
             this.letsMade = this.letsMade + 1;
-            letsOut = letsOut + "  let " + named + " = " + plain + ";\n";
+            letsOut = letsOut + this.pad + "let " + named + " = " + plain + ";\n";
             uses.nameAt(i: u, name: copy named);
             return named;
         }
@@ -350,7 +495,7 @@ type resource NodeBuilder {
             }
             case Name: { return text; }
             case VertexName: {
-                if (where != Scope::Vertex) {
+                if (stageOf(where: where) != Scope::Vertex) {
                     this.problem(words: "`" + text + "` is the vertex stage's alone: read it there, and hand the fragment stage what it needs through varying()");
                 }
                 return text;
@@ -364,7 +509,7 @@ type resource NodeBuilder {
                     this.problem(words: "the vertex attribute `" + text + "` is read inside a shader function: hand it in as a parameter");
                     return text;
                 }
-                if (where == Scope::Fragment) { isize at = this.varyingOf(e: copy e); return "v.v${at}"; }
+                if (stageOf(where: where) == Scope::Fragment) { isize at = this.varyingOf(e: copy e); return "v.v${at}"; }
                 return text;
             }
             case Varying: {
@@ -372,7 +517,7 @@ type resource NodeBuilder {
                     this.problem(words: "a varying is read inside a shader function: hand it in as a parameter");
                     return "v";
                 }
-                if (where == Scope::Fragment) { isize at = this.varyingOf(e: copy e); return "v.v${at}"; }
+                if (stageOf(where: where) == Scope::Fragment) { isize at = this.varyingOf(e: copy e); return "v.v${at}"; }
                 return this.emit(uses: ref uses, letsOut: ref letsOut, e: e.argAt(i: 0), where: where);
             }
             case Binary: {
@@ -392,7 +537,7 @@ type resource NodeBuilder {
                 Optional<Shared<ShaderFunction>> function = e.calledFunction();
                 match (give function) {
                     case Some(value: f): {
-                        if (where == Scope::Vertex && samples(e: copy e)) {
+                        if (stageOf(where: where) == Scope::Vertex && samples(e: copy e)) {
                             this.problem(words: "the shader function `" + text + "` samples a texture and is called in the vertex stage, where WGSL's textureSample cannot run: call it in the fragment stage");
                         }
                         this.reach(f: give f);
@@ -401,8 +546,24 @@ type resource NodeBuilder {
                 };
                 return this.callText(uses: ref uses, letsOut: ref letsOut, e: copy e, where: where);
             }
+            case Light: {
+                if (!inLoop(where: where)) {
+                    this.problem(words: "a light's `" + text + "` is read outside the loop over the scene's lights: a lighting model reads lightDirection and lightColor in direct() alone");
+                    return "vec3f()";
+                }
+                return "directionalLights[" + this.lightIndex + "]." + text;
+            }
+            case LightSum: {
+                // a sum the stage's loop did not take: one inside a shader function, or inside another sum's term
+                if (where == Scope::Function) {
+                    this.problem(words: "the scene's lights are read inside a shader function: call lit() in a stage, and hand the function what it needs");
+                } else {
+                    this.problem(words: "the scene's lights are summed inside a lighting model's direct(), by lit() called there or its result read there, and direct() is itself written inside the loop over the lights");
+                }
+                return "vec3f()";
+            }
             case Sample: {
-                if (where == Scope::Vertex) {
+                if (stageOf(where: where) == Scope::Vertex) {
                     this.problem(words: "the texture `" + text + "` is sampled in the vertex stage, where WGSL's textureSample cannot run: sample it in the fragment stage");
                 }
                 if (text == "dfgTable") { this.dfgRead = true; }
@@ -446,10 +607,13 @@ type resource NodeBuilder {
         this.countIn(uses: ref uses, e: copy body, where: Scope::Function);
         int32 outer = this.lets;
         int32 madeBefore = this.letsMade;
+        string outerPad = copy this.pad;
         this.lets = 0;
+        this.pad = "  ";
         string letsOut = "";
         string result = this.emit(uses: ref uses, letsOut: ref letsOut, e: copy body, where: Scope::Function);
         this.lets = outer;
+        this.pad = give outerPad;
         string text = "fn " + name + "(";
         for (isize i = 0; i < f.params(); i = i + 1) {
             string p = f.paramName(i: i);
@@ -480,27 +644,33 @@ type resource NodeBuilder {
             case None: vec4(xyz: vec3(x: constant(value: 1.0), y: constant(value: 1.0), z: constant(value: 1.0)), w: constant(value: 1.0));
         };
         Uses fragUses = Uses.make();
+        this.sums = DynamicArray.empty();
         this.countIn(uses: ref fragUses, e: colourNode.expr(), where: Scope::Fragment);
         this.lets = 0;
         string fragLets = "";
-        string fragOut = this.emit(uses: ref fragUses, letsOut: ref fragLets, e: colourNode.expr(), where: Scope::Fragment);
+        string fragLoop = this.loops(uses: ref fragUses, letsOut: ref fragLets, stage: Scope::Fragment);
+        string fragRest = "";
+        string fragOut = this.emit(uses: ref fragUses, letsOut: ref fragRest, e: colourNode.expr(), where: Scope::Fragment);
 
         Vec4Node clipNode = match (this.clip) {
             case Some(value: c): copy c;
             case None: cameraViewProjectionMatrix() * modelWorldMatrix() * vec4(xyz: positionLocal(), w: constant(value: 1.0));
         };
         Uses vertUses = Uses.make();
+        this.sums = DynamicArray.empty();
         this.countIn(uses: ref vertUses, e: clipNode.expr(), where: Scope::Vertex);
         for (isize i = 0; i < this.varyingSources.length(); i = i + 1) {
             this.countIn(uses: ref vertUses, e: copy this.varyingSources[i], where: Scope::Vertex);
         }
         this.lets = 0;
         string vertLets = "";
-        string vertOut = this.emit(uses: ref vertUses, letsOut: ref vertLets, e: clipNode.expr(), where: Scope::Vertex);
+        string vertLoop = this.loops(uses: ref vertUses, letsOut: ref vertLets, stage: Scope::Vertex);
+        string vertRest = "";
+        string vertOut = this.emit(uses: ref vertUses, letsOut: ref vertRest, e: clipNode.expr(), where: Scope::Vertex);
         string varyingWrites = "";
         string varyingFields = "";
         for (isize i = 0; i < this.varyingSources.length(); i = i + 1) {
-            string value = this.emit(uses: ref vertUses, letsOut: ref vertLets, e: copy this.varyingSources[i], where: Scope::Vertex);
+            string value = this.emit(uses: ref vertUses, letsOut: ref vertRest, e: copy this.varyingSources[i], where: Scope::Vertex);
             string typed = this.varyingSources[i].wgslType();
             varyingWrites = varyingWrites + "  v.v${i} = " + value + ";\n";
             varyingFields = varyingFields + "  @location(${i}) v${i}: " + typed + ",\n";
@@ -523,7 +693,7 @@ type resource NodeBuilder {
             }
         }
 
-        string written = prelude(dfgRead: this.dfgRead);
+        string written = prelude(dfgRead: this.dfgRead, lightsRead: this.lightsRead);
         if (this.declared.count() > 0) {
             written = written + "struct Material {\n";
             for (isize i = 0; i < this.declared.count(); i = i + 1) {
@@ -534,8 +704,10 @@ type resource NodeBuilder {
         written = written + this.functions;
         written = written + "struct Varyings {\n  @builtin(position) clip: vec4f,\n" + varyingFields + "};\n";
         written = written + "@vertex fn vs(@builtin(instance_index) object: u32, @location(0) position: vec3f, @location(1) normal: vec3f) -> Varyings {\n"
-            + "  var v: Varyings;\n" + vertLets + "  v.clip = " + vertOut + ";\n" + varyingWrites + "  return v;\n}\n";
-        written = written + "@fragment fn fs(v: Varyings) -> @location(0) vec4f {\n" + fragLets + "  return " + fragOut + ";\n}\n";
+            + "  var v: Varyings;\n" + vertLets + vertLoop + vertRest + "  v.clip = " + vertOut + ";\n" + varyingWrites
+            + "  return v;\n}\n";
+        written = written + "@fragment fn fs(v: Varyings) -> @location(0) vec4f {\n" + fragLets + fragLoop + fragRest + "  return "
+            + fragOut + ";\n}\n";
         return written;
     }
 }

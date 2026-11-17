@@ -69,7 +69,8 @@ a resource the program owns.
   cleared to `#336699` reads `0x33 0x66 0x99`.
 - **`render(scene:, camera:)` draws the scene as the camera sees it into the target the camera names** (part 1's
   question 4; part 2):
-  - the scene's walk makes the world matrices that changed and writes its meshes' records (§ The scene graph);
+  - the scene's walk makes the world matrices that changed and writes its meshes' records and its lights' slots (§ The
+    scene graph);
   - the target is cleared to the clear colour and its depth to 0, since depth is reversed: near is 1, far is 0, and a
     fragment is kept where it is greater (GFX-1's question 1);
   - each mesh is one draw, of its geometry's triangles, with back faces not drawn (three.js's `FrontSide`), its vertex
@@ -86,6 +87,10 @@ a resource the program owns.
   two half floats, a surface's specular scale and bias, written as they are into an RG16Float texture and read through a
   linear sampler that clamps to the edge, as r187's. Each frame binds them in group 0 (§ The compiler). The table is
   three.js's data, under its MIT notice (THIRD-PARTY-NOTICES.md).
+- **The scene's lights reach every material as data, in group 0** (kyoten's rendering.md § Decided, part 3's third part,
+  question 1). Each render writes into the frame block the ambient lights' sum and the number of directional lights, and
+  binds the scene's directional lights' buffer (§ The scene graph). Adding, removing, moving, aiming, recolouring or
+  dimming a light compiles nothing, and no number of lights is too many.
 
 ## Misuse
 
@@ -108,6 +113,9 @@ Decided, GFX-1's part 2, question 4), as `@kama/gpu` reports every misuse of Web
 - **A material whose compile is refused draws nothing** (§ The compiler): every mesh using it is skipped, and the renderer
   records the error once, of kind `GraphicsErrorKind::Material`, in the compile's words. It never compiles the material
   again, so it is reported once, however many frames draw.
+- **A directional light at its own target lights nothing** (§ The scene graph): it has no direction, so its direction
+  is the zero vector, never a NaN, and the renderer records the error, of kind `GraphicsErrorKind::Light`, when the light
+  is written so. That is once each time it changes, never each frame.
 
 ## Render targets
 
@@ -120,10 +128,11 @@ Decided, GFX-1's part 2, question 4), as `@kama/gpu` reports every misuse of Web
 
 ## The scene graph
 
-- **`Scene`, `Group`, `Mesh` and `PerspectiveCamera` are typed kinds behind one contract, `Object3D`** (kyoten's
-  rendering.md § Decided, area 1, item 4), three.js's base class's name. A tree holds `Shared<Object3D>`; a program holds
-  a typed `Shared<Mesh>` to the same object. Each kind embeds a `NodePart` (its transform, three.js's API over it, and its
-  place in the tree), reached through the contract as `node()` and `nodeMut()`.
+- **`Scene`, `Group`, `Mesh`, `PerspectiveCamera`, `DirectionalLight` and `AmbientLight` are typed kinds behind one
+  contract, `Object3D`** (kyoten's rendering.md § Decided, area 1, item 4), three.js's base class's name. A tree holds
+  `Shared<Object3D>`; a program holds a typed `Shared<Mesh>` to the same object. Each kind embeds a `NodePart` (its
+  transform, three.js's API over it, and its place in the tree), reached through the contract as `node()` and
+  `nodeMut()`.
 - **`add(object:)` adds a child, taking it from any parent it had, and `remove(object:)` takes one out,** as three.js's;
   removing a node that is not a child leaves everything as it was. `childCount()` and `child(index:)` read the
   children. A node is held by every holder of its `Shared`, the tree included, and freed with the last.
@@ -149,6 +158,23 @@ Decided, GFX-1's part 2, question 4), as `@kama/gpu` reports every misuse of Web
     written, as three.js's `modelNormalMatrix`, so a normal stays at right angles to its surface under any scale, shear
     or mirror. A world matrix with no inverse (a scale of 0) gives zeros, as three.js's `invert` does.
   - It is internal; an engine's way to drive it is decided when one first does.
+- **Lights are scene nodes** (kyoten's rendering.md § Decided, part 3's third part, questions 1 and 3), as three.js's,
+  each made with `new …make()` and added where any node is:
+  - **`DirectionalLight`** is light from far away, its rays parallel, as the sun's. It points from its world position to
+    `target()`/`targetMut()`, a `Vec3` in world space: there is no target object to add to the scene, as three.js's
+    needs. Its defaults are three.js r187's: `color()` white, `intensity()` 1, its position (0, 1, 0) and its target the
+    origin, so it shines straight down. A program that tracks an object writes the object's world position to
+    `targetMut()`.
+  - **`AmbientLight`** lights every surface alike: `color()` white and `intensity()` 1 by default. Where it is changes
+    nothing, and a scene's ambient lights are summed.
+  - `colorMut()`, `intensityMut()` and `targetMut()` mark the light changed, as a transform's write does.
+- **Each light in a scene owns a slot in the scene's lights table,** written when the light, a parent, its colour, its
+  intensity or its target changed, and given up when it leaves the scene, as a mesh's record is.
+  - A directional light's slot holds its direction, towards the light and of length 1 (its world position minus its
+    target, normalized), and its linear colour × intensity. An ambient light's holds its linear colour × intensity.
+  - The directional lights reach the GPU as one storage buffer, written again when one changed: 32 bytes each, the
+    direction and the colour each a vec3f padded to 16. It holds 4 at first and doubles as it grows, so it is never empty,
+    and a frame says how many are live.
 
 ## Rotation
 
@@ -257,6 +283,19 @@ What a material's shader is written in (kyoten's rendering.md § Decided, GFX-1'
 
   So a call cannot pass the wrong number or type of arguments, and the kama signature always matches the WGSL. The
   library's own shader functions (the BSDFs, the lights) are written so (part 3's question).
+- **A lighting model says how light reaches a surface** (kyoten's rendering.md § Decided, part 3's third part: the owner's
+  (A) of 2026-11-16), as three.js r187's `LightingModel` and Godot's `light()`. `LightingModel` is a public contract of
+  two members, each giving a `ReflectedLight`, a diffuse and a specular `Vec3Node` (`ReflectedLight.of(diffuse:,
+  specular:)`):
+  - `direct(lightDirection:, lightColor:)`, what ONE directional light gives: its direction, towards the light and of
+    length 1 in world space, and its linear colour × intensity;
+  - `indirect(irradiance:)`, what the ambient light gives, from the scene's ambient lights' sum.
+
+  `lit(model:)` is the light leaving the surface under the scene's lights, as r187's `LightsNode` sums it: the direct and
+  indirect diffuse parts, plus the direct and indirect specular parts, the direct ones summed over the scene's
+  directional lights. The compiler writes `direct` once, inside a loop over them (§ The compiler), so the number of
+  lights is the scene's, read as the shader runs. A program's own model, a toon look or a vertex-lit one, is checked
+  exactly as the library's, and `MeshStandardMaterial`'s physical model is built on it.
 - **Programs write nodes in safe kama.** Only the compile is `unsafe`, since it tells nodes apart by where their
   expressions live.
 
@@ -266,10 +305,16 @@ What a material's shader is written in (kyoten's rendering.md § Decided, GFX-1'
 the material's nodes: `vertexPosition(node:)` and `fragmentColor(node:)`, as TSL's `vertexNode` and `outputNode`. Its
 `wgsl()` is the whole shader module:
 
-- **group 0, what the renderer gives:** `frame` (the view-projection) and `objects`, each mesh's `Object` (its `world`
-  and `normal` matrices); and, to a material that reads it, the DFG table, `dfgTable` (a `texture_2d<f32>` at binding 2),
-  and its sampler, `dfgTable_sampler` (binding 3), which a sample is written with: `textureSample(dfgTable,
-  dfgTable_sampler, uv)`. A material that samples nothing declares neither;
+- **group 0, what the renderer gives:**
+  - `frame`, at binding 0, read by both stages: the view-projection, `ambient` (the ambient lights' sum) and
+    `directionalCount`, 80 bytes;
+  - `objects`, at binding 1: each mesh's `Object`, its `world` and `normal` matrices;
+  - to a material that reads it, the DFG table, `dfgTable` (a `texture_2d<f32>` at binding 2), and its sampler,
+    `dfgTable_sampler` (binding 3), which a sample is written with: `textureSample(dfgTable, dfgTable_sampler, uv)`;
+  - to a material that reads the lights, `directionalLights` (binding 4, read by both stages), each a
+    `DirectionalLight`, its `direction` and `color`.
+
+  A material that samples nothing, or reads no light, declares neither;
 - **the vertex's inputs:** its `position` at location 0 and its `normal` at location 1;
 - **group 1, the material's settings:** one uniform block, `material`, which both stages may read.
   - `MaterialSettings` declares each setting with its value: `addFloat`, `addVec3` and `addColor` (linear).
@@ -286,6 +331,14 @@ the material's nodes: `vertexPosition(node:)` and `fragmentColor(node:)`, as TSL
 **A node used more than once in a function or a stage is written once, as a `let`** (`n0`, `n1`, …), so the WGSL reads
 as written by hand. A number, a name, a parameter, an attribute and a varying read in the fragment stage are written where
 they are used.
+
+**A stage that reads the lights is written with one loop over the scene's directional lights,** for every light sum it
+reads (the owner's (A) of 2026-11-16), in either stage:
+- first a `let` for each part of the sums' terms that depends on no light, such as the surface's normal or a setting, so
+  it is computed once whatever the number of lights; a leaf is written where it is read;
+- then a `var` for each sum, and `for (var i = 0u; i < frame.directionalCount; i = i + 1u)`, whose own lets are the
+  parts that depend on the light, each term added to its sum;
+- then the rest of the stage, which reads each sum by its `var`. The lets, the sums and the index are named as lets are.
 
 **A number is written as kama's shortest float32 digits,** a whole number with its `.0`. A WGSL compiler reads a literal
 as an abstract float (a float64) and then rounds it to f32, and for one float32 in all 2,139,095,040 positive finite ones,
@@ -304,7 +357,11 @@ digits, which a float64 holds exactly. Measured over every float32 (kyoten's `.s
 - a function, parameter or setting name that is not a WGSL name (a letter, then letters, digits and `_`), is a WGSL
   keyword, or is a name the compiler writes;
 - a setting read that the material never declared, or read as another type, and a setting declared twice;
-- a number WGSL cannot write (an infinity or a NaN).
+- a number WGSL cannot write (an infinity or a NaN);
+- a light's direction or colour read outside the loop over the lights, as a model that keeps one from `direct` for later
+  would, or a program's own light value made with `Expr.make`;
+- the lights summed inside a model's `direct()`, by `lit()` called there or an earlier `lit()`'s result read there, and
+  the lights read inside a shader function.
 
 WGSL's reserved words beyond its keywords are refused by the GPU's own compile, reported as every WGSL error is.
 
@@ -338,7 +395,7 @@ WGSL's reserved words beyond its keywords are refused by the GPU's own compile, 
 - then `tests/`, one program, built debug and release and run natively, and built for the web and run under `kama run`
   in Edge, Firefox and the pinned Chrome for Testing, each started as `tools/browsers.mjs` says.
 
-It is 177 cases on each leg that names a software GPU, and 172 in Edge, whose leg names none.
+It is 240 cases on each leg that names a software GPU, and 235 in Edge, whose leg names none.
 
 - **The goldens** (kyoten's rendering.md § Decided, GFX-1's part 1, questions 2 and 3):
   - Each leg names its software GPU: `--golden warp` natively on Windows and in Firefox, `--golden swiftshader` in the

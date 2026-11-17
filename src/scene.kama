@@ -17,6 +17,10 @@
 // - **The flat core** (area 1, item 1; area 3, item 4): each mesh in a scene owns a record in the scene's table, its world
 //   matrix, geometry and material, written when it changed and freed when the mesh leaves the scene. The table reaches
 //   the GPU as one storage buffer, written where it changed. It stays internal until an engine first drives it.
+// - **Lights are scene nodes, and reach a shader as data** (kyoten's rendering.md § Decided, GFX-1's part 3, the lights'
+//   question 1): each light in a scene owns a slot in the scene's lights table, written when it changed and freed when it
+//   leaves the scene, as a mesh's record is. The directional lights reach the GPU as one storage buffer of any length,
+//   and the ambient lights as one sum, so adding, removing, moving or dimming a light compiles nothing.
 //
 // - **A misuse the types cannot refuse is refused and reported, never ending the program** (part 2, question 4): a node
 //   added under itself or one of its own children would make a loop, so `add` refuses it, changes nothing, prints it and
@@ -30,9 +34,9 @@ import {
     std::io::stderr, std::io::StdErr,
     std::math::Vec3, std::math::Vec4, std::math::Quat, std::math::Mat3, std::math::Mat4, std::math::sqrt, std::math::tan,
     gpu::Device, gpu::Queue, gpu::Buffer, gpu::BufferDescriptor, gpu::BufferUsage,
-    Euler, EulerOrder, Geometry, Material, RenderTarget, Renderer,
+    Euler, EulerOrder, Geometry, Material, RenderTarget, Renderer, Color,
 };
-export { Object3D, NodePart, Walk, Scene, Group, Mesh, PerspectiveCamera };
+export { Object3D, NodePart, Walk, Scene, Group, Mesh, PerspectiveCamera, DirectionalLight, AmbientLight };
 
 // An object's record: its world matrix, WGSL's mat4x4f, then its normal matrix, a mat3x3f, whose three columns take 16
 // bytes each (the owner's (A), kyoten's rendering.md § Decided, GFX-1's part 3, its second part's question 1).
@@ -241,18 +245,190 @@ type resource Instance {
     public unsafe const fn bool inTable(const ref CoreTable other) { return addr(of: this.table.deref()) == addr(of: other); }
 }
 
-// What one render's walk carries: the scene's table, and how many world matrices it made. Only a renderer makes one.
+// ---- the lights ----
+
+// A directional light as WGSL's `DirectionalLight` reads it: its direction, towards the light, then its linear colour ×
+// intensity, each a vec3f padded to 16 bytes.
+comptime isize LIGHT_BYTES = 32;
+// The directional lights a scene's buffer holds at first: it doubles as it grows, and never holds none, since WebGPU binds
+// no empty buffer.
+comptime isize LIGHTS_AT_FIRST = 4;
+
+// What a light's slot holds: nothing (free), a directional light's, or an ambient light's.
+type enum LightKind { Free, Directional, Ambient }
+
+// A scene's directional lights on one device: their storage buffer and how many it has room for.
+type resource LightsGpu {
+    UnsafePtr device;
+    Buffer buffer;
+    isize capacity;
+    public unsafe ctor make(UnsafePtr device, Buffer buffer, isize capacity) {
+        this.device = device;
+        this.buffer = give buffer;
+        this.capacity = capacity;
+    }
+    public unsafe const fn UnsafePtr on() { return this.device; }
+    public const fn isize room() { return this.capacity; }
+    public unsafe fn Buffer lights() { return copy this.buffer; }
+}
+
+// The lights in a scene: a light's slot is its own while it is in the scene. A directional light's holds its direction
+// and its linear colour × intensity; an ambient light's its linear colour × intensity, which the table sums.
+type resource LightTable {
+    DynamicArray<LightKind> kinds;
+    DynamicArray<Vec3> directions;
+    DynamicArray<Vec3> colours;
+    DynamicArray<isize> free;
+    bool changed = true;   // the GPU's copy is to be written again
+    Optional<LightsGpu> gpu = Optional::None;
+
+    public ctor make() {
+        this.kinds = DynamicArray.empty();
+        this.directions = DynamicArray.empty();
+        this.colours = DynamicArray.empty();
+        this.free = DynamicArray.empty();
+    }
+
+    public unsafe fn isize take() {
+        Optional<isize> reused = this.free.pop();
+        isize slot = match (reused) { case Some(value: s): s; case None: -1; };
+        if (slot >= 0) { return slot; }
+        this.kinds.add(item: LightKind::Free);
+        this.directions.add(item: Vec3.zero());
+        this.colours.add(item: Vec3.zero());
+        return this.kinds.length() - 1;
+    }
+    public unsafe fn void release(isize slot) {
+        this.kinds[slot] = LightKind::Free;
+        this.free.add(item: slot);
+        this.changed = true;
+    }
+    public unsafe fn void write(isize slot, LightKind kind, Vec3 direction, Vec3 colour) {
+        this.kinds[slot] = kind;
+        this.directions[slot] = direction;
+        this.colours[slot] = colour;
+        this.changed = true;
+    }
+
+    // How many directional lights the scene holds: the length of the buffer a lit shader loops over.
+    public const fn isize directionalCount() {
+        isize n = 0;
+        for (isize s = 0; s < this.kinds.length(); s = s + 1) { if (this.kinds[s] == LightKind::Directional) { n = n + 1; } }
+        return n;
+    }
+    // The ambient lights' sum, linear.
+    public const fn Vec3 ambient() {
+        Vec3 sum = Vec3.zero();
+        for (isize s = 0; s < this.kinds.length(); s = s + 1) {
+            if (this.kinds[s] == LightKind::Ambient) { sum = sum + this.colours[s]; }
+        }
+        return sum;
+    }
+
+    // The directional lights on `device`, one after another, written again whenever a light changed, and whole when the
+    // buffer is new, grown or another device's.
+    public unsafe fn Buffer lightsOn(ref Device device, ref Queue queue) {
+        isize count = this.directionalCount();
+        isize need = count < LIGHTS_AT_FIRST ? LIGHTS_AT_FIRST : count;
+        bool fresh = match (this.gpu) {
+            case Some(value: g): g.on() != device.raw() || g.room() < need;
+            case None: true;
+        };
+        if (fresh) {
+            isize capacity = LIGHTS_AT_FIRST;
+            while (capacity < need) { capacity = capacity * 2; }
+            BufferDescriptor described = BufferDescriptor.make(size: cast<uint64>(capacity * LIGHT_BYTES),
+                                                               usage: BufferUsage::Storage | BufferUsage::CopyDst);
+            described.label(text: "a scene's directional lights");
+            Buffer made = device.createBuffer(descriptor: give described);
+            this.gpu = Optional::Some(value: LightsGpu.make(device: device.raw(), buffer: give made, capacity: capacity));
+            this.changed = true;
+        }
+        Buffer target = match (this.gpu) { case Some(value: g): g.lights(); case None: { panic(msg: "the lights were just made"); } };
+        if (this.changed && count > 0) {
+            DynamicArray<uint8> all = DynamicArray.empty();
+            for (isize s = 0; s < this.kinds.length(); s = s + 1) {
+                if (this.kinds[s] != LightKind::Directional) { continue; }
+                Vec3 d = this.directions[s];
+                Vec3 c = this.colours[s];
+                putFloat(into: ref all, value: d.x); putFloat(into: ref all, value: d.y); putFloat(into: ref all, value: d.z);
+                putFloat(into: ref all, value: 0.0);
+                putFloat(into: ref all, value: c.x); putFloat(into: ref all, value: c.y); putFloat(into: ref all, value: c.z);
+                putFloat(into: ref all, value: 0.0);
+            }
+            queue.writeBuffer(buffer: target, offset: 0, data: all.view());
+        }
+        this.changed = false;
+        return target;
+    }
+}
+
+// A light's slot in a scene's lights table, freed when it is dropped: when the light leaves the scene, or is dropped
+// itself.
+type resource LightSlot {
+    Shared<LightTable> table;
+    isize slot;
+    public unsafe ctor make(Shared<LightTable> table) {
+        this.slot = table.take();
+        this.table = give table;
+    }
+    ~LightSlot() { this.table.release(slot: this.slot); }
+    public const fn isize at() { return this.slot; }
+    public unsafe const fn bool inTable(const ref LightTable other) { return addr(of: this.table.deref()) == addr(of: other); }
+}
+
+// A directional light's direction, towards the light: from `target` to its world position `at`, of length 1. A light at
+// its own target has none, and gives the zero vector, so it lights nothing, where normalizing would give NaN.
+fn Vec3 towardsLight(Vec3 at, Vec3 target) {
+    Vec3 d = at - target;
+    if (d.lengthSq() == 0.0) { return Vec3.zero(); }
+    return d.normalized();
+}
+
+// A colour × intensity, linear, as a light's slot holds it.
+fn Vec3 radiance(Color colour, float32 intensity) {
+    return Vec3.of(x: colour.linearR() * intensity, y: colour.linearG() * intensity, z: colour.linearB() * intensity);
+}
+
+// What one render's walk carries: the scene's tables, how many world matrices it made, and the misuses it found. Only a
+// renderer makes one.
 type resource Walk {
     Shared<CoreTable> table;
+    Shared<LightTable> lightTable;
     int32 made = 0;
+    DynamicArray<string> found;
 
     friend Scene[make, matrices];
     friend NodePart[counted];
     friend Mesh[push];
+    friend DirectionalLight[pushLight, refuse];
+    friend AmbientLight[pushLight];
+    friend Renderer::render[matrices, refusals];
 
-    ctor make(Shared<CoreTable> table) { this.table = give table; }
+    ctor make(Shared<CoreTable> table, Shared<LightTable> lights) {
+        this.table = give table;
+        this.lightTable = give lights;
+        this.found = DynamicArray.empty();
+    }
     const fn int32 matrices() { return this.made; }
     fn void counted() { this.made = this.made + 1; }
+    // A misuse found on the walk, which the renderer reports.
+    fn void refuse(string words) { this.found.add(item: give words); }
+    const fn DynamicArray<string> refusals() { return copy this.found; }
+
+    // A light's slot written: in its slot, taken the first time and again when the light came from another scene.
+    unsafe fn void pushLight(ref Optional<LightSlot> slot, LightKind kind, Vec3 direction, Vec3 colour) {
+        bool fresh = match (slot) {
+            case Some(value: s): !s.inTable(other: this.lightTable.deref());
+            case None: true;
+        };
+        if (fresh) {
+            slot = Optional::None;
+            slot = Optional::Some(value: LightSlot.make(table: copy this.lightTable));
+        }
+        isize at = match (slot) { case Some(value: s): s.at(); case None: -1; };
+        this.lightTable.write(slot: at, kind: kind, direction: direction, colour: colour);
+    }
 
     // A mesh's record written: in its instance, made the first time and again when the mesh came from another scene.
     unsafe fn void push(ref Optional<Instance> instance, Mat4 world, Shared<Geometry> geometry, Shared<Material> material) {
@@ -360,11 +536,14 @@ type resource NodePart {
     bool looksBack = false;      // a camera: `lookAt` aims its -Z at the target, as three.js's cameras do
     Shared<Anchor> anch;
     Optional<Instance> drawn = Optional::None;   // a mesh's record in its scene's table, while it has one
+    Optional<LightSlot> lit = Optional::None;    // a light's slot in its scene's lights table, while it has one
 
     friend Scene[...];
     friend Group[...];
     friend Mesh[...];
     friend PerspectiveCamera[...];
+    friend DirectionalLight[...];
+    friend AmbientLight[...];
     friend Renderer::render[...];
 
     unsafe ctor make() {
@@ -551,6 +730,7 @@ type resource NodePart {
 
     unsafe fn void dropDraws() {
         this.drawn = Optional::None;
+        this.lit = Optional::None;
         for (isize i = 0; i < this.anch.count(); i = i + 1) {
             Shared<Object3D> k = this.anch.at(i: i);
             k.nodeMut().dropDraws();
@@ -589,17 +769,21 @@ type resource NodePart {
 
 // ---- the kinds ----
 
-// The root a renderer draws: its tree, and the flat core of its meshes' records.
+// The root a renderer draws: its tree, the flat core of its meshes' records, and its lights.
 type resource Scene implements Object3D {
     NodePart part;
     Shared<CoreTable> table;
+    Shared<LightTable> lightTable;
 
-    friend Renderer::render[walkAll, recordsOn, drawSlots, geometryAt, materialAt, mirroredAt, objects];
+    friend Renderer::render[walkAll, recordsOn, drawSlots, geometryAt, materialAt, mirroredAt, objects, lightsOn,
+                            directionalCount, ambientLight];
 
     public unsafe ctor make() {
         this.part = NodePart.make();
         Shared<CoreTable> t = new CoreTable.make();
         this.table = give t;
+        Shared<LightTable> l = new LightTable.make();
+        this.lightTable = give l;
     }
 
     public const fn const ref NodePart node() { return this.part; }
@@ -609,13 +793,17 @@ type resource Scene implements Object3D {
         this.part.placeKids(walk: ref walk, moved: moved);
     }
 
-    // The walk, as a render runs it: the world matrices made, and the meshes' records written, where they changed.
-    unsafe fn int32 walkAll() {
-        Walk walk = Walk.make(table: copy this.table);
+    // The walk, as a render runs it: the world matrices made, and the meshes' records and the lights' slots written, where
+    // they changed. It hands back how many matrices it made and the misuses it found.
+    unsafe fn Walk walkAll() {
+        Walk walk = Walk.make(table: copy this.table, lights: copy this.lightTable);
         this.place(walk: ref walk, parentWorld: Mat4.identity(), parentMoved: false);
-        return walk.matrices();
+        return walk;
     }
     unsafe fn Buffer recordsOn(ref Device device, ref Queue queue) { return this.table.recordsOn(device: ref device, queue: ref queue); }
+    unsafe fn Buffer lightsOn(ref Device device, ref Queue queue) { return this.lightTable.lightsOn(device: ref device, queue: ref queue); }
+    const fn isize directionalCount() { return this.lightTable.directionalCount(); }
+    const fn Vec3 ambientLight() { return this.lightTable.ambient(); }
     // The slots that hold a record, in order.
     unsafe fn DynamicArray<isize> drawSlots() {
         DynamicArray<isize> slots = DynamicArray.empty();
@@ -809,6 +997,124 @@ type resource PerspectiveCamera implements Object3D {
     public fn ref NodePart nodeMut() { return this.part; }
     public unsafe fn void place(ref Walk walk, Mat4 parentWorld, bool parentMoved) {
         bool moved = this.part.placeSelf(walk: ref walk, parentWorld: parentWorld, parentMoved: parentMoved);
+        this.part.placeKids(walk: ref walk, moved: moved);
+    }
+
+    public const fn Vec3 position() { return this.part.position(); }
+    public unsafe fn ref Vec3 positionMut() { return this.part.positionMut(); }
+    public const fn Euler rotation() { return this.part.rotation(); }
+    public unsafe fn ref Euler rotationMut() { return this.part.rotationMut(); }
+    public const fn Quat quaternion() { return this.part.quaternion(); }
+    public unsafe fn ref Quat quaternionMut() { return this.part.quaternionMut(); }
+    public const fn Vec3 scale() { return this.part.scale(); }
+    public unsafe fn ref Vec3 scaleMut() { return this.part.scaleMut(); }
+    public unsafe fn void rotateX(float32 rad) { this.part.rotateX(rad: rad); }
+    public unsafe fn void rotateY(float32 rad) { this.part.rotateY(rad: rad); }
+    public unsafe fn void rotateZ(float32 rad) { this.part.rotateZ(rad: rad); }
+    public unsafe fn void rotateOnAxis(Vec3 axis, float32 rad) { this.part.rotateOnAxis(axis: axis, rad: rad); }
+    public unsafe fn void rotateOnWorldAxis(Vec3 axis, float32 rad) { this.part.rotateOnWorldAxis(axis: axis, rad: rad); }
+    public unsafe fn void lookAt(Vec3 target) { this.part.lookAt(target: target); }
+    public unsafe fn bool add(Shared<Object3D> object) { return this.part.add(object: object); }
+    public unsafe const fn bool isAncestorOf(Shared<Object3D> object) { return this.part.isAncestorOf(object: object); }
+    public unsafe fn void remove(Shared<Object3D> object) { this.part.remove(object: object); }
+    public const fn isize childCount() { return this.part.childCount(); }
+    public unsafe const fn Shared<Object3D> child(isize index) { return this.part.child(index: index); }
+    public const fn Mat4 matrixWorld() { return this.part.matrixWorld(); }
+}
+
+// A light from far away whose rays are parallel, as the sun's, as three.js's `DirectionalLight`. It points from its world
+// position to `target()`, a point in world space (kyoten's rendering.md § Decided, GFX-1's part 3, the lights' question
+// 3): there is no target object to add to the scene, as three.js's needs. Its colour is white, its intensity 1 and its
+// position (0, 1, 0), so it shines straight down, as three.js's. Its slot in its scene's lights table is written whenever
+// it moved, a parent moved, or its colour, intensity or target changed, so none of these compiles anything.
+//
+// A light at its own target has no direction: it lights nothing, and the renderer reports it (`GraphicsErrorKind::Light`)
+// when the light is written so, under part 2's question 4.
+type resource DirectionalLight implements Object3D {
+    NodePart part;
+    Color tint = Color.fromHex(hex: 0xffffff);
+    float32 strength = 1.0;
+    Vec3 aim;
+
+    public unsafe ctor make() {
+        this.part = NodePart.make();
+        this.part.pos = Vec3.of(x: 0.0, y: 1.0, z: 0.0);
+        this.aim = Vec3.zero();
+    }
+
+    // Its colour, written in sRGB and held linear, as every colour is.
+    public const fn Color color() { return this.tint; }
+    public unsafe fn ref Color colorMut() { this.part.touched(); return this.tint; }
+    // How strong it is, a factor on its linear colour.
+    public const fn float32 intensity() { return this.strength; }
+    public unsafe fn ref float32 intensityMut() { this.part.touched(); return this.strength; }
+    // The point in world space it points at: the origin, as three.js's.
+    public const fn Vec3 target() { return this.aim; }
+    public unsafe fn ref Vec3 targetMut() { this.part.touched(); return this.aim; }
+
+    public const fn const ref NodePart node() { return this.part; }
+    public fn ref NodePart nodeMut() { return this.part; }
+    public unsafe fn void place(ref Walk walk, Mat4 parentWorld, bool parentMoved) {
+        bool moved = this.part.placeSelf(walk: ref walk, parentWorld: parentWorld, parentMoved: parentMoved);
+        if (moved) {
+            Mat4 w = this.part.anch.worldMatrix();
+            Vec3 at = Vec3.of(x: w.get(c: 3, r: 0), y: w.get(c: 3, r: 1), z: w.get(c: 3, r: 2));
+            Vec3 direction = towardsLight(at: at, target: this.aim);
+            if (direction.lengthSq() == 0.0) {
+                walk.refuse(words: "a directional light sits at its own target, so it has no direction and lights nothing (move it, or its targetMut())");
+            }
+            walk.pushLight(slot: ref this.part.lit, kind: LightKind::Directional, direction: direction,
+                           colour: radiance(colour: this.tint, intensity: this.strength));
+        }
+        this.part.placeKids(walk: ref walk, moved: moved);
+    }
+
+    public const fn Vec3 position() { return this.part.position(); }
+    public unsafe fn ref Vec3 positionMut() { return this.part.positionMut(); }
+    public const fn Euler rotation() { return this.part.rotation(); }
+    public unsafe fn ref Euler rotationMut() { return this.part.rotationMut(); }
+    public const fn Quat quaternion() { return this.part.quaternion(); }
+    public unsafe fn ref Quat quaternionMut() { return this.part.quaternionMut(); }
+    public const fn Vec3 scale() { return this.part.scale(); }
+    public unsafe fn ref Vec3 scaleMut() { return this.part.scaleMut(); }
+    public unsafe fn void rotateX(float32 rad) { this.part.rotateX(rad: rad); }
+    public unsafe fn void rotateY(float32 rad) { this.part.rotateY(rad: rad); }
+    public unsafe fn void rotateZ(float32 rad) { this.part.rotateZ(rad: rad); }
+    public unsafe fn void rotateOnAxis(Vec3 axis, float32 rad) { this.part.rotateOnAxis(axis: axis, rad: rad); }
+    public unsafe fn void rotateOnWorldAxis(Vec3 axis, float32 rad) { this.part.rotateOnWorldAxis(axis: axis, rad: rad); }
+    public unsafe fn void lookAt(Vec3 target) { this.part.lookAt(target: target); }
+    public unsafe fn bool add(Shared<Object3D> object) { return this.part.add(object: object); }
+    public unsafe const fn bool isAncestorOf(Shared<Object3D> object) { return this.part.isAncestorOf(object: object); }
+    public unsafe fn void remove(Shared<Object3D> object) { this.part.remove(object: object); }
+    public const fn isize childCount() { return this.part.childCount(); }
+    public unsafe const fn Shared<Object3D> child(isize index) { return this.part.child(index: index); }
+    public const fn Mat4 matrixWorld() { return this.part.matrixWorld(); }
+}
+
+// Light from everywhere at once, lighting every surface alike, as three.js's `AmbientLight`: white, intensity 1. Where it
+// is in the scene changes nothing; a scene's ambient lights are summed.
+type resource AmbientLight implements Object3D {
+    NodePart part;
+    Color tint = Color.fromHex(hex: 0xffffff);
+    float32 strength = 1.0;
+
+    public unsafe ctor make() { this.part = NodePart.make(); }
+
+    // Its colour, written in sRGB and held linear, as every colour is.
+    public const fn Color color() { return this.tint; }
+    public unsafe fn ref Color colorMut() { this.part.touched(); return this.tint; }
+    // How strong it is, a factor on its linear colour.
+    public const fn float32 intensity() { return this.strength; }
+    public unsafe fn ref float32 intensityMut() { this.part.touched(); return this.strength; }
+
+    public const fn const ref NodePart node() { return this.part; }
+    public fn ref NodePart nodeMut() { return this.part; }
+    public unsafe fn void place(ref Walk walk, Mat4 parentWorld, bool parentMoved) {
+        bool moved = this.part.placeSelf(walk: ref walk, parentWorld: parentWorld, parentMoved: parentMoved);
+        if (moved) {
+            walk.pushLight(slot: ref this.part.lit, kind: LightKind::Ambient, direction: Vec3.zero(),
+                           colour: radiance(colour: this.tint, intensity: this.strength));
+        }
         this.part.placeKids(walk: ref walk, moved: moved);
     }
 

@@ -178,6 +178,28 @@ natively. The library's own `examples/cube` is the same scene without an engine.
   Red first against a stubbed `dfg()`, 3 of the 10 cases then written failing; the others held the table and the
   compiler, which the mutations hold. 177 cases on each golden leg, 172 in Edge. 23 of 23 mutations caught (kyoten's
   `.scratch/s30/kg-tools/list331.py`). Next, step 2: the lights as scene nodes and their buffer.
+- **Decided on 2026-11-16, at step 2's start: how a material's shader reads the scene's lights** (kyoten's
+  `docs/design/rendering.md` § Decided), (A) as recommended: a public `LightingModel` contract, as three.js r187's
+  `LightingModel` and Godot's `light()`. A model says how ONE light lights the surface, and the compiler writes that
+  once, inside a loop over the scene's directional lights, with what depends on no light computed once before it. Set
+  aside: a general loop node as TSL's `Loop`, raw read nodes with the loop as WGSL text, and lights read by
+  `MeshStandardMaterial` alone. The contract and the loop came into step 2, so its tests could read the lights back.
+- **Built, part 3's third part, step 2** (2026-11-16, [SPEC.md](SPEC.md) § The renderer, § Misuse, § The scene graph,
+  § Typed nodes and § The compiler):
+  - `DirectionalLight` and `AmbientLight` as scene nodes, each light's slot in its scene's lights table, the directional
+    lights' storage buffer at group 0's binding 4, and the frame block's ambient sum and count;
+  - `LightingModel`, `ReflectedLight` and `lit(model:)`, and the compiler's loop in either stage, hoisting what depends on
+    no light;
+  - `GraphicsErrorKind::Light`, for a directional light at its own target.
+
+  Red first against stubs: the lights' half against defaults, marks, the refusal and the reserved names taken out, 8 of
+  its 20 cases failing, and the gate's printed-refusal check; the lighting half against a `lit()` that drops what
+  `direct()` gives, 36 of its 40 cases failing. Three more cases came from the mutations, which found no let inside the
+  loop, no vertex-only value in a vertex-stage loop and no typed function called from inside one. 240 cases on each
+  golden leg, 235 in Edge. 67 of 67 mutations caught, the lights' half's 24 and the lighting half's 43; a 68th, a light
+  sum not counted as depending on the light, is equivalent, since a sum read in another's term is refused either way
+  (kyoten's `.scratch/s31/kg-tools/list2a.py` and `list2b.py`). Next, step 3: three.js r187's physical model on the
+  contract, with `colorNode`, `roughnessNode` and `metalnessNode`.
 - **Done:**
   - `examples/cube` draws from one source on both legs;
   - its golden passes on a software GPU on each leg CI has, and perceptually on the reference machines present;

@@ -1,0 +1,865 @@
+// GFX-1's part 3, its third part, step 2: the lights as scene nodes, reaching a shader as data, and read by a lighting
+// model (kyoten's rendering.md § Decided, GFX-1's part 3, the lights' questions 1 and 3, and the owner's (A) of
+// 2026-11-16: a `LightingModel` contract, written once inside a loop over the scene's directional lights).
+//
+// With no GPU: `DirectionalLight`'s and `AmbientLight`'s defaults, three.js r187's; a sun's target, a point in world
+// space; the names the lights' WGSL takes, refused to a program's own function; a program's own model spelled as WGSL,
+// what depends on no light written once before the loop, in the fragment stage and in the vertex stage; a material that
+// reads no light declaring none; and each misuse the compiler refuses: a light's value read outside the loop, `lit()`
+// inside `direct()`, the lights read inside a shader function, a program's own light value.
+//
+// On the GPU, a step a tick on the device the check opened:
+// - a box drawn with a program's own material that counts its compiles (tests/src/standard.kama's `Counting`), while
+//   lights are added, dimmed, recoloured, aimed, moved and removed. None of it compiles anything, and each change places
+//   the one light it touched, which `info().matrices` counts. A scene with more directional lights than its buffer first
+//   holds grows it. A sun at its own target is reported once, as `GraphicsErrorKind::Light`, and not again on an unchanged
+//   frame;
+// - four boxes, each a program's own model showing what it reads: the lights' colours summed with the ambient light
+//   through the diffuse halves, their directions through the diffuse half, the colours through the specular halves, and
+//   the colours lit in the vertex stage. Each box's centre is held, within one 8-bit step, to the wants worked here in
+//   float64, frame by frame: one sun; dimmed and recoloured; an ambient light added; a second sun; the first removed; the
+//   second under a moved parent; aimed; and six suns, past the buffer's first four.
+// The frames raise no WebGPU error.
+
+import {
+    std::collections::DynamicArray, std::memory::replace,
+    std::math::Vec3, std::math::radians, std::math::sqrt,
+    std::time::Instant, std::time::monotonicNow,
+    gpu::Device, gpu::Queue, gpu::DeviceErrors, gpu::GpuError,
+    graphics::Color, graphics::Renderer, graphics::RenderInfo, graphics::RendererErrors, graphics::RenderTarget,
+    graphics::Scene, graphics::Group, graphics::Mesh, graphics::PerspectiveCamera, graphics::BoxGeometry,
+    graphics::DirectionalLight, graphics::AmbientLight, graphics::Material, graphics::MaterialGpu,
+    graphics::NodeBuilder, graphics::MaterialSettings, graphics::ShaderFunction, graphics::Expr, graphics::ExprKind,
+    graphics::FloatNode, graphics::Vec3Node, graphics::Vec4Node, graphics::param, graphics::called, graphics::constant,
+    graphics::vec3, graphics::vec4, graphics::dot, graphics::max, graphics::varying, graphics::normalWorld,
+    graphics::normalLocal, graphics::modelNormalMatrix, graphics::ReflectedLight, graphics::LightingModel, graphics::lit,
+    graphics::PixelRead, graphics::PixelStatus,
+    Verdicts, Counting, encoded,
+};
+export { lightCases, LightsRun };
+
+comptime int64 SETTLE_MS = 10000;
+comptime uint32 WIDE = 64;
+comptime uint32 HIGH = 48;
+comptime uint32 SHOWN_WIDE = 96;   // the four boxes' frame
+
+// "" when `v` is (x, y, z) exactly; else what it is.
+fn string vecIs(Vec3 v, float32 x, float32 y, float32 z) {
+    if (v.x == x && v.y == y && v.z == z) { return ""; }
+    float32 vx = v.x;
+    float32 vy = v.y;
+    float32 vz = v.z;
+    return "it is (${vx}, ${vy}, ${vz})";
+}
+
+// A program's own typed function named `name`, of one float.
+fn FloatNode namedLike(string name, FloatNode x) {
+    Shared<ShaderFunction> f = new ShaderFunction.make(name: give name);
+    FloatNode a = param(function: f, name: "a", value: x);
+    return called(function: f, body: a * 2.0);
+}
+
+// "" when `problems` holds `want`.
+fn string holds(const ref DynamicArray<string> problems, const ref string want) {
+    for (isize i = 0; i < problems.length(); i = i + 1) { if (problems[i] == want) { return ""; } }
+    isize n = problems.length();
+    string head = n > 0 ? copy problems[0] : "none";
+    return "${n} problem(s), not this one; the first: " + head;
+}
+
+// "" when `got` is `want`; else where they part.
+fn string sameText(const ref string got, const ref string want) {
+    if (got == want) { return ""; }
+    isize at = 0;
+    while (at < got.length() && at < want.length() && got[at] == want[at]) { at = at + 1; }
+    string gotRest = got.substring(start: at, end: at + 90 < got.length() ? at + 90 : got.length());
+    string wantRest = want.substring(start: at, end: at + 90 < want.length() ? at + 90 : want.length());
+    return "they part at byte ${at}: got `" + gotRest + "`, want `" + wantRest + "`";
+}
+
+fn Vec3Node black() { return vec3(x: constant(value: 0.0), y: constant(value: 0.0), z: constant(value: 0.0)); }
+
+// ---- programs' own lighting models ----------------------------------------------------------------------------------
+
+// A toon look's first step: each light's colour by how squarely it faces the surface, and a quarter of it again as its
+// sheen, so the light it receives is one node read by both parts; and the ambient light as it is.
+type resource Toon implements LightingModel {
+    int32 made = 0;
+    public ctor make() { }
+    public fn ReflectedLight direct(Vec3Node lightDirection, Vec3Node lightColor) {
+        FloatNode facing = max(a: dot(a: normalWorld(), b: lightDirection), b: constant(value: 0.0));
+        Vec3Node received = lightColor * facing;
+        return ReflectedLight.of(diffuse: received, specular: received * 0.25);
+    }
+    public fn ReflectedLight indirect(Vec3Node irradiance) { return ReflectedLight.of(diffuse: irradiance, specular: black()); }
+}
+
+// A model lit in the vertex stage that reads the vertex stage's own values inside its loop: the vertex's normal and the
+// object's normal matrix.
+type resource VertexReads implements LightingModel {
+    int32 made = 0;
+    public ctor make() { }
+    public fn ReflectedLight direct(Vec3Node lightDirection, Vec3Node lightColor) {
+        Vec3Node lambert = lightColor * dot(a: normalLocal(), b: lightDirection);
+        return ReflectedLight.of(diffuse: modelNormalMatrix() * lambert, specular: black());
+    }
+    public fn ReflectedLight indirect(Vec3Node irradiance) { return ReflectedLight.of(diffuse: irradiance, specular: black()); }
+}
+
+// A program's own typed function with a let in its body: (x / 2 + 1/2)², a wrapped light's falloff.
+fn FloatNode wrapped(FloatNode x) {
+    Shared<ShaderFunction> f = new ShaderFunction.make(name: "wrap");
+    FloatNode a = param(function: f, name: "a", value: x);
+    FloatNode raised = a * 0.5 + 0.5;
+    return called(function: f, body: raised * raised);
+}
+
+// A model whose direct() calls that function with each light.
+type resource Wrapped implements LightingModel {
+    int32 made = 0;
+    public ctor make() { }
+    public fn ReflectedLight direct(Vec3Node lightDirection, Vec3Node lightColor) {
+        FloatNode falloff = wrapped(x: dot(a: normalWorld(), b: lightDirection));
+        return ReflectedLight.of(diffuse: lightColor * falloff, specular: black());
+    }
+    public fn ReflectedLight indirect(Vec3Node irradiance) { return ReflectedLight.of(diffuse: irradiance, specular: black()); }
+}
+
+// A model whose direct() reads what an earlier lit() summed.
+type resource Reader implements LightingModel {
+    Optional<Vec3Node> prior = Optional::None;
+    public ctor make(Vec3Node prior) { this.prior = Optional::Some(value: give prior); }
+    public fn ReflectedLight direct(Vec3Node lightDirection, Vec3Node lightColor) {
+        Vec3Node earlier = match (this.prior) { case Some(value: p): copy p; case None: black(); };
+        return ReflectedLight.of(diffuse: lightColor * earlier, specular: black());
+    }
+    public fn ReflectedLight indirect(Vec3Node irradiance) { return ReflectedLight.of(diffuse: irradiance, specular: black()); }
+}
+
+// The same, lit in the vertex stage, by the normal the vertex stage has.
+type resource VertexToon implements LightingModel {
+    int32 made = 0;
+    public ctor make() { }
+    public fn ReflectedLight direct(Vec3Node lightDirection, Vec3Node lightColor) {
+        Vec3Node turned = modelNormalMatrix() * normalLocal();
+        FloatNode facing = max(a: dot(a: turned, b: lightDirection), b: constant(value: 0.0));
+        return ReflectedLight.of(diffuse: lightColor * facing, specular: black());
+    }
+    public fn ReflectedLight indirect(Vec3Node irradiance) { return ReflectedLight.of(diffuse: irradiance, specular: black()); }
+}
+
+// A model that keeps the light's colour from `direct` and hands it back from `indirect`, outside the loop.
+type resource Keeper implements LightingModel {
+    Optional<Vec3Node> kept = Optional::None;
+    public ctor make() { }
+    public fn ReflectedLight direct(Vec3Node lightDirection, Vec3Node lightColor) {
+        this.kept = Optional::Some(value: copy lightColor);
+        return ReflectedLight.of(diffuse: lightColor, specular: black());
+    }
+    public fn ReflectedLight indirect(Vec3Node irradiance) {
+        Vec3Node held = match (this.kept) { case Some(value: k): copy k; case None: black(); };
+        return ReflectedLight.of(diffuse: held, specular: black());
+    }
+}
+
+// A model whose `direct` calls `lit` again.
+type resource Nested implements LightingModel {
+    int32 made = 0;
+    public ctor make() { }
+    public fn ReflectedLight direct(Vec3Node lightDirection, Vec3Node lightColor) {
+        Toon inner = Toon.make();
+        Vec3Node again = lit(model: ref inner);
+        return ReflectedLight.of(diffuse: again, specular: black());
+    }
+    public fn ReflectedLight indirect(Vec3Node irradiance) { return ReflectedLight.of(diffuse: irradiance, specular: black()); }
+}
+
+// What a program's material shows of the lights: 0 their colours summed through the diffuse halves, with the ambient
+// light through the indirect specular half; 1 their directions, each d / 4 + 1/4, through the diffuse half; 2 their
+// colours through the specular halves, with the ambient light through the indirect diffuse half.
+type resource Shown implements LightingModel {
+    int32 mode;
+    public ctor make(int32 mode) { this.mode = mode; }
+    public fn ReflectedLight direct(Vec3Node lightDirection, Vec3Node lightColor) {
+        if (this.mode == 1) {
+            Vec3Node quarter = vec3(x: constant(value: 0.25), y: constant(value: 0.25), z: constant(value: 0.25));
+            return ReflectedLight.of(diffuse: lightDirection * 0.25 + quarter, specular: black());
+        }
+        if (this.mode == 2) { return ReflectedLight.of(diffuse: black(), specular: lightColor); }
+        return ReflectedLight.of(diffuse: lightColor, specular: black());
+    }
+    public fn ReflectedLight indirect(Vec3Node irradiance) {
+        if (this.mode == 1) { return ReflectedLight.of(diffuse: black(), specular: black()); }
+        if (this.mode == 2) { return ReflectedLight.of(diffuse: irradiance, specular: black()); }
+        return ReflectedLight.of(diffuse: black(), specular: irradiance);
+    }
+}
+
+// A program's own material showing what `Shown` reads, in the fragment stage or, `perVertex`, in the vertex stage.
+type resource ShowLights implements Material {
+    MaterialGpu cache;
+    int32 mode;
+    bool perVertex;
+    public ctor make(int32 mode, bool perVertex) {
+        this.cache = MaterialGpu.make();
+        this.mode = mode;
+        this.perVertex = perVertex;
+    }
+    public fn ref MaterialGpu gpuMut() { return this.cache; }
+    public const fn uint32 version() { return 0; }
+    public const fn uint32 graphVersion() { return 0; }
+    public const fn void settings(ref MaterialSettings into) { }
+    public fn void shade(ref NodeBuilder builder) {
+        Shown model = Shown.make(mode: this.mode);
+        Vec3Node light = lit(model: ref model);
+        if (this.perVertex) { light = varying(value: light); }
+        builder.fragmentColor(node: vec4(xyz: light, w: constant(value: 1.0)));
+    }
+}
+
+// What every material is given in group 0, and the lights beside it once it reads them.
+fn string groupZero() {
+    return "struct Frame { viewProjection: mat4x4f, ambient: vec3f, directionalCount: u32 };\n"
+        + "@group(0) @binding(0) var<uniform> frame: Frame;\n"
+        + "struct Object { world: mat4x4f, normal: mat3x3f };\n"
+        + "@group(0) @binding(1) var<storage, read> objects: array<Object>;\n";
+}
+fn string theLights() {
+    return "struct DirectionalLight { direction: vec3f, color: vec3f };\n"
+        + "@group(0) @binding(4) var<storage, read> directionalLights: array<DirectionalLight>;\n";
+}
+
+unsafe fn void lightCases(ref Verdicts found) {
+    {
+        DirectionalLight sun = DirectionalLight.make();
+        uint32 colour = sun.color().hex();
+        float32 strength = sun.intensity();
+        string why = "";
+        if (colour != 0xffffff) { why = why + " its colour is ${colour};"; }
+        if (strength != 1.0) { why = why + " its intensity is ${strength};"; }
+        string at = vecIs(v: sun.position(), x: 0.0, y: 1.0, z: 0.0);
+        if (!at.isEmpty()) { why = why + " its position: " + at + ";"; }
+        string aim = vecIs(v: sun.target(), x: 0.0, y: 0.0, z: 0.0);
+        if (!aim.isEmpty()) { why = why + " its target: " + aim; }
+        found.add(name: "DirectionalLight: three.js r187's defaults: white, intensity 1, at (0, 1, 0), pointing at the origin, so it shines straight down",
+                  why: give why);
+        sun.targetMut() = Vec3.of(x: 3.0, y: -1.0, z: 0.5);
+        found.add(name: "DirectionalLight: target() reads back what targetMut() wrote, a point in world space",
+                  why: vecIs(v: sun.target(), x: 3.0, y: -1.0, z: 0.5));
+        sun.intensityMut() = 2.5;
+        sun.colorMut() = Color.fromHex(hex: 0x336699);
+        uint32 recoloured = sun.color().hex();
+        float32 brighter = sun.intensity();
+        found.add(name: "DirectionalLight: color() and intensity() read back what their Mut wrote",
+                  why: recoloured == 0x336699 && brighter == 2.5 ? "" : "color ${recoloured}, intensity ${brighter}");
+    }
+    {
+        AmbientLight glow = AmbientLight.make();
+        uint32 colour = glow.color().hex();
+        float32 strength = glow.intensity();
+        found.add(name: "AmbientLight: three.js r187's defaults: white, intensity 1",
+                  why: colour == 0xffffff && strength == 1.0 ? "" : "color ${colour}, intensity ${strength}");
+    }
+    {
+        // the lights' WGSL names, as a program's own functions would take them
+        NodeBuilder b = NodeBuilder.make(settings: MaterialSettings.make());
+        FloatNode one = namedLike(name: "DirectionalLight", x: constant(value: 1.0));
+        FloatNode two = namedLike(name: "directionalLights", x: one);
+        b.fragmentColor(node: vec4(xyz: vec3(x: two, y: two, z: two), w: constant(value: 1.0)));
+        string wgsl = b.wgsl();
+        DynamicArray<string> problems = b.problems();
+        string why = holds(problems: problems, want: "the shader function `DirectionalLight` is a name the compiler writes");
+        if (why.isEmpty()) { why = holds(problems: problems, want: "the shader function `directionalLights` is a name the compiler writes"); }
+        found.add(name: "the compiler refuses a function named DirectionalLight or directionalLights, the lights' names in WGSL",
+                  why: give why);
+    }
+    {
+        NodeBuilder b = NodeBuilder.make(settings: MaterialSettings.make());
+        Toon toon = Toon.make();
+        b.fragmentColor(node: vec4(xyz: lit(model: ref toon), w: constant(value: 1.0)));
+        string all = b.wgsl();
+        string want = groupZero() + theLights()
+            + "struct Varyings {\n  @builtin(position) clip: vec4f,\n  @location(0) v0: vec3f,\n};\n"
+            + "@vertex fn vs(@builtin(instance_index) object: u32, @location(0) position: vec3f, @location(1) normal: vec3f) -> Varyings {\n"
+            + "  var v: Varyings;\n"
+            + "  v.clip = ((frame.viewProjection * objects[object].world) * vec4f(position, 1.0));\n"
+            + "  v.v0 = (objects[object].normal * normal);\n"
+            + "  return v;\n}\n"
+            + "@fragment fn fs(v: Varyings) -> @location(0) vec4f {\n"
+            + "  let n0 = normalize(v.v0);\n"
+            + "  var n1 = vec3f();\n"
+            + "  var n2 = vec3f();\n"
+            + "  for (var n3 = 0u; n3 < frame.directionalCount; n3 = n3 + 1u) {\n"
+            + "    let n4 = (directionalLights[n3].color * max(dot(n0, directionalLights[n3].direction), 0.0));\n"
+            + "    n1 = n1 + n4;\n"
+            + "    n2 = n2 + (n4 * 0.25);\n"
+            + "  }\n"
+            + "  return vec4f(((n1 + frame.ambient) + (n2 + vec3f(0.0, 0.0, 0.0))), 1.0);\n}\n";
+        DynamicArray<string> problems = b.problems();
+        isize np = problems.length();
+        found.add(name: "lit(): a program's own lighting model's direct() is written once, inside one loop over the scene's directional lights, its diffuse and specular parts each summed, what depends on no light a let before the loop, and what depends on the light and is read twice a let inside it",
+                  why: np > 0 ? "refused: " + problems[0] : sameText(got: all, want: want));
+        int32 lets = b.letCount();
+        found.add(name: "lit(): the lets before and inside the loop are counted as lets, the sums and the index are not",
+                  why: lets == 2 ? "" : "letCount() is ${lets}");
+    }
+    {
+        NodeBuilder b = NodeBuilder.make(settings: MaterialSettings.make());
+        VertexToon toon = VertexToon.make();
+        Vec3Node light = varying(value: lit(model: ref toon));
+        b.fragmentColor(node: vec4(xyz: light, w: constant(value: 1.0)));
+        string all = b.wgsl();
+        string want = groupZero() + theLights()
+            + "struct Varyings {\n  @builtin(position) clip: vec4f,\n  @location(0) v0: vec3f,\n};\n"
+            + "@vertex fn vs(@builtin(instance_index) object: u32, @location(0) position: vec3f, @location(1) normal: vec3f) -> Varyings {\n"
+            + "  var v: Varyings;\n"
+            + "  let n0 = (objects[object].normal * normal);\n"
+            + "  let n1 = vec3f(0.0, 0.0, 0.0);\n"
+            + "  var n2 = vec3f();\n"
+            + "  var n3 = vec3f();\n"
+            + "  for (var n4 = 0u; n4 < frame.directionalCount; n4 = n4 + 1u) {\n"
+            + "    n2 = n2 + (directionalLights[n4].color * max(dot(n0, directionalLights[n4].direction), 0.0));\n"
+            + "    n3 = n3 + n1;\n"
+            + "  }\n"
+            + "  v.clip = ((frame.viewProjection * objects[object].world) * vec4f(position, 1.0));\n"
+            + "  v.v0 = ((n2 + frame.ambient) + (n3 + vec3f(0.0, 0.0, 0.0)));\n"
+            + "  return v;\n}\n"
+            + "@fragment fn fs(v: Varyings) -> @location(0) vec4f {\n"
+            + "  return vec4f(v.v0, 1.0);\n}\n";
+        DynamicArray<string> problems = b.problems();
+        isize np = problems.length();
+        found.add(name: "lit(): a model lit in the vertex stage, through varying(), is written in the vertex stage's own loop",
+                  why: np > 0 ? "refused: " + problems[0] : sameText(got: all, want: want));
+    }
+    {
+        NodeBuilder b = NodeBuilder.make(settings: MaterialSettings.make());
+        VertexReads reads = VertexReads.make();
+        Vec3Node light = varying(value: lit(model: ref reads));
+        b.fragmentColor(node: vec4(xyz: light, w: constant(value: 1.0)));
+        string all = b.wgsl();
+        DynamicArray<string> problems = b.problems();
+        isize np = problems.length();
+        string line = "    n1 = n1 + (objects[object].normal * (directionalLights[n3].color * dot(normal, directionalLights[n3].direction)));\n";
+        found.add(name: "lit(): a model lit in the vertex stage reads the vertex stage's own values inside its loop, the vertex's normal and the object's normal matrix",
+                  why: np > 0 ? "refused: " + problems[0] : (all.contains(substring: line) ? "" : "its loop does not read them so: " + all));
+    }
+    {
+        NodeBuilder b = NodeBuilder.make(settings: MaterialSettings.make());
+        Wrapped wrap = Wrapped.make();
+        b.fragmentColor(node: vec4(xyz: lit(model: ref wrap), w: constant(value: 1.0)));
+        string all = b.wgsl();
+        DynamicArray<string> problems = b.problems();
+        isize np = problems.length();
+        string text = "fn wrap(a: f32) -> f32 {\n  let n0 = ((a * 0.5) + 0.5);\n  return (n0 * n0);\n}\n";
+        string call = "    n2 = n2 + (directionalLights[n4].color * wrap(dot(n0, directionalLights[n4].direction)));\n";
+        string why = "";
+        if (np > 0) { why = "refused: " + problems[0]; }
+        else if (!all.contains(substring: text)) { why = "the function is not written so: " + all; }
+        else if (!all.contains(substring: call)) { why = "the loop does not call it so: " + all; }
+        found.add(name: "lit(): a typed function called inside the loop is written once, at its own indent, with its own lets",
+                  why: give why);
+    }
+    {
+        NodeBuilder b = NodeBuilder.make(settings: MaterialSettings.make());
+        Toon first = Toon.make();
+        Vec3Node before = lit(model: ref first);
+        Reader reader = Reader.make(prior: before);
+        b.fragmentColor(node: vec4(xyz: lit(model: ref reader), w: constant(value: 1.0)));
+        string all = b.wgsl();
+        found.add(name: "lit(): a model whose direct() reads an earlier lit()'s result is refused, never written before that sum is",
+                  why: holds(problems: b.problems(), want: "the scene's lights are summed inside a lighting model's direct(), by lit() called there or its result read there, and direct() is itself written inside the loop over the lights"));
+    }
+    {
+        NodeBuilder b = NodeBuilder.make(settings: MaterialSettings.make());
+        b.fragmentColor(node: vec4(xyz: normalWorld(), w: constant(value: 1.0)));
+        string all = b.wgsl();
+        found.add(name: "a material that reads no light is given none: its WGSL declares no lights and has no loop",
+                  why: all.contains(substring: "directionalLights") || all.contains(substring: "for (") ? "it declares them" : "");
+    }
+    {
+        NodeBuilder b = NodeBuilder.make(settings: MaterialSettings.make());
+        Keeper keeper = Keeper.make();
+        b.fragmentColor(node: vec4(xyz: lit(model: ref keeper), w: constant(value: 1.0)));
+        string all = b.wgsl();
+        found.add(name: "lit(): a model that keeps a light's colour and reads it outside direct() is refused",
+                  why: holds(problems: b.problems(), want: "a light's `color` is read outside the loop over the scene's lights: a lighting model reads lightDirection and lightColor in direct() alone"));
+    }
+    {
+        NodeBuilder b = NodeBuilder.make(settings: MaterialSettings.make());
+        Nested nested = Nested.make();
+        b.fragmentColor(node: vec4(xyz: lit(model: ref nested), w: constant(value: 1.0)));
+        string all = b.wgsl();
+        found.add(name: "lit(): a model whose direct() calls lit() again is refused",
+                  why: holds(problems: b.problems(), want: "the scene's lights are summed inside a lighting model's direct(), by lit() called there or its result read there, and direct() is itself written inside the loop over the lights"));
+    }
+    {
+        NodeBuilder b = NodeBuilder.make(settings: MaterialSettings.make());
+        Toon toon = Toon.make();
+        Shared<ShaderFunction> f = new ShaderFunction.make(name: "shaded");
+        FloatNode a = param(function: f, name: "a", value: constant(value: 1.0));
+        Vec3Node body = lit(model: ref toon) * a;
+        Vec3Node c = called(function: f, body: body);
+        b.fragmentColor(node: vec4(xyz: c, w: constant(value: 1.0)));
+        string all = b.wgsl();
+        found.add(name: "lit(): the lights read inside a shader function are refused",
+                  why: holds(problems: b.problems(), want: "the scene's lights are read inside a shader function: call lit() in a stage, and hand the function what it needs"));
+    }
+    {
+        NodeBuilder b = NodeBuilder.make(settings: MaterialSettings.make());
+        Shared<Expr> e = new Expr.make(kind: ExprKind::Light, text: "direction", wgslType: "vec3f", amount: 0.0);
+        b.fragmentColor(node: vec4(xyz: Vec3Node.of(e: give e), w: constant(value: 1.0)));
+        string all = b.wgsl();
+        found.add(name: "a program's own light value, made from Expr.make and read in a stage, is refused",
+                  why: holds(problems: b.problems(), want: "a light's `direction` is read outside the loop over the scene's lights: a lighting model reads lightDirection and lightColor in direct() alone"));
+    }
+}
+
+fn int32 channelOf(uint32 c, int32 shift) { return cast<int32>((c >> cast<uint32>(shift)) & 255); }
+fn int32 stepsApart(int32 a, int32 b) { return a > b ? a - b : b - a; }
+
+// A linear colour as the 8-bit sRGB target holds it, 0xRRGGBB.
+fn uint32 storedAs(float64 r, float64 g, float64 b) {
+    return (cast<uint32>(encoded(c: r)) << 16) | (cast<uint32>(encoded(c: g)) << 8) | cast<uint32>(encoded(c: b));
+}
+
+// A light's linear colour × intensity, as the renderer writes it, one channel at a time (0 red, 1 green, 2 blue).
+fn float64 radiant(uint32 hex, float32 intensity, int32 channel) {
+    Color c = Color.fromHex(hex: hex);
+    float32 v = channel == 0 ? c.linearR() : (channel == 1 ? c.linearG() : c.linearB());
+    return cast<float64>(v * intensity);
+}
+
+// What the four boxes should show: the colours' sum and the ambient light, linear, and the directions' sum, each d / 4 +
+// 1/4. The colour boxes (0, 2 and 3) show the same.
+type resource Wants {
+    DynamicArray<float64> colour;
+    DynamicArray<float64> direction;
+    public ctor make() {
+        this.colour = DynamicArray.empty();
+        this.direction = DynamicArray.empty();
+        for (int32 i = 0; i < 3; i = i + 1) { this.colour.add(item: 0.0); this.direction.add(item: 0.0); }
+    }
+    public fn void light(uint32 hex, float32 intensity, float64 dx, float64 dy, float64 dz) {
+        for (int32 c = 0; c < 3; c = c + 1) {
+            isize at = cast<isize>(c);
+            this.colour[at] = this.colour[at] + radiant(hex: hex, intensity: intensity, channel: c);
+        }
+        this.direction[0] = this.direction[0] + dx * 0.25 + 0.25;
+        this.direction[1] = this.direction[1] + dy * 0.25 + 0.25;
+        this.direction[2] = this.direction[2] + dz * 0.25 + 0.25;
+    }
+    public fn void ambient(uint32 hex, float32 intensity) {
+        for (int32 c = 0; c < 3; c = c + 1) {
+            isize at = cast<isize>(c);
+            this.colour[at] = this.colour[at] + radiant(hex: hex, intensity: intensity, channel: c);
+        }
+    }
+    public const fn uint32 colourStored() { return storedAs(r: this.colour[0], g: this.colour[1], b: this.colour[2]); }
+    public const fn uint32 directionStored() { return storedAs(r: this.direction[0], g: this.direction[1], b: this.direction[2]); }
+}
+
+type resource LightsRun {
+    int32 stage = 0;
+    Instant began = monotonicNow();
+    Verdicts found;
+    Device device;
+    Queue queue;
+    Optional<Renderer> renderer = Optional::None;
+    Optional<Shared<RenderTarget>> target = Optional::None;
+    Optional<Shared<PerspectiveCamera>> camera = Optional::None;
+    Optional<PixelRead> reading = Optional::None;
+    DynamicArray<uint8> frame;
+    string failed = "";
+    // the four boxes' scene, its lights, and the camera that sees them
+    Optional<Shared<Scene>> shownScene = Optional::None;
+    Optional<Shared<PerspectiveCamera>> shownCamera = Optional::None;
+    Optional<Shared<RenderTarget>> shownTarget = Optional::None;
+    Optional<Shared<DirectionalLight>> sunOne = Optional::None;
+    Optional<Shared<DirectionalLight>> sunTwo = Optional::None;
+    Optional<Shared<AmbientLight>> glow = Optional::None;
+    Optional<Shared<Group>> holder = Optional::None;
+    DynamicArray<Shared<DirectionalLight>> many;
+
+    public ctor make(Device device, Queue queue) {
+        this.found = Verdicts.make();
+        this.device = give device;
+        this.queue = give queue;
+        this.frame = DynamicArray.empty();
+        this.many = DynamicArray.empty();
+    }
+
+    public fn ref Verdicts verdicts() { return this.found; }
+
+    unsafe fn void next(int32 to) { this.stage = to; this.began = monotonicNow(); }
+
+    // The read's texels into `frame` once it answers; false while it is pending. A failed read leaves `failed` set.
+    unsafe fn bool settled() {
+        PixelStatus s = match (this.reading) {
+            case Some(value: r): r.poll();
+            case None: PixelStatus::Failed(error: GpuError::Refused(words: "no read was started"));
+        };
+        bool pending = match (s) { case Pending: true; case _: false; };
+        if (pending && this.began.elapsed().asMillis() < SETTLE_MS) { return false; }
+        this.frame = DynamicArray.empty();
+        this.failed = "";
+        match (give s) {
+            case Ready(image: img): {
+                borrow img.samples8() as px { for (isize i = 0; i < px.length(); i = i + 1) { this.frame.add(item: px[i]); } }
+            }
+            case Failed(error: e): { this.failed = "the read failed: " + e.message(); }
+            case Pending: { this.failed = "the read was still pending after ${SETTLE_MS} ms"; }
+        };
+        this.reading = Optional::None;
+        return true;
+    }
+
+    // Render `s` with `c` into its target, and start reading `t` back when `read`.
+    unsafe fn void drawWith(Shared<Scene> s, Shared<PerspectiveCamera> c, Optional<Shared<RenderTarget>> t) {
+        Optional<Renderer> taken = replace(place: this.renderer, with: Optional::None);
+        Renderer r = match (give taken) { case Some(value: x): give x; case None: { panic(msg: "made at the first stage"); } };
+        r.render(scene: s, camera: c);
+        match (give t) {
+            case Some(value: into): { this.reading = Optional::Some(value: r.readRenderTargetPixels(target: give into)); }
+            case None: { }
+        };
+        this.renderer = Optional::Some(value: give r);
+    }
+
+    // Render `s` with the run's camera into its target, and start reading it back when `read`.
+    unsafe fn void draw(Shared<Scene> s, bool read) {
+        Shared<PerspectiveCamera> c = match (this.camera) { case Some(value: x): copy x; case None: { panic(msg: "made at the first stage"); } };
+        Optional<Shared<RenderTarget>> t = read ? copy this.target : Optional::None;
+        this.drawWith(s: s, c: c, t: give t);
+    }
+
+    // The four boxes drawn and read back.
+    unsafe fn void drawShown() {
+        Shared<Scene> s = match (this.shownScene) { case Some(value: x): copy x; case None: { panic(msg: "made at stage 1"); } };
+        Shared<PerspectiveCamera> c = match (this.shownCamera) { case Some(value: x): copy x; case None: { panic(msg: "made at stage 1"); } };
+        Optional<Shared<RenderTarget>> t = copy this.shownTarget;
+        this.drawWith(s: s, c: c, t: give t);
+    }
+
+    // What the last render placed: the world matrices it made.
+    unsafe fn int32 placed() {
+        return match (this.renderer) { case Some(value: r): r.info().matrices; case None: -1; };
+    }
+
+    // The misuses the run's renderer refused since it was last asked.
+    unsafe fn RendererErrors drained() {
+        Optional<Renderer> taken = replace(place: this.renderer, with: Optional::None);
+        Renderer r = match (give taken) { case Some(value: x): give x; case None: { panic(msg: "made at the first stage"); } };
+        RendererErrors errs = r.takeErrors();
+        this.renderer = Optional::Some(value: give r);
+        return errs;
+    }
+
+    // "" when the counting material compiled once in all and the last render placed `want` matrices; else what it did.
+    unsafe fn string quietly(const ref Counting counted, int32 want) {
+        int32 compiles = counted.compiles();
+        int32 matrices = this.placed();
+        if (compiles == 1 && matrices == want) { return ""; }
+        return "compiled ${compiles} time(s) in all, and placed ${matrices} matrices, not ${want}";
+    }
+
+    // Lights added, changed and removed around one box: what each frame compiled and placed.
+    unsafe fn void changeCases() {
+        Shared<Counting> counted = new Counting.make();
+        Shared<Scene> s = new Scene.make();
+        Shared<BoxGeometry> box = new BoxGeometry.make(width: 1.0, height: 1.0, depth: 1.0);
+        Shared<Mesh> m = new Mesh.make(geometry: box, material: counted);
+        s.add(object: m);
+        this.draw(s: copy s, read: false);
+
+        Shared<DirectionalLight> sun = new DirectionalLight.make();
+        s.add(object: sun);
+        this.draw(s: copy s, read: false);
+        this.found.add(name: "Renderer: a directional light added compiles nothing, and its frame places the light alone",
+                       why: this.quietly(counted: counted.deref(), want: 1));
+        this.draw(s: copy s, read: false);
+        this.found.add(name: "Renderer: an unchanged frame with a light places nothing",
+                       why: this.quietly(counted: counted.deref(), want: 0));
+        sun.intensityMut() = 2.0;
+        this.draw(s: copy s, read: false);
+        this.found.add(name: "Renderer: a directional light dimmed (intensityMut) compiles nothing, and its frame places it again",
+                       why: this.quietly(counted: counted.deref(), want: 1));
+        sun.colorMut() = Color.fromHex(hex: 0xff8000);
+        this.draw(s: copy s, read: false);
+        this.found.add(name: "Renderer: a directional light recoloured (colorMut) compiles nothing, and its frame places it again",
+                       why: this.quietly(counted: counted.deref(), want: 1));
+        sun.targetMut() = Vec3.of(x: 1.0, y: 0.0, z: 0.0);
+        this.draw(s: copy s, read: false);
+        this.found.add(name: "Renderer: a directional light aimed (targetMut) compiles nothing, and its frame places it again",
+                       why: this.quietly(counted: counted.deref(), want: 1));
+        sun.positionMut() = Vec3.of(x: 2.0, y: 3.0, z: 1.0);
+        this.draw(s: copy s, read: false);
+        this.found.add(name: "Renderer: a directional light moved compiles nothing",
+                       why: this.quietly(counted: counted.deref(), want: 1));
+
+        Shared<AmbientLight> ambient = new AmbientLight.make();
+        s.add(object: ambient);
+        this.draw(s: copy s, read: false);
+        this.found.add(name: "Renderer: an ambient light added compiles nothing, and its frame places the light alone",
+                       why: this.quietly(counted: counted.deref(), want: 1));
+        ambient.intensityMut() = 0.5;
+        this.draw(s: copy s, read: false);
+        this.found.add(name: "Renderer: an ambient light dimmed (intensityMut) compiles nothing, and its frame places it again",
+                       why: this.quietly(counted: counted.deref(), want: 1));
+        ambient.colorMut() = Color.fromHex(hex: 0x204060);
+        this.draw(s: copy s, read: false);
+        this.found.add(name: "Renderer: an ambient light recoloured (colorMut) compiles nothing, and its frame places it again",
+                       why: this.quietly(counted: counted.deref(), want: 1));
+
+        s.remove(object: sun);
+        this.draw(s: copy s, read: false);
+        this.found.add(name: "Renderer: a directional light removed compiles nothing",
+                       why: this.quietly(counted: counted.deref(), want: 0));
+
+        // more directional lights than the scene's buffer holds at first, four, so it grows
+        for (int32 i = 0; i < 5; i = i + 1) {
+            Shared<DirectionalLight> more = new DirectionalLight.make();
+            more.positionMut() = Vec3.of(x: cast<float32>(i), y: 2.0, z: 1.0);
+            s.add(object: more);
+        }
+        this.draw(s: copy s, read: false);
+        this.found.add(name: "Renderer: five directional lights, past the buffer's first four, compile nothing",
+                       why: this.quietly(counted: counted.deref(), want: 5));
+        RendererErrors none = this.drained();
+        isize noted = none.reports().length();
+        this.found.add(name: "Renderer: none of these lights is reported as a misuse",
+                       why: none.isEmpty() ? "" : "takeErrors handed back ${noted} report(s)");
+
+        // a sun at its own target has no direction: reported once, and not again on an unchanged frame
+        Shared<DirectionalLight> aimless = new DirectionalLight.make();
+        aimless.positionMut() = Vec3.of(x: 1.0, y: 1.0, z: 1.0);
+        aimless.targetMut() = Vec3.of(x: 1.0, y: 1.0, z: 1.0);
+        s.add(object: aimless);
+        this.draw(s: copy s, read: false);
+        RendererErrors taken = this.drained();
+        isize kept = taken.reports().length();
+        string why = "";
+        if (kept != 1) {
+            why = "takeErrors handed back ${kept} report(s)";
+        } else {
+            bool light = match (taken.reports()[0].kind()) { case Light: true; case _: false; };
+            string words = taken.reports()[0].message();
+            if (!light) { why = "its kind is not Light"; }
+            else if (!words.contains(substring: "sits at its own target")) { why = "its words are: " + words; }
+        }
+        this.found.add(name: "render: a directional light at its own target is reported once, as Light, by takeErrors", why: give why);
+        this.draw(s: copy s, read: true);
+        RendererErrors again = this.drained();
+        isize repeated = again.reports().length();
+        this.found.add(name: "render: an unchanged frame does not report the light at its target again",
+                       why: again.isEmpty() ? "" : "it reported ${repeated} more");
+    }
+
+    // The four boxes, left to right: the colours, the directions, the colours through the specular halves, and the
+    // colours lit in the vertex stage; with one sun, three.js's default.
+    unsafe fn void makeShown() {
+        Shared<RenderTarget> t = new RenderTarget.make(width: SHOWN_WIDE, height: HIGH);
+        Shared<PerspectiveCamera> cam = new PerspectiveCamera.make(fovRad: radians(deg: 50.0),
+                                                                    aspect: cast<float32>(SHOWN_WIDE) / cast<float32>(HIGH),
+                                                                    near: 0.1, far: 100.0);
+        cam.positionMut() = Vec3.of(x: 0.0, y: 0.0, z: 4.0);
+        cam.targetMut() = Optional::Some(value: copy t);
+        Shared<Scene> s = new Scene.make();
+        Shared<BoxGeometry> box = new BoxGeometry.make(width: 0.8, height: 0.8, depth: 0.8);
+        for (int32 i = 0; i < 4; i = i + 1) {
+            Shared<ShowLights> look = new ShowLights.make(mode: i == 3 ? 0 : i, perVertex: i == 3);
+            Shared<Mesh> m = new Mesh.make(geometry: copy box, material: look);
+            m.positionMut() = Vec3.of(x: -2.25 + 1.5 * cast<float32>(i), y: 0.0, z: 0.0);
+            s.add(object: m);
+        }
+        Shared<DirectionalLight> sun = new DirectionalLight.make();
+        s.add(object: sun);
+        this.shownScene = Optional::Some(value: give s);
+        this.shownCamera = Optional::Some(value: give cam);
+        this.shownTarget = Optional::Some(value: give t);
+        this.sunOne = Optional::Some(value: give sun);
+    }
+
+    // "" when box `i`'s centre is within a step of `want`; else what it is.
+    unsafe fn string boxShows(int32 i, uint32 want) {
+        if (!this.failed.isEmpty()) { return copy this.failed; }
+        float64 x = -2.25 + 1.5 * cast<float64>(i);
+        // the box's centre on screen: the camera sees 4 tan 25° × 2 across either side of the centre, at the box's depth
+        float64 halfWidth = 4.0 * 0.46630765815499858 * 2.0;
+        isize column = cast<isize>(48.0 + x / halfWidth * 48.0);
+        isize at = (24 * cast<isize>(SHOWN_WIDE) + column) * 4;
+        isize held = this.frame.length();
+        if (at + 3 >= held) { return "the frame holds ${held} bytes"; }
+        uint32 got = (cast<uint32>(this.frame[at]) << 16) | (cast<uint32>(this.frame[at + 1]) << 8) | cast<uint32>(this.frame[at + 2]);
+        bool near = stepsApart(a: channelOf(c: got, shift: 16), b: channelOf(c: want, shift: 16)) <= 1
+            && stepsApart(a: channelOf(c: got, shift: 8), b: channelOf(c: want, shift: 8)) <= 1
+            && stepsApart(a: channelOf(c: got, shift: 0), b: channelOf(c: want, shift: 0)) <= 1;
+        return near ? "" : "box ${i}'s centre is ${got}, not ${want}";
+    }
+
+    // The four boxes held to `wants`, each a case named for the frame.
+    unsafe fn void shows(const ref Wants wants, string frameName) {
+        uint32 colour = wants.colourStored();
+        uint32 direction = wants.directionStored();
+        this.found.add(name: "lit(), " + frameName + ": the lights' colours summed with the ambient light, through the diffuse halves",
+                       why: this.boxShows(i: 0, want: colour));
+        this.found.add(name: "lit(), " + frameName + ": the lights' directions, each d / 4 + 1/4, summed",
+                       why: this.boxShows(i: 1, want: direction));
+        this.found.add(name: "lit(), " + frameName + ": the same colours through the specular halves",
+                       why: this.boxShows(i: 2, want: colour));
+        this.found.add(name: "lit(), " + frameName + ": the same colours lit in the vertex stage",
+                       why: this.boxShows(i: 3, want: colour));
+    }
+
+    unsafe fn Shared<DirectionalLight> theSun(bool first) {
+        Optional<Shared<DirectionalLight>> held = first ? copy this.sunOne : copy this.sunTwo;
+        return match (give held) { case Some(value: x): give x; case None: { panic(msg: "made earlier"); } };
+    }
+    unsafe fn Shared<Scene> theShown() {
+        return match (this.shownScene) { case Some(value: x): copy x; case None: { panic(msg: "made at stage 1"); } };
+    }
+
+    // The frame's errors: "" when the read answered and the device's channel is empty.
+    unsafe fn string noErrors() {
+        DeviceErrors errs = this.device.takeErrors();
+        isize nerr = errs.reports().length();
+        string firstError = nerr > 0 ? errs.reports()[0].message() : "";
+        string why = this.failed.isEmpty() ? "" : copy this.failed;
+        if (!errs.isEmpty()) { why = why + " the channel holds ${nerr} error(s), the first: " + firstError; }
+        return why;
+    }
+
+    public unsafe fn bool step() {
+        if (this.stage == 0) {
+            Renderer r = Renderer.withDevice(device: copy this.device, queue: copy this.queue);
+            r.clearColorMut() = Color.fromHex(hex: 0x336699);
+            Shared<RenderTarget> t = new RenderTarget.make(width: WIDE, height: HIGH);
+            Shared<PerspectiveCamera> cam = new PerspectiveCamera.make(fovRad: radians(deg: 50.0),
+                                                                        aspect: cast<float32>(WIDE) / cast<float32>(HIGH),
+                                                                        near: 0.1, far: 100.0);
+            cam.positionMut() = Vec3.of(x: 0.0, y: 0.0, z: 4.0);
+            cam.targetMut() = Optional::Some(value: copy t);
+            this.renderer = Optional::Some(value: give r);
+            this.target = Optional::Some(value: give t);
+            this.camera = Optional::Some(value: give cam);
+            this.changeCases();
+            this.next(to: 1);
+        } else if (this.stage == 1) {
+            if (!this.settled()) { return false; }
+            this.found.add(name: "the lights' changing frames raise no WebGPU error, and their last reads back", why: this.noErrors());
+            this.makeShown();
+            this.drawShown();
+            this.next(to: 2);
+        } else if (this.stage == 2) {
+            if (!this.settled()) { return false; }
+            Wants w = Wants.make();
+            w.light(hex: 0xffffff, intensity: 1.0, dx: 0.0, dy: 1.0, dz: 0.0);
+            this.shows(wants: w, frameName: "one sun, three.js's default, straight down");
+            Shared<DirectionalLight> sun = this.theSun(first: true);
+            sun.colorMut() = Color.fromHex(hex: 0x336699);
+            sun.intensityMut() = 0.5;
+            this.drawShown();
+            this.next(to: 3);
+        } else if (this.stage == 3) {
+            if (!this.settled()) { return false; }
+            Wants w = Wants.make();
+            w.light(hex: 0x336699, intensity: 0.5, dx: 0.0, dy: 1.0, dz: 0.0);
+            this.shows(wants: w, frameName: "the sun recoloured and dimmed");
+            Shared<AmbientLight> ambient = new AmbientLight.make();
+            ambient.colorMut() = Color.fromHex(hex: 0x204060);
+            ambient.intensityMut() = 0.25;
+            Shared<Scene> s = this.theShown();
+            s.add(object: ambient);
+            this.glow = Optional::Some(value: give ambient);
+            this.drawShown();
+            this.next(to: 4);
+        } else if (this.stage == 4) {
+            if (!this.settled()) { return false; }
+            Wants w = Wants.make();
+            w.light(hex: 0x336699, intensity: 0.5, dx: 0.0, dy: 1.0, dz: 0.0);
+            w.ambient(hex: 0x204060, intensity: 0.25);
+            this.shows(wants: w, frameName: "an ambient light added");
+            Shared<DirectionalLight> second = new DirectionalLight.make();
+            second.positionMut() = Vec3.of(x: 1.0, y: 0.0, z: 0.0);
+            second.colorMut() = Color.fromHex(hex: 0x404040);
+            second.intensityMut() = 0.5;
+            Shared<Scene> s = this.theShown();
+            s.add(object: second);
+            this.sunTwo = Optional::Some(value: give second);
+            this.drawShown();
+            this.next(to: 5);
+        } else if (this.stage == 5) {
+            if (!this.settled()) { return false; }
+            Wants w = Wants.make();
+            w.light(hex: 0x336699, intensity: 0.5, dx: 0.0, dy: 1.0, dz: 0.0);
+            w.light(hex: 0x404040, intensity: 0.5, dx: 1.0, dy: 0.0, dz: 0.0);
+            w.ambient(hex: 0x204060, intensity: 0.25);
+            this.shows(wants: w, frameName: "a second sun added");
+            Shared<Scene> s = this.theShown();
+            s.remove(object: this.theSun(first: true));
+            this.drawShown();
+            this.next(to: 6);
+        } else if (this.stage == 6) {
+            if (!this.settled()) { return false; }
+            Wants w = Wants.make();
+            w.light(hex: 0x404040, intensity: 0.5, dx: 1.0, dy: 0.0, dz: 0.0);
+            w.ambient(hex: 0x204060, intensity: 0.25);
+            this.shows(wants: w, frameName: "the first sun removed");
+            // the second sun under a group that moves: its world position is (1, 0, 1)
+            Shared<Group> g = new Group.make();
+            Shared<Scene> s = this.theShown();
+            s.add(object: g);
+            g.add(object: this.theSun(first: false));
+            g.positionMut() = Vec3.of(x: 0.0, y: 0.0, z: 1.0);
+            this.holder = Optional::Some(value: give g);
+            this.drawShown();
+            this.next(to: 7);
+        } else if (this.stage == 7) {
+            if (!this.settled()) { return false; }
+            Wants w = Wants.make();
+            float64 r = 1.0 / sqrt(x: 2.0);
+            w.light(hex: 0x404040, intensity: 0.5, dx: r, dy: 0.0, dz: r);
+            w.ambient(hex: 0x204060, intensity: 0.25);
+            this.shows(wants: w, frameName: "the second sun under a moved parent");
+            Shared<DirectionalLight> second = this.theSun(first: false);
+            second.targetMut() = Vec3.of(x: 1.0, y: 0.0, z: 0.0);
+            this.drawShown();
+            this.next(to: 8);
+        } else if (this.stage == 8) {
+            if (!this.settled()) { return false; }
+            Wants w = Wants.make();
+            w.light(hex: 0x404040, intensity: 0.5, dx: 0.0, dy: 0.0, dz: 1.0);
+            w.ambient(hex: 0x204060, intensity: 0.25);
+            this.shows(wants: w, frameName: "the second sun aimed at (1, 0, 0)");
+            // six dim suns, past the buffer's first four, and no other light
+            Shared<Scene> s = this.theShown();
+            Shared<Group> g = match (this.holder) { case Some(value: x): copy x; case None: { panic(msg: "made at stage 6"); } };
+            s.remove(object: g);
+            Shared<AmbientLight> ambient = match (this.glow) { case Some(value: x): copy x; case None: { panic(msg: "made at stage 3"); } };
+            s.remove(object: ambient);
+            for (int32 i = 0; i < 6; i = i + 1) {
+                Shared<DirectionalLight> dim = new DirectionalLight.make();
+                dim.colorMut() = Color.fromHex(hex: 0x202020);
+                s.add(object: dim);
+                this.many.add(item: give dim);
+            }
+            this.drawShown();
+            this.next(to: 9);
+        } else if (this.stage == 9) {
+            if (!this.settled()) { return false; }
+            Wants w = Wants.make();
+            for (int32 i = 0; i < 6; i = i + 1) { w.light(hex: 0x202020, intensity: 1.0, dx: 0.0, dy: 1.0, dz: 0.0); }
+            // the directions' box sums six d / 4 + 1/4, past what the target holds; the colour boxes are what is held
+            uint32 colour = w.colourStored();
+            this.found.add(name: "lit(), six suns past the buffer's first four: every one summed, through the diffuse halves",
+                           why: this.boxShows(i: 0, want: colour));
+            this.found.add(name: "lit(), six suns past the buffer's first four: every one summed, through the specular halves",
+                           why: this.boxShows(i: 2, want: colour));
+            this.found.add(name: "lit(), six suns past the buffer's first four: every one summed, in the vertex stage",
+                           why: this.boxShows(i: 3, want: colour));
+            this.found.add(name: "the lights' shown frames raise no WebGPU error", why: this.noErrors());
+            this.renderer = Optional::None;
+            this.stage = 999;
+        }
+        return this.stage == 999;
+    }
+}

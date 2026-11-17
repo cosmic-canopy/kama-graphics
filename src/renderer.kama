@@ -14,6 +14,10 @@
 // by its instance index. Sorting draws and drawing a mesh and material in common as one instanced draw come with
 // automatic instancing (GFX-2). `info()` says what the last render did, as three.js's `renderer.info`.
 //
+// The scene's lights reach every material as data in the frame's group (kyoten's rendering.md § Decided, GFX-1's part
+// 3, the lights' question 1): the frame block carries the ambient lights' sum and how many directional lights there
+// are, and binding 4 the directional lights themselves, so adding, removing, moving or dimming a light compiles nothing.
+//
 // A misuse the types cannot refuse is refused and reported, never ending the program (part 2, question 4), as @kama/gpu's
 // decision 9 does below it: a camera naming no target, rendered by a renderer with no window, draws nothing. The error
 // is the renderer's, read by `takeErrors()` as @kama/gpu's device's are, and printed as it happens unless the program
@@ -22,7 +26,7 @@
 import {
     std::collections::DynamicArray, std::collections::FixedArray,
     std::io::stderr, std::io::StdErr, std::memory::replace,
-    std::math::Mat4,
+    std::math::Mat4, std::math::Vec3,
     gpu::Device, gpu::Queue, gpu::GpuError, gpu::Texture, gpu::TextureView, gpu::TextureViewDescriptor, gpu::TextureFormat,
     gpu::Buffer, gpu::BufferDescriptor, gpu::BufferUsage, gpu::BufferRead, gpu::ReadStatus, gpu::BufferBinding,
     gpu::CommandEncoder, gpu::CommandBuffer, gpu::RenderPass, gpu::RenderPassDescriptor, gpu::ColorAttachment,
@@ -37,7 +41,7 @@ import {
     gpu::SamplerDescriptor, gpu::AddressMode, gpu::FilterMode, gpu::MipmapFilterMode, gpu::TexelCopyTextureInfo,
     gpu::TexelCopyBufferLayout, gpu::Extent3D,
     image::Image, image::ImageError, image::PixelFormat, image::AlphaMode, image::ColorSpace,
-    Color, RenderTarget, Scene, PerspectiveCamera, Geometry, BufferGeometry, Material, MaterialSettings, NodeBuilder,
+    Color, RenderTarget, Scene, Walk, PerspectiveCamera, Geometry, BufferGeometry, Material, MaterialSettings, NodeBuilder,
     dfgTable,
 };
 export { Renderer, RenderInfo, PixelRead, PixelStatus, GraphicsErrorKind, GraphicsErrorReport, RendererErrors };
@@ -64,11 +68,16 @@ fn void putFloat(ref DynamicArray<uint8> into, float32 value) {
 // The most misuses a renderer keeps until `takeErrors()` drains them, as @kama/gpu's channel keeps 64.
 comptime isize KEPT = 64;
 
+// The frame block as WGSL's `Frame` lays it out: the view-projection, a mat4x4f at 0; the ambient lights' sum, a vec3f at
+// 64; the directional lights' count, a u32 at 76.
+comptime uint64 FRAME_BYTES = 80;
+
 // What kind of misuse a renderer refused. `NoTarget`: a camera naming no render target was rendered by a renderer with
 // no window to draw into. `Material`: a material's nodes were refused by its compile (node_builder.kama), so no mesh
-// draws with it. A later misuse joins the list, so a program's `match` on it has a `case _:`.
+// draws with it. `Light`: a light that can light nothing, such as a directional light at its own target, reported when
+// the light is written so. A later misuse joins the list, so a program's `match` on it has a `case _:`.
 @nonExhaustive
-type enum GraphicsErrorKind { NoTarget, Material }
+type enum GraphicsErrorKind { NoTarget, Material, Light }
 
 // One misuse a renderer refused, in its words, whole, as @kama/gpu's `GpuErrorReport`.
 type resource GraphicsErrorReport {
@@ -116,10 +125,10 @@ type resource Renderer {
     Queue queue;
     Color clearTo = Color.fromHex(hex: 0x000000);
     float32 alpha = 1.0;
-    BindGroupLayout frameLayout;      // group 0: the frame, the object records, and the DFG table and its sampler
+    BindGroupLayout frameLayout;      // group 0: the frame, the object records, the DFG table and its sampler, the lights
     BindGroupLayout materialLayout;   // group 1: a material's settings
     PipelineLayout layout;
-    Buffer frame;                     // the frame's uniform: the view-projection
+    Buffer frame;                     // the frame's uniform: the view-projection, the ambient light, the lights' count
     TextureView dfgView;              // three.js r187's DFG table, 16 x 16 RG16F, made once (src/dfg.kama)
     Sampler dfgSampling;              // linear, clamped to the edge, as r187's
     DynamicArray<string> sources;     // the pipelines made, by the WGSL they run
@@ -134,14 +143,20 @@ type resource Renderer {
     // its own (`copy device`) and several renderers share one device.
     public unsafe ctor withDevice(Device device, Queue queue) {
         BindGroupLayoutDescriptor g0 = BindGroupLayoutDescriptor.make();
-        g0.entry(binding: 0, visibility: ShaderStage::Vertex, layout: BindingLayout::Buffer(layout: BufferBindingLayout.make()));
+        // the frame, read by both stages: the camera by the vertex stage, the ambient light and the count by a lit one
+        g0.entry(binding: 0, visibility: ShaderStage::Vertex | ShaderStage::Fragment,
+                 layout: BindingLayout::Buffer(layout: BufferBindingLayout.make()));
         BufferBindingLayout records = BufferBindingLayout.make();
         records.kind = BufferBindingType::ReadOnlyStorage;
         g0.entry(binding: 1, visibility: ShaderStage::Vertex, layout: BindingLayout::Buffer(layout: records));
         // the DFG table and its sampler, which only a fragment stage samples (WGSL's textureSample)
         g0.entry(binding: 2, visibility: ShaderStage::Fragment, layout: BindingLayout::Texture(layout: TextureBindingLayout.make()));
         g0.entry(binding: 3, visibility: ShaderStage::Fragment, layout: BindingLayout::Sampler(layout: SamplerBindingLayout.make()));
-        g0.label(text: "the frame, the object records and the DFG table");
+        // the scene's directional lights, which a lit stage loops over, the fragment stage's or a program's own vertex stage
+        BufferBindingLayout lights = BufferBindingLayout.make();
+        lights.kind = BufferBindingType::ReadOnlyStorage;
+        g0.entry(binding: 4, visibility: ShaderStage::Vertex | ShaderStage::Fragment, layout: BindingLayout::Buffer(layout: lights));
+        g0.label(text: "the frame, the object records, the DFG table and the lights");
         this.frameLayout = device.createBindGroupLayout(descriptor: give g0);
         BindGroupLayoutDescriptor g1 = BindGroupLayoutDescriptor.make();
         // both stages, since a material's vertex stage may read its settings as well as its fragment stage
@@ -154,7 +169,7 @@ type resource Renderer {
         groups.group(layout: copy this.materialLayout);
         groups.label(text: "a mesh's groups");
         this.layout = device.createPipelineLayout(descriptor: give groups);
-        BufferDescriptor described = BufferDescriptor.make(size: 64, usage: BufferUsage::Uniform | BufferUsage::CopyDst);
+        BufferDescriptor described = BufferDescriptor.make(size: FRAME_BYTES, usage: BufferUsage::Uniform | BufferUsage::CopyDst);
         described.label(text: "the frame");
         this.frame = device.createBuffer(descriptor: give described);
         // the DFG table, r187's 512 half floats as they are, 64 bytes a row
@@ -296,7 +311,10 @@ type resource Renderer {
 
     // Draw `scene` as `camera` sees it, into the target the camera names.
     public unsafe fn void render(Shared<Scene> scene, Shared<PerspectiveCamera> camera) {
-        int32 made = scene.walkAll();
+        Walk walk = scene.walkAll();
+        int32 made = walk.matrices();
+        DynamicArray<string> found = walk.refusals();
+        for (isize i = 0; i < found.length(); i = i + 1) { this.refuse(kind: GraphicsErrorKind::Light, message: copy found[i]); }
         camera.placeAlone();
         int32 objects = cast<int32>(scene.objects());
         Optional<Shared<RenderTarget>> named = camera.target();
@@ -316,14 +334,25 @@ type resource Renderer {
         for (int32 c = 0; c < 4; c = c + 1) {
             for (int32 r = 0; r < 4; r = r + 1) { putFloat(into: ref frameBytes, value: vp.get(c: c, r: r)); }
         }
+        Vec3 ambient = scene.ambientLight();
+        putFloat(into: ref frameBytes, value: ambient.x);
+        putFloat(into: ref frameBytes, value: ambient.y);
+        putFloat(into: ref frameBytes, value: ambient.z);
+        uint32 directional = cast<uint32>(scene.directionalCount());
+        frameBytes.add(item: truncate<uint8>(directional));
+        frameBytes.add(item: truncate<uint8>(directional >> 8));
+        frameBytes.add(item: truncate<uint8>(directional >> 16));
+        frameBytes.add(item: truncate<uint8>(directional >> 24));
         this.queue.writeBuffer(buffer: this.frame, offset: 0, data: frameBytes.view());
         Buffer records = scene.recordsOn(device: ref this.device, queue: ref this.queue);
+        Buffer lights = scene.lightsOn(device: ref this.device, queue: ref this.queue);
         BindGroupDescriptor bound = BindGroupDescriptor.make(layout: copy this.frameLayout);
         bound.entry(binding: 0, resource: BindingResource::Buffer(binding: BufferBinding.whole(buffer: copy this.frame)));
         bound.entry(binding: 1, resource: BindingResource::Buffer(binding: BufferBinding.whole(buffer: give records)));
         bound.entry(binding: 2, resource: BindingResource::Texture(view: copy this.dfgView));
         bound.entry(binding: 3, resource: BindingResource::Sampler(sampler: copy this.dfgSampling));
-        bound.label(text: "the frame, the object records and the DFG table");
+        bound.entry(binding: 4, resource: BindingResource::Buffer(binding: BufferBinding.whole(buffer: give lights)));
+        bound.label(text: "the frame, the object records, the DFG table and the lights");
         BindGroup frameGroup = this.device.createBindGroup(descriptor: give bound);
 
         RenderPassDescriptor pass = RenderPassDescriptor.make();

@@ -91,3 +91,17 @@ package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - The compiler declares the table only to a material that reads it, and refuses a sample in the vertex stage, a
     texture the renderer does not bind, and a function named as the table, its sampler or their WGSL types.
   - Depends on `@kama/gpu`'s `queue.writeTexture`, its AGENTS.gpu.md item 14.
+- GFX-1's part 3, its third part, step 2: the lights as scene nodes, reaching a shader as data, and the lighting model
+  that reads them.
+  - `DirectionalLight` and `AmbientLight`, scene nodes behind `Object3D`, with three.js r187's defaults: `color()`,
+    `intensity()`, and on the sun `target()`, a point in world space; each `Mut` marks the light changed.
+  - Each light in a scene holds a slot in the scene's lights table. The directional lights reach group 0 as a storage
+    buffer of any length (binding 4), and the frame block grows to 80 bytes with the ambient lights' sum and the
+    directional lights' count. Adding, removing, moving, aiming, recolouring or dimming a light compiles nothing.
+  - `LightingModel`, a public contract (`direct(lightDirection:, lightColor:)` and `indirect(irradiance:)`, each a
+    `ReflectedLight`), and `lit(model:)`, the light leaving the surface.
+  - The compiler writes a stage's light sums in one loop over the scene's directional lights, in either stage, with
+    what depends on no light written once before it, and refuses a light's value read outside the loop, `lit()` inside
+    `direct()`, and the lights read inside a shader function.
+  - `GraphicsErrorKind::Light`: a directional light at its own target lights nothing, and is reported once a change.
+  - **Changed:** `ExprKind` gains `Light` and `LightSum`, so a program's exhaustive `match` on it needs two arms.

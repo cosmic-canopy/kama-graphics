@@ -127,7 +127,7 @@ fn string onlyProblem(const ref DynamicArray<string> problems, const ref string 
 
 // The WGSL every material is given in group 0, and the table a material that reads it is given beside it.
 fn string groupZero() {
-    return "struct Frame { viewProjection: mat4x4f };\n"
+    return "struct Frame { viewProjection: mat4x4f, ambient: vec3f, directionalCount: u32 };\n"
         + "@group(0) @binding(0) var<uniform> frame: Frame;\n"
         + "struct Object { world: mat4x4f, normal: mat3x3f };\n"
         + "@group(0) @binding(1) var<storage, read> objects: array<Object>;\n";

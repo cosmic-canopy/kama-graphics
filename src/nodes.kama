@@ -12,6 +12,7 @@ export {
     Node, Expr, ExprKind, FloatNode, Vec2Node, Vec3Node, Vec4Node, Mat3Node, Mat4Node, ShaderFunction, param, called,
     constant, vec2, vec3, vec4, dfg, dot, normalize, max, min, mix, saturate, sqrt, exp2, pow, varying,
     positionLocal, normalLocal, modelWorldMatrix, modelNormalMatrix, cameraViewProjectionMatrix, normalWorld, positionWorld,
+    ReflectedLight, LightingModel, lit,
 };
 
 // What a node computes:
@@ -23,8 +24,11 @@ export {
 // - `Param`, a typed function's parameter, read only inside it;
 // - `Varying`, a vertex stage's value the fragment stage reads;
 // - `Sample`, a texture the renderer binds, sampled at its argument, a vec2f, in the fragment stage alone (WGSL's
-//   `textureSample`): its text names the texture, whose sampler is the texture's name and `_sampler`.
-type enum ExprKind { Number, Name, VertexName, Attribute, Param, Call, Binary, Unary, Member, FnCall, Varying, Sample }
+//   `textureSample`): its text names the texture, whose sampler is the texture's name and `_sampler`;
+// - `Light`, one directional light's value, its text the member (`direction`, `color`), read only inside a `LightSum`;
+// - `LightSum`, its argument summed over the scene's directional lights: the loop a lighting model's `direct` is written
+//   in (lighting.kama).
+type enum ExprKind { Number, Name, VertexName, Attribute, Param, Call, Binary, Unary, Member, FnCall, Varying, Sample, Light, LightSum }
 
 // One node of the graph: what it computes, its WGSL type and its arguments, each shared, so one subexpression can feed
 // several nodes.
@@ -336,4 +340,58 @@ fn T called<T: Node<T>>(Shared<ShaderFunction> function, T body) {
     for (isize i = 0; i < function.valueCount(); i = i + 1) { e.arg(e: function.valueAt(i: i)); }
     e.calls(f: give function);
     return body.over(e: give e);
+}
+
+// ---- the scene's lights ----
+//
+// How a material's shader reads the scene's lights (kyoten's rendering.md § Decided, GFX-1's part 3: the lights'
+// question 1, and the owner's (A) of 2026-11-16, a lighting model): a model says how ONE light lights the surface, as
+// three.js r187's `LightingModel.direct` and Godot's `light()` do, and `lit` hands it the light's direction and colour as
+// nodes. The compiler writes `direct` once, inside a loop over the scene's directional lights, whose number the shader
+// learns only as it runs, so adding or removing a light compiles nothing. What `direct` reads that depends on no light,
+// such as the surface's normal or a material's setting, is computed once, before the loop. A program's own model is
+// checked exactly as the library's.
+
+// What a light gives a surface, as three.js's `reflectedLight`: its diffuse part and its specular part, each linear.
+type resource ReflectedLight {
+    Vec3Node diffusePart;
+    Vec3Node specularPart;
+    public ctor of(Vec3Node diffuse, Vec3Node specular) {
+        this.diffusePart = give diffuse;
+        this.specularPart = give specular;
+    }
+    public fn Vec3Node diffuse() { return copy this.diffusePart; }
+    public fn Vec3Node specular() { return copy this.specularPart; }
+}
+
+// How light reaches a surface, as three.js r187's `LightingModel`.
+// - `direct`: what ONE directional light gives, from `lightDirection`, towards the light and of length 1 in world space,
+//   and `lightColor`, its linear colour × intensity. It is written once, inside the loop over the scene's directional
+//   lights, and its parts are summed over them. The two nodes are read only there: a model that keeps them for later is
+//   refused.
+// - `indirect`: what the ambient light gives, from `irradiance`, the scene's ambient lights' sum, linear.
+type contract LightingModel for resource {
+    fn ReflectedLight direct(Vec3Node lightDirection, Vec3Node lightColor);
+    fn ReflectedLight indirect(Vec3Node irradiance);
+}
+
+// One directional light's `field` inside the loop over them.
+fn Vec3Node lightValue(string field) { return Vec3Node.of(e: exprOf(kind: ExprKind::Light, text: give field, wgslType: "vec3f")); }
+
+// `term` summed over the scene's directional lights.
+fn Vec3Node summedOverLights(Vec3Node term) {
+    return Vec3Node.of(e: withArgs(e: exprOf(kind: ExprKind::LightSum, text: "", wgslType: "vec3f"), a: term.expr(),
+                                   b: Optional::None, c: Optional::None));
+}
+
+// The light leaving the surface under the scene's lights, as `model` says each reaches it, linear: as three.js r187's
+// `LightsNode`, the direct and indirect diffuse parts plus the direct and indirect specular parts, the direct ones summed
+// over the scene's directional lights and the indirect ones from its ambient lights' sum.
+fn Vec3Node lit<M: LightingModel>(ref M model) {
+    ReflectedLight fromLights = model.direct(lightDirection: lightValue(field: "direction"), lightColor: lightValue(field: "color"));
+    Vec3Node ambient = Vec3Node.of(e: exprOf(kind: ExprKind::Name, text: "frame.ambient", wgslType: "vec3f"));
+    ReflectedLight fromAmbient = model.indirect(irradiance: ambient);
+    Vec3Node totalDiffuse = summedOverLights(term: fromLights.diffuse()) + fromAmbient.diffuse();
+    Vec3Node totalSpecular = summedOverLights(term: fromLights.specular()) + fromAmbient.specular();
+    return totalDiffuse + totalSpecular;
 }

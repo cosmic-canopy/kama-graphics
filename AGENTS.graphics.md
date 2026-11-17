@@ -202,6 +202,16 @@ on every run, and compared byte for byte.
   SwiftShader flag dropped, the network sandbox flag dropped, Chrome for Testing read as an installed Chrome, and it
   naming no golden. The sixth, Edge given Chrome for Testing's flags, passes here, since Edge's leg never asks for a
   fallback adapter; `@kama/gpu`'s gate catches it in the same `tools/browsers.mjs`, which this one copies unchanged.
+- **Every leg runs a debug build and a release build,** natively and in every browser (kyoten's rendering.md § Decided,
+  2026-11-17, the owner's "(A) Debug + release"): a wasm release runs Closure over the page's JS since kama 0.9.966
+  (KR-289), and a game ships that build. Each run says its build first (`build: debug` or `build: release`), the gate
+  fails a leg whose program says another, and the release page's JS is held to Closure (it names no `UTF8ToString`).
+  The JS it runs over is `@kama/gpu`'s and `@kama/window`'s, whose gates hold its names. Red first on 0.9.966: no
+  release web build linked until `@kama/gpu`'s glue stopped naming `GPUTextureUsage` (its AGENTS.gpu.md item 15).
+  Every golden is held in both builds: 240 cases natively, in Firefox and in Chrome for Testing, 235 in Edge, each debug
+  and release. **Mutations: 4 of 4 caught** (kyoten's `.scratch/s32/graphics-mutations/`): the release page built in
+  debug, `kama run`'s release runs in debug, Closure turned off in the tests' manifest, and the program saying `debug`
+  in a release build.
 - **A golden is `tests/goldens/<test>/<gpu>.png`,** read through std::asset, preloaded beside the page on the web, and
   left out of the published package.
 - **The tests never write a golden.** A frame that differs, or has none, fails and is printed as one line,

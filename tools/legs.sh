@@ -68,9 +68,14 @@ buildNative() {
     fi
 }
 
+# The web build, debug unless the first argument says release: a wasm release runs Closure over the page's JS since kama
+# 0.9.966 (KR-289), and the gate runs both (kyoten's rendering.md § Decided, 2026-11-17).
 buildWeb() {
-    if ! "$KAMA" build tests/kama.json --target WASM -o tests/out/web/graphicstests.html > tests/out/build-web.log 2>&1; then
-        tail -20 tests/out/build-web.log
+    local mode="${1:-debug}" flag=""
+    [ "$mode" = release ] && flag="--release"
+    if ! "$KAMA" build tests/kama.json $flag --target WASM -o "tests/out/web-$mode/graphicstests.html" \
+            > "tests/out/build-web-$mode.log" 2>&1; then
+        tail -20 "tests/out/build-web-$mode.log"
         return 1
     fi
 }
@@ -83,9 +88,10 @@ runNative() {
 }
 
 runKama() {
-    local browser="$1" gpu="$2" log="$3" args=() flags=() f
+    local browser="$1" gpu="$2" log="$3" mode="${4:-debug}" args=() flags=() f build=""
     while IFS= read -r f; do [ -n "$f" ] && flags+=("$f"); done < <(browserFlags "$browser")
     [ -n "$gpu" ] && args=(-- --golden "$gpu")
-    KAMA_BROWSER="$browser" bounded "$KAMA" run tests/kama.json --target WASM --headless ${flags[@]+"${flags[@]}"} \
+    [ "$mode" = release ] && build="--release"
+    KAMA_BROWSER="$browser" bounded "$KAMA" run tests/kama.json $build --target WASM --headless ${flags[@]+"${flags[@]}"} \
         ${args[@]+"${args[@]}"} < /dev/null 2>&1 | tr -d '\r' | tee "$log"
 }

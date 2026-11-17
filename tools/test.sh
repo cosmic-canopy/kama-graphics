@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # tools/test.sh — @kama/graphics' gate: the roadmap and the feature map held to their rules, the library and its tests
-# checked, and the tests program run natively, debug and release, and built for the web and run in every headless
-# browser present, every frame held to its software GPU's golden where the leg names one (tools/legs.sh).
+# checked, and the tests program run natively, debug and release, and built for the web, debug and release, and run in
+# every headless browser present, every frame held to its software GPU's golden where the leg names one (tools/legs.sh).
 #
 #   tools/test.sh
 #
@@ -71,6 +71,23 @@ refusalsPrinted() {
     fi
 }
 
+# Every leg runs a debug build and a release build, natively and on the web (kyoten's rendering.md § Decided,
+# 2026-11-17): a wasm release runs Closure over the page's JS since kama 0.9.966 (KR-289), which renames every name it
+# cannot prove the browser's, and a game ships that build. The JS it runs over is @kama/gpu's and @kama/window's, whose
+# gates hold their names; this one holds the library to its goldens in both builds.
+#
+# A run's first line is what its program was built as (`build: debug` or `build: release`), so a leg that lost its
+# `--release` fails here rather than passing as the leg it names.
+builtAs() {
+    local log="$1" mode="$2" leg="$3"
+    if tr -d '\r' < "$log" | grep -qx "build: $mode"; then
+        echo "ok   $leg ran a $mode build"
+    else
+        echo "FAIL $leg: its program never said \"build: $mode\", so the leg ran another build"
+        failed=1
+    fi
+}
+
 step "the roadmap"
 tools/check-roadmap.sh || failed=1
 
@@ -125,6 +142,7 @@ for mode in debug release; do
         runNative "$mode" "$gpu" "tests/out/run-$mode.log" || failed=1
         goldensHeld "tests/out/run-$mode.log" "$gpu" "native, $mode"
         refusalsPrinted "tests/out/run-$mode.log" "native, $mode"
+        builtAs "tests/out/run-$mode.log" "$mode" "native, $mode"
     else
         failed=1
     fi
@@ -170,15 +188,23 @@ else
     failed=1
 fi
 
-step "the web leg: built, and run in every headless browser present"
+step "the web leg: built debug and release, and run in every headless browser present"
 if ! command -v emcc >/dev/null 2>&1; then
     echo "skip no emcc on PATH (run from an interactive UCRT64 shell, bash -lic)"
-elif ! buildWeb; then
+elif ! buildWeb debug || ! buildWeb release; then
     failed=1
 elif ! command -v node >/dev/null 2>&1; then
-    echo "ok   built tests/out/web/graphicstests.html"
+    echo "ok   built tests/out/web-debug/graphicstests.html and tests/out/web-release/graphicstests.html"
     echo "skip no node on PATH, so no browser run"
 else
+    # A release build's JS that still names emscripten's `UTF8ToString` was never run through Closure: a root manifest's
+    # `"release": { "closure": false }` would do that, and the release legs would test nothing of what a game ships.
+    if grep -q 'UTF8ToString' tests/out/web-release/graphicstests.js; then
+        echo "FAIL tests/out/web-release/graphicstests.js still names UTF8ToString, so Closure never ran over it"
+        failed=1
+    else
+        echo "ok   Closure ran over tests/out/web-release/graphicstests.js"
+    fi
     if browsers="$(node tools/browsers.mjs run 2>/dev/null)"; then
         n=0
         cft=0
@@ -187,10 +213,14 @@ else
             name="${browser##*[/\\]}"
             gpu="$(runGolden "$browser")"
             flags="$(browserFlags "$browser" | tr '\n' ' ')"
-            echo "-- kama run, $browser${flags:+ ${flags% }}${gpu:+, --golden $gpu}"
-            runKama "$browser" "$gpu" "tests/out/run-web-$n.log" || failed=1
-            goldensHeld "tests/out/run-web-$n.log" "$gpu" "$name"
-            refusalsPrinted "tests/out/run-web-$n.log" "$name"
+            # Each browser runs a debug build, then a release build, each held to the same goldens.
+            for mode in debug release; do
+                echo "-- kama run, $browser, $mode${flags:+ ${flags% }}${gpu:+, --golden $gpu}"
+                runKama "$browser" "$gpu" "tests/out/run-web-$n-$mode.log" "$mode" || failed=1
+                goldensHeld "tests/out/run-web-$n-$mode.log" "$gpu" "$name, $mode"
+                refusalsPrinted "tests/out/run-web-$n-$mode.log" "$name, $mode"
+                builtAs "tests/out/run-web-$n-$mode.log" "$mode" "kama run, $name, $mode"
+            done
             # The pinned Chrome for Testing is the web's SwiftShader leg (decided with the owner on 2026-11-14): one that
             # ran naming no software GPU passed on its hardware, comparing nothing.
             if [ "$(browserKind "$browser")" = chrome-for-testing ]; then

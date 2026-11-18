@@ -19,7 +19,7 @@ import {
     graphics::Color, graphics::Renderer, graphics::RenderTarget, graphics::Scene, graphics::Mesh,
     graphics::PerspectiveCamera, graphics::ToneMapping, graphics::BoxGeometry, graphics::MeshStandardMaterial, graphics::DirectionalLight,
     graphics::AmbientLight, graphics::PixelRead, graphics::PixelStatus, graphics::dfgTable,
-    Verdicts, checkGolden, Lighting, storedAs, nearTo,
+    gpuResolved, Verdicts, checkGolden, Lighting, storedAs, nearTo,
 };
 export { LitRun };
 
@@ -317,7 +317,7 @@ type resource LitRun {
 
     public unsafe fn bool step() {
         if (this.stage == 0) {
-            Renderer made = Renderer.withDevice(device: copy this.device, queue: copy this.queue);
+            Renderer made = gpuResolved(device: copy this.device, queue: copy this.queue);
             made.clearColorMut() = Color.fromHex(hex: BACKDROP);
             this.renderer = Optional::Some(value: give made);
             // light-directional: the default box, a warm sun aimed off the origin and a cool one at it, no ambient light

@@ -232,7 +232,7 @@ that kind needs.
 | Feature | Known as | Methods, best first (needs) | Status | Example | Test | Budget |
 |---|---|---|---|---|---|---|
 | Tone mapping | `toneMapping`: AgX, Neutral, ACES Filmic, Reinhard | options: AgX (the default), Neutral, ACES, Reinhard, none | planned | cube | tone-mapping | — |
-| Anti-aliasing | `antialias`, `TRAANode`, `SMAANode`, `FXAANode` | TAA · 4× MSAA (the default) · SMAA · FXAA | planned | cube | anti-aliasing | — |
+| Anti-aliasing | `antialias`, `samples`, `TRAANode`, `SMAANode`, `FXAANode`; Filament's `customResolve` | TAA · 8× MSAA, natively where the adapter has it · 4× MSAA, the tone-mapped resolve (the default) · 4× MSAA, the GPU's resolve · SMAA · FXAA · none | planned | cube | anti-aliasing | — |
 | Post-processing chain | three.js's `RenderPipeline`; Unity's Volumes; Unreal's post-process volumes | passes from nodes or WGSL over MRT | planned | shooter | post-chain | — |
 | Motion vectors | velocity buffers | written by the depth prepass | planned | shooter | motion-vectors | — |
 | Exposure | `toneMappingExposure`; the engines' auto exposure | automatic, from a histogram · manual, in EV | planned | shooter | exposure | — |

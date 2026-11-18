@@ -21,7 +21,7 @@ import {
     graphics::PixelStatus, graphics::Scene, graphics::Group, graphics::Mesh, graphics::PerspectiveCamera, graphics::ToneMapping,
     graphics::BoxGeometry, graphics::MeshBasicMaterial, graphics::Euler, graphics::EulerOrder,
     graphics::RendererErrors, graphics::GraphicsErrorKind,
-    Verdicts, checkGolden, fromSamples,
+    gpuResolved, Verdicts, checkGolden, fromSamples,
 };
 export { BoxesRun };
 
@@ -193,7 +193,7 @@ type resource BoxesRun {
 
     public unsafe fn bool step() {
         if (this.stage == 0) {
-            Renderer r = Renderer.withDevice(device: copy this.device, queue: copy this.queue);
+            Renderer r = gpuResolved(device: copy this.device, queue: copy this.queue);
             r.clearColorMut() = Color.fromHex(hex: BACKDROP);
             Shared<RenderTarget> t = new RenderTarget.make(width: WIDE, height: HIGH);
             Shared<PerspectiveCamera> cam = new PerspectiveCamera.make(fovRad: radians(deg: 50.0),
@@ -360,7 +360,7 @@ type resource BoxesRun {
         Shared<Scene> s = match (this.crossing) { case Some(value: x): copy x; case None: { panic(msg: "made at the first stage"); } };
         Shared<PerspectiveCamera> aimless = new PerspectiveCamera.make(fovRad: 1.0, aspect: 1.0, near: 0.1, far: 10.0);
         aimless.toneMappingMut() = ToneMapping::None;
-        Renderer told = Renderer.withDevice(device: copy this.device, queue: copy this.queue);
+        Renderer told = gpuResolved(device: copy this.device, queue: copy this.queue);
         bool printsByDefault = told.printErrors();
         this.found.add(name: "Renderer: it prints the misuses it refuses by default, as @kama/gpu's device prints its errors",
                        why: printsByDefault ? "" : "printErrors() is false");
@@ -385,7 +385,7 @@ type resource BoxesRun {
         isize remaining = again.reports().length();
         this.found.add(name: "Renderer: takeErrors drains: a second call hands back nothing",
                        why: again.isEmpty() ? "" : "it handed back ${remaining} report(s)");
-        Renderer quiet = Renderer.withDevice(device: copy this.device, queue: copy this.queue);
+        Renderer quiet = gpuResolved(device: copy this.device, queue: copy this.queue);
         quiet.printErrorsMut() = false;
         bool silenced = !quiet.printErrors();
         this.found.add(name: "Renderer: printErrors reads back false once a program turns it off",

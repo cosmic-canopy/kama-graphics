@@ -139,3 +139,10 @@ package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - GFX-1's part 4, step 4: 4x MSAA, on by default. A render draws every mesh at 4 samples a texel, and the GPU resolves
   them into the scene's 16-bit float texture, averaging the linear scene, before the output pass tone maps it. **Changed:**
   an edge's texels are its coverage, so every golden with an edge was written again.
+- GFX-1's part 4, step 5: the anti-aliasing method, set on the renderer. `Antialiasing` (`@nonExhaustive`):
+  `Msaa4ToneMapped`, the default, 4x MSAA resolved by a pass of the renderer's own that weighs each sample by 1/(1 + its
+  brightest channel), averages and undoes the weight, so a highlight's edge keeps its coverage after tone mapping;
+  `Msaa4`, the GPU's resolve; and `None`, one sample a texel. `antialiasing()` and `antialiasingMut()`; a change
+  takes effect at the next render. The goldens `anti-aliasing-msaa4-tone-mapped`, `anti-aliasing-msaa4` and
+  `anti-aliasing-none`. **Changed:** a renderer's edges are the tone-mapped resolve's by default; set `Msaa4` for step
+  4's.

@@ -1,0 +1,530 @@
+// GFX-1's part 4, step 5: how a renderer anti-aliases (kyoten's rendering.md § Decided, part 4's question 1, and the
+// owner's (A) of 2026-11-18: one list of whole methods, on the renderer). A step a tick on the device the check opened,
+// one renderer drawing every frame, its method changed between renders of one target, so each change is held to take
+// effect at the next render:
+// - **the default, `Msaa4ToneMapped`:** a box turned 30 degrees, so its edges cross texels slantwise, in a bright linear
+//   colour, (20, 4, 1), on a dark clear of alpha 0.25, reads back from a float target with every texel the tone-mapped
+//   resolve of k of its 4 samples worked here in float64, and each of k = 1, 2 and 3 somewhere: each sample over 1 + its
+//   brightest channel, the four averaged, then the mean over 1 − its brightest channel, alpha averaged plainly. With one
+//   sample of four on the box, a texel's red is 0.38, where the GPU's resolve gives 5.04 and a luma weight 0.87;
+// - **`Msaa4`:** every texel the linear average of its samples, the GPU's resolve;
+// - **`None`:** every texel the clear colour's or the box's, none between, both found;
+// - **`Msaa4ToneMapped` again:** the tone-mapped resolve, as the first render;
+// - **an 8-bit target:** the edge shows the tone-mapped resolve clamped and sRGB-encoded, so it is resolved before the
+//   output pass;
+// - **a sample stored as infinity:** a box whose shader squares 10^30, so it is infinite on every GPU, resolves as one at
+//   65504, its edge a number, where the weight alone would make it NaN;
+// - **a negative clear colour,** which only a program's `Color.make` can give: weighed by 1 and given back as it was, so
+//   a texel all clear holds the clear colour, as the GPU's resolve gives it, and an edge the formula's value;
+// - **the goldens** `anti-aliasing-msaa4-tone-mapped`, `anti-aliasing-msaa4` and `anti-aliasing-none`: a bright box's
+//   edges over a dim one and the dark, through Blender's AgX, the default, one renderer drawing all three.
+
+import {
+    std::collections::DynamicArray,
+    std::math::Vec3, std::math::radians, std::math::pow, std::math::abs, std::math::floor, std::math::log2,
+    std::time::Instant, std::time::monotonicNow,
+    image::Image,
+    gpu::Device, gpu::Queue, gpu::GpuError,
+    graphics::Color, graphics::Renderer, graphics::RenderTarget, graphics::TargetFormat, graphics::Scene, graphics::Mesh,
+    graphics::PerspectiveCamera, graphics::BoxGeometry, graphics::Material, graphics::MaterialGpu,
+    graphics::MaterialSettings, graphics::NodeBuilder, graphics::PixelRead, graphics::PixelStatus, graphics::ToneMapping,
+    graphics::Antialiasing, graphics::vec4, graphics::constant, graphics::Vec3Node,
+    Verdicts, halfValue, checkGolden,
+};
+export { AntialiasRun };
+
+comptime int64 EDGE_MS = 10000;
+comptime uint32 EDGE_WIDE = 16;
+comptime uint32 EDGE_HIGH = 12;
+comptime uint32 GOLD_WIDE = 64;
+comptime uint32 GOLD_HIGH = 32;
+
+// A program's own material showing one linear colour, its light as given, alpha 1.
+type resource Glow implements Material {
+    MaterialGpu cache;
+    float32 r;
+    float32 g;
+    float32 b;
+    public ctor make(float32 r, float32 g, float32 b) { this.cache = MaterialGpu.make(); this.r = r; this.g = g; this.b = b; }
+    public fn ref MaterialGpu gpuMut() { return this.cache; }
+    public const fn uint32 version() { return 0; }
+    public const fn uint32 graphVersion() { return 0; }
+    public const fn void settings(ref MaterialSettings into) { into.addVec3(name: "c", x: this.r, y: this.g, z: this.b); }
+    public fn void shade(ref NodeBuilder builder) {
+        builder.fragmentColor(node: vec4(xyz: builder.uniformVec3(name: "c"), w: constant(value: 1.0)));
+    }
+}
+
+// A program's own material whose colour is its uniform squared, in the shader: 10^30 squared is infinity in float32.
+type resource Squared implements Material {
+    MaterialGpu cache;
+    float32 v;
+    public ctor make(float32 v) { this.cache = MaterialGpu.make(); this.v = v; }
+    public fn ref MaterialGpu gpuMut() { return this.cache; }
+    public const fn uint32 version() { return 0; }
+    public const fn uint32 graphVersion() { return 0; }
+    public const fn void settings(ref MaterialSettings into) { into.addVec3(name: "c", x: this.v, y: this.v, z: this.v); }
+    public fn void shade(ref NodeBuilder builder) {
+        Vec3Node c = builder.uniformVec3(name: "c");
+        builder.fragmentColor(node: vec4(xyz: c * c, w: constant(value: 1.0)));
+    }
+}
+
+// A texel's four channels in float64: linear light and alpha.
+type value Rgba {
+    public float64 r; public float64 g; public float64 b; public float64 a;
+    public ctor of(float64 r, float64 g, float64 b, float64 a) { this.r = r; this.g = g; this.b = b; this.a = a; }
+}
+
+fn float64 brightest(Rgba c) {
+    float64 m = c.r > c.g ? c.r : c.g;
+    return m > c.b ? m : c.b;
+}
+fn float64 below(float64 v, float64 top) { return v < top ? v : top; }
+
+// A sample as the tone-mapped resolve weighs it: its colour, at most the largest half float, over 1 + its brightest
+// channel (never below 0); its alpha as it is.
+fn Rgba weighed(Rgba c) {
+    Rgba held = Rgba.of(r: below(v: c.r, top: 65504.0), g: below(v: c.g, top: 65504.0), b: below(v: c.b, top: 65504.0), a: c.a);
+    float64 top = brightest(c: held);
+    float64 w = 1.0 / (1.0 + (top > 0.0 ? top : 0.0));
+    return Rgba.of(r: held.r * w, g: held.g * w, b: held.b * w, a: held.a);
+}
+
+// What the tone-mapped resolve makes of a texel whose `k` samples of 4 are `lit` and the rest `dark`.
+fn Rgba toneMappedOf(Rgba lit, Rgba dark, int32 k) {
+    Rgba hw = weighed(c: lit);
+    Rgba dw = weighed(c: dark);
+    float64 on = cast<float64>(k);
+    float64 off = 4.0 - on;
+    Rgba mean = Rgba.of(r: (on * hw.r + off * dw.r) / 4.0, g: (on * hw.g + off * dw.g) / 4.0,
+                        b: (on * hw.b + off * dw.b) / 4.0, a: (on * lit.a + off * dark.a) / 4.0);
+    float64 top = brightest(c: mean);
+    float64 undo = 1.0 / (1.0 - (top > 0.0 ? top : 0.0));
+    return Rgba.of(r: mean.r * undo, g: mean.g * undo, b: mean.b * undo, a: mean.a);
+}
+// ...and what the GPU's resolve makes of it: the linear average.
+fn Rgba averageOf(Rgba lit, Rgba dark, int32 k) {
+    float64 on = cast<float64>(k);
+    float64 off = 4.0 - on;
+    return Rgba.of(r: (on * lit.r + off * dark.r) / 4.0, g: (on * lit.g + off * dark.g) / 4.0,
+                   b: (on * lit.b + off * dark.b) / 4.0, a: (on * lit.a + off * dark.a) / 4.0);
+}
+
+// A half float's step at `v`: the gap between two half floats there.
+fn float64 stepAt(float64 v) {
+    float64 a = abs(x: v);
+    float64 two = 2.0;
+    if (a < pow(x: two, y: -14.0)) { return pow(x: two, y: -24.0); }
+    return pow(x: two, y: floor(x: log2(x: a)) - 10.0);
+}
+// Whether the half `got` is within `steps` half-float steps of `want`. A NaN is within none.
+//
+// The GPU's resolve and one sample a texel round to a half float once, as the scene is stored, so one step holds them.
+// The tone-mapped resolve rounds twice, the samples as they are stored and the resolved texel as it is written, and
+// undoing the weight multiplies the first rounding by 1/(1 − the mean's brightest channel), 1.4 at the edge texel below:
+// two steps hold it. WARP was measured at 1.1 steps on one sample of four, every channel low by 5.5e-4 of itself, where
+// the formulas it is held against differ by far more: with a luma weight that texel's red is 0.87, with the weight never
+// undone 0.27, and the GPU's resolve gives 5.04, against the tone-mapped resolve's 0.38.
+fn bool nearHalf(uint16 got, float64 want, float64 steps) {
+    float64 value = halfValue(h: got);
+    return abs(x: value - want) <= steps * stepAt(v: want);
+}
+// sRGB's curve to 8 bits of a linear value clamped to 0 to 1, and an alpha's byte.
+fn int32 srgbByte(float64 linear) {
+    float64 c = linear < 0.0 ? 0.0 : linear > 1.0 ? 1.0 : linear;
+    float64 e = c <= 0.0031308 ? 12.92 * c : 1.055 * pow(x: c, y: 1.0 / 2.4) - 0.055;
+    return cast<int32>(floor(x: e * 255.0 + 0.5));
+}
+fn int32 alphaByte(float64 a) { return cast<int32>(floor(x: a * 255.0 + 0.5)); }
+fn int32 gap(int32 a, int32 b) { return a > b ? a - b : b - a; }
+
+// A box 2 metres ahead, turned 30 degrees about the view axis, so its edges cross texels slantwise.
+unsafe fn void turned(Shared<Mesh> mesh) {
+    mesh.positionMut() = Vec3.of(x: 0.0, y: 0.0, z: -2.0);
+    mesh.rotationMut().z = radians(deg: 30.0);
+}
+
+// What the scene's light is scaled by at a camera's default exposure, three.js's exposure of 1: 2^−EV100 / 1.2.
+fn float64 defaultScale(float32 ev) {
+    float64 two = 2.0;
+    float64 stops = cast<float64>(ev);
+    return pow(x: two, y: -stops) / 1.2;
+}
+
+type resource AntialiasRun {
+    int32 stage = 0;
+    Instant began = monotonicNow();
+    Verdicts found;
+    Device device;
+    Queue queue;
+    string gpu;
+    bool software;
+    int32 declaredCount = 0;
+    int32 matchedCount = 0;
+    Optional<Renderer> renderer = Optional::None;
+    Optional<Shared<RenderTarget>> edges = Optional::None;   // the float target every method draws into in turn
+    Optional<PixelRead> reading = Optional::None;
+    Optional<Image> got = Optional::None;
+    bool failed = false;
+    isize wide = 16;
+    Rgba lit = Rgba.of(r: 0.0, g: 0.0, b: 0.0, a: 1.0);    // the box's samples and the clear's, as stored: set by `draw`
+    Rgba dark = Rgba.of(r: 0.0, g: 0.0, b: 0.0, a: 0.25);
+
+    public ctor make(string gpu, bool software, Device device, Queue queue) {
+        this.found = Verdicts.make();
+        this.gpu = give gpu;
+        this.software = software;
+        this.device = give device;
+        this.queue = give queue;
+    }
+
+    public fn ref Verdicts verdicts() { return this.found; }
+    public const fn int32 declared() { return this.declaredCount; }
+    public const fn int32 matched() { return this.matchedCount; }
+
+    // A box turned 30 degrees about the view axis, 1 metre and 2 ahead, in the linear colour (r, g, b), or, `squared`,
+    // its square, drawn into `target` on `backdrop` of alpha 0.25, with no tone mapping, by the run's renderer as it is
+    // set; its read started.
+    unsafe fn void draw(Shared<RenderTarget> target, float32 r, float32 g, float32 b, bool squared, Color backdrop) {
+        Shared<PerspectiveCamera> cam = new PerspectiveCamera.make(fovRad: radians(deg: 50.0), aspect: 16.0 / 12.0, near: 0.1, far: 100.0);
+        cam.targetMut() = Optional::Some(value: copy target);
+        cam.toneMappingMut() = ToneMapping::None;
+        float64 scale = defaultScale(ev: cam.exposure());
+        float64 lr = cast<float64>(r);
+        float64 lg = cast<float64>(g);
+        float64 lb = cast<float64>(b);
+        if (squared) { lr = lr * lr; lg = lg * lg; lb = lb * lb; }
+        this.lit = Rgba.of(r: lr * scale, g: lg * scale, b: lb * scale, a: 1.0);
+        this.dark = Rgba.of(r: cast<float64>(backdrop.linearR()) * scale, g: cast<float64>(backdrop.linearG()) * scale,
+                            b: cast<float64>(backdrop.linearB()) * scale, a: 0.25);
+        Shared<Scene> s = new Scene.make();
+        Shared<BoxGeometry> box = new BoxGeometry.make(width: 1.0, height: 1.0, depth: 1.0);
+        if (squared) {
+            Shared<Squared> look = new Squared.make(v: r);
+            Shared<Mesh> m = new Mesh.make(geometry: copy box, material: look);
+            turned(mesh: copy m);
+            s.add(object: m);
+        } else {
+            Shared<Glow> look = new Glow.make(r: r, g: g, b: b);
+            Shared<Mesh> m = new Mesh.make(geometry: copy box, material: look);
+            turned(mesh: copy m);
+            s.add(object: m);
+        }
+        this.wide = cast<isize>(EDGE_WIDE);
+        match (this.renderer) {
+            case Some(value: rd): {
+                rd.clearColorMut() = backdrop;
+                rd.clearAlphaMut() = 0.25;
+                rd.render(scene: copy s, camera: copy cam);
+                this.reading = Optional::Some(value: rd.readRenderTargetPixels(target: copy target));
+            }
+            case None: { }
+        };
+        this.began = monotonicNow();
+    }
+
+    // The golden's scene into a new 64 x 32 8-bit target through Blender's AgX, the camera's default: a bright box
+    // turned 30 degrees in front of a dim, larger one, on the dark; its read started.
+    unsafe fn void drawGolden() {
+        Shared<RenderTarget> t = new RenderTarget.make(width: GOLD_WIDE, height: GOLD_HIGH);
+        Shared<PerspectiveCamera> cam = new PerspectiveCamera.make(fovRad: radians(deg: 50.0), aspect: 2.0, near: 0.1, far: 100.0);
+        cam.targetMut() = Optional::Some(value: copy t);
+        Shared<Scene> s = new Scene.make();
+        Shared<BoxGeometry> small = new BoxGeometry.make(width: 0.8, height: 0.8, depth: 0.8);
+        Shared<BoxGeometry> large = new BoxGeometry.make(width: 2.0, height: 1.2, depth: 0.5);
+        Shared<Glow> bright = new Glow.make(r: 12.0, g: 6.0, b: 2.0);
+        Shared<Glow> dim = new Glow.make(r: 0.05, g: 0.08, b: 0.2);
+        Shared<Mesh> front = new Mesh.make(geometry: small, material: bright);
+        front.positionMut() = Vec3.of(x: 0.4, y: 0.0, z: -2.2);
+        front.rotationMut().z = radians(deg: 30.0);
+        Shared<Mesh> back = new Mesh.make(geometry: large, material: dim);
+        back.positionMut() = Vec3.of(x: -0.3, y: 0.1, z: -3.0);
+        back.rotationMut().z = radians(deg: -10.0);
+        s.add(object: front);
+        s.add(object: back);
+        this.wide = cast<isize>(GOLD_WIDE);
+        match (this.renderer) {
+            case Some(value: rd): {
+                rd.clearColorMut() = Color.fromHex(hex: 0x101820);
+                rd.clearAlphaMut() = 1.0;
+                rd.render(scene: copy s, camera: copy cam);
+                this.reading = Optional::Some(value: rd.readRenderTargetPixels(target: copy t));
+            }
+            case None: { }
+        };
+        this.began = monotonicNow();
+    }
+
+    // The float target every method draws into, a handle of its own.
+    unsafe fn Shared<RenderTarget> edgeTarget() {
+        if (this.edges.isNone()) {
+            Shared<RenderTarget> t = new RenderTarget.withFormat(width: EDGE_WIDE, height: EDGE_HIGH, format: TargetFormat::Rgba16Float);
+            this.edges = Optional::Some(value: give t);
+        }
+        return match (this.edges) { case Some(value: t): copy t; case None: { panic(msg: "made above"); } };
+    }
+
+    // The renderer's method, set before the next render.
+    fn void choose(Antialiasing method) {
+        match (this.renderer) { case Some(value: rd): { rd.antialiasingMut() = method; } case None: { } };
+    }
+
+    // Whether the read has answered: its image kept in `got`, or `failed` set. False while it is pending.
+    unsafe fn bool answered() {
+        PixelStatus s = match (this.reading) {
+            case Some(value: r): r.poll();
+            case None: PixelStatus::Failed(error: GpuError::Taken);
+        };
+        bool pending = match (s) { case Pending: true; case _: false; };
+        if (pending && this.began.elapsed().asMillis() < EDGE_MS) { return false; }
+        this.reading = Optional::None;
+        this.failed = true;
+        this.got = Optional::None;
+        match (give s) {
+            case Ready(image: img): { this.failed = false; this.got = Optional::Some(value: give img); }
+            case _: { }
+        };
+        return true;
+    }
+
+    // The read image's half float at texel (x, y), channel c, or the largest finite half where it has none, which no
+    // case wants; and its byte, 0 where it has none.
+    fn uint16 half(isize x, isize y, isize c) {
+        isize at = (y * this.wide + x) * 4 + c;
+        return match (this.got) {
+            case Some(value: img): at < img.samples16().length() ? img.samples16()[at] : 0x7BFF;
+            case None: 0x7BFF;
+        };
+    }
+    fn uint8 byte(isize x, isize y, isize c) {
+        isize at = (y * this.wide + x) * 4 + c;
+        return match (this.got) {
+            case Some(value: img): at < img.samples8().length() ? img.samples8()[at] : 0;
+            case None: 0;
+        };
+    }
+
+    // Whether texel (x, y) holds `want`: each half within `steps` steps in a float image, or, `eight`, each colour byte
+    // within one of its sRGB encoding and the alpha's within one.
+    fn bool holds(isize x, isize y, Rgba want, bool eight, float64 steps) {
+        if (eight) {
+            return gap(a: cast<int32>(this.byte(x: x, y: y, c: 0)), b: srgbByte(linear: want.r)) <= 1
+                && gap(a: cast<int32>(this.byte(x: x, y: y, c: 1)), b: srgbByte(linear: want.g)) <= 1
+                && gap(a: cast<int32>(this.byte(x: x, y: y, c: 2)), b: srgbByte(linear: want.b)) <= 1
+                && gap(a: cast<int32>(this.byte(x: x, y: y, c: 3)), b: alphaByte(a: want.a)) <= 1;
+        }
+        return nearHalf(got: this.half(x: x, y: y, c: 0), want: want.r, steps: steps)
+            && nearHalf(got: this.half(x: x, y: y, c: 1), want: want.g, steps: steps)
+            && nearHalf(got: this.half(x: x, y: y, c: 2), want: want.b, steps: steps)
+            && nearHalf(got: this.half(x: x, y: y, c: 3), want: want.a, steps: steps);
+    }
+
+    // "" when every texel of the 16 x 12 image holds one of `wants`, the texel with k of its 4 samples on the box for
+    // `levels[i]`, and each level `needed` names is found somewhere.
+    fn string covers(const ref DynamicArray<Rgba> wants, const ref DynamicArray<int32> levels,
+                     const ref DynamicArray<int32> needed, bool eight, float64 steps) {
+        if (this.failed) { return "the read failed"; }
+        DynamicArray<int32> seen = DynamicArray.empty();
+        for (isize i = 0; i < 5; i = i + 1) { seen.add(item: 0); }
+        string odd = "";
+        for (isize y = 0; y < cast<isize>(EDGE_HIGH); y = y + 1) {
+            for (isize x = 0; x < cast<isize>(EDGE_WIDE); x = x + 1) {
+                int32 level = -1;
+                for (isize i = 0; i < wants.length() && level < 0; i = i + 1) {
+                    if (this.holds(x: x, y: y, want: wants[i], eight: eight, steps: steps)) { level = levels[i]; }
+                }
+                if (level >= 0) {
+                    seen[cast<isize>(level)] = seen[cast<isize>(level)] + 1;
+                } else if (odd.isEmpty()) {
+                    float64 r = halfValue(h: this.half(x: x, y: y, c: 0));
+                    float64 g = halfValue(h: this.half(x: x, y: y, c: 1));
+                    float64 b = halfValue(h: this.half(x: x, y: y, c: 2));
+                    float64 a = halfValue(h: this.half(x: x, y: y, c: 3));
+                    int32 rb = cast<int32>(this.byte(x: x, y: y, c: 0));
+                    int32 gb = cast<int32>(this.byte(x: x, y: y, c: 1));
+                    int32 bb = cast<int32>(this.byte(x: x, y: y, c: 2));
+                    int32 ab = cast<int32>(this.byte(x: x, y: y, c: 3));
+                    odd = eight ? "texel (${x}, ${y}) shows ${rb} ${gb} ${bb} ${ab}, no level's; "
+                                : "texel (${x}, ${y}) holds ${r} ${g} ${b} ${a}, no level's; ";
+                }
+            }
+        }
+        string missing = "";
+        for (isize i = 0; i < needed.length(); i = i + 1) {
+            int32 level = needed[i];
+            if (seen[cast<isize>(level)] == 0) { missing = missing + "no texel at ${level} of 4 samples; "; }
+        }
+        return odd + missing;
+    }
+
+    // The levels 0 to 4 as `toneMapped` says: the tone-mapped resolve's, or the GPU's.
+    fn string resolvedAs(bool toneMapped, bool eight) {
+        DynamicArray<Rgba> wants = DynamicArray.empty();
+        DynamicArray<int32> levels = DynamicArray.empty();
+        for (int32 k = 0; k < 5; k = k + 1) {
+            wants.add(item: toneMapped ? toneMappedOf(lit: this.lit, dark: this.dark, k: k) : averageOf(lit: this.lit, dark: this.dark, k: k));
+            levels.add(item: k);
+        }
+        DynamicArray<int32> needed = DynamicArray.empty();
+        needed.add(item: 1);
+        needed.add(item: 2);
+        needed.add(item: 3);
+        return this.covers(wants: wants, levels: levels, needed: needed, eight: eight, steps: toneMapped ? 2.0 : 1.0);
+    }
+
+    // The clear's and the box's alone, each found.
+    fn string unresolved() {
+        DynamicArray<Rgba> wants = DynamicArray.empty();
+        wants.add(item: this.dark);
+        wants.add(item: this.lit);
+        DynamicArray<int32> levels = DynamicArray.empty();
+        levels.add(item: 0);
+        levels.add(item: 4);
+        DynamicArray<int32> needed = DynamicArray.empty();
+        needed.add(item: 0);
+        needed.add(item: 4);
+        return this.covers(wants: wants, levels: levels, needed: needed, eight: false, steps: 1.0);
+    }
+
+    // A box beyond a half float's range: the levels 0 to 3 of the tone-mapped resolve with the box's samples at 65504,
+    // and the box's own texels any number of 32768 or more, infinity too, but never NaN.
+    fn string overflowed() {
+        if (this.failed) { return "the read failed"; }
+        int32 edge = 0;
+        string odd = "";
+        for (isize y = 0; y < cast<isize>(EDGE_HIGH); y = y + 1) {
+            for (isize x = 0; x < cast<isize>(EDGE_WIDE); x = x + 1) {
+                bool known = false;
+                for (int32 k = 0; k < 4 && !known; k = k + 1) {
+                    if (this.holds(x: x, y: y, want: toneMappedOf(lit: this.lit, dark: this.dark, k: k), eight: false, steps: 2.0)) {
+                        known = true;
+                        if (k > 0) { edge = edge + 1; }
+                    }
+                }
+                float64 r = halfValue(h: this.half(x: x, y: y, c: 0));
+                float64 g = halfValue(h: this.half(x: x, y: y, c: 1));
+                float64 b = halfValue(h: this.half(x: x, y: y, c: 2));
+                bool inside = r >= 32768.0 && g >= 32768.0 && b >= 32768.0;
+                if (!known && !inside && odd.isEmpty()) { odd = "texel (${x}, ${y}) holds ${r} ${g} ${b}; "; }
+            }
+        }
+        return edge > 0 ? copy odd : odd + "no edge texel was found";
+    }
+
+    // The image's bytes, held to `test`'s golden on the leg's software GPU.
+    unsafe fn void golden(const ref string test) {
+        if (this.gpu.isEmpty()) { return; }
+        DynamicArray<uint8> frame = DynamicArray.empty();
+        match (this.got) {
+            case Some(value: img): { borrow img.samples8() as px { for (isize k = 0; k < px.length(); k = k + 1) { frame.add(item: px[k]); } } }
+            case None: { }
+        };
+        this.declaredCount = this.declaredCount + 1;
+        string said = this.failed ? "the read failed"
+            : this.software ? checkGolden(test: test, gpu: this.gpu, width: cast<isize>(GOLD_WIDE), height: cast<isize>(GOLD_HIGH), frame: frame)
+            : "the adapter is not the software GPU the leg names, so its frame is not compared";
+        if (said.isEmpty()) { this.matchedCount = this.matchedCount + 1; }
+        this.found.add(name: "golden " + test + " on " + this.gpu, why: give said);
+    }
+
+    public unsafe fn bool step() {
+        if (this.stage == 0) {
+            Renderer made = Renderer.withDevice(device: copy this.device, queue: copy this.queue);
+            bool standard = made.antialiasing() == Antialiasing::Msaa4ToneMapped;
+            this.found.add(name: "anti-aliasing: a renderer's method is Msaa4ToneMapped by default", why: standard ? "" : "it is another");
+            this.renderer = Optional::Some(value: give made);
+            this.draw(target: this.edgeTarget(), r: 20.0, g: 4.0, b: 1.0, squared: false, backdrop: Color.fromHex(hex: 0x3f3f3f));
+            this.stage = 1;
+            return false;
+        }
+        if (this.stage == 1) {
+            if (!this.answered()) { return false; }
+            this.found.add(name: "Msaa4ToneMapped, the default: each texel of a bright box's slanted edge is its 4 samples each over 1 + its brightest channel, averaged, the weight undone, alpha averaged plainly",
+                           why: this.resolvedAs(toneMapped: true, eight: false));
+            this.choose(method: Antialiasing::Msaa4);
+            this.draw(target: this.edgeTarget(), r: 20.0, g: 4.0, b: 1.0, squared: false, backdrop: Color.fromHex(hex: 0x3f3f3f));
+            this.stage = 2;
+            return false;
+        }
+        if (this.stage == 2) {
+            if (!this.answered()) { return false; }
+            this.found.add(name: "Msaa4, set on the same renderer and target: each texel is the GPU's resolve, the linear average of its 4 samples",
+                           why: this.resolvedAs(toneMapped: false, eight: false));
+            this.choose(method: Antialiasing::None);
+            this.draw(target: this.edgeTarget(), r: 20.0, g: 4.0, b: 1.0, squared: false, backdrop: Color.fromHex(hex: 0x3f3f3f));
+            this.stage = 3;
+            return false;
+        }
+        if (this.stage == 3) {
+            if (!this.answered()) { return false; }
+            this.found.add(name: "None: one sample a texel, each texel the clear colour's or the box's, none between",
+                           why: this.unresolved());
+            this.choose(method: Antialiasing::Msaa4ToneMapped);
+            this.draw(target: this.edgeTarget(), r: 20.0, g: 4.0, b: 1.0, squared: false, backdrop: Color.fromHex(hex: 0x3f3f3f));
+            this.stage = 4;
+            return false;
+        }
+        if (this.stage == 4) {
+            if (!this.answered()) { return false; }
+            this.found.add(name: "Msaa4ToneMapped set again after None: the tone-mapped resolve, as the first render",
+                           why: this.resolvedAs(toneMapped: true, eight: false));
+            Shared<RenderTarget> eight = new RenderTarget.make(width: EDGE_WIDE, height: EDGE_HIGH);
+            this.draw(target: eight, r: 20.0, g: 4.0, b: 1.0, squared: false, backdrop: Color.fromHex(hex: 0x3f3f3f));
+            this.stage = 5;
+            return false;
+        }
+        if (this.stage == 5) {
+            if (!this.answered()) { return false; }
+            this.found.add(name: "Msaa4ToneMapped into an 8-bit target: the edge shows the tone-mapped resolve clamped and sRGB-encoded",
+                           why: this.resolvedAs(toneMapped: true, eight: true));
+            // 10^30 squared in the shader: infinity in float32, stored as infinity
+            this.draw(target: this.edgeTarget(), r: 1000000000000000000000000000000.0, g: 1000000000000000000000000000000.0,
+                      b: 1000000000000000000000000000000.0, squared: true,
+                      backdrop: Color.fromHex(hex: 0x3f3f3f));
+            this.stage = 6;
+            return false;
+        }
+        if (this.stage == 6) {
+            if (!this.answered()) { return false; }
+            this.found.add(name: "Msaa4ToneMapped: a box stored as infinity resolves as one at 65504, its edge a number, never NaN",
+                           why: this.overflowed());
+            // a clear colour of linear (−1, −0.5, −0.25), which only Color.make can give
+            this.draw(target: this.edgeTarget(), r: 20.0, g: 4.0, b: 1.0, squared: false,
+                      backdrop: Color.make(r: -12.92, g: -6.46, b: -3.23));
+            this.stage = 7;
+            return false;
+        }
+        if (this.stage == 7) {
+            if (!this.answered()) { return false; }
+            this.found.add(name: "Msaa4ToneMapped: a negative clear colour is weighed by 1 and given back as it was, the edge as the formula gives it",
+                           why: this.resolvedAs(toneMapped: true, eight: false));
+            this.drawGolden();
+            this.stage = 8;
+            return false;
+        }
+        if (this.stage == 8) {
+            if (!this.answered()) { return false; }
+            this.golden(test: "anti-aliasing-msaa4-tone-mapped");
+            this.choose(method: Antialiasing::Msaa4);
+            this.drawGolden();
+            this.stage = 9;
+            return false;
+        }
+        if (this.stage == 9) {
+            if (!this.answered()) { return false; }
+            this.golden(test: "anti-aliasing-msaa4");
+            this.choose(method: Antialiasing::None);
+            this.drawGolden();
+            this.stage = 10;
+            return false;
+        }
+        if (this.stage == 10) {
+            if (!this.answered()) { return false; }
+            this.golden(test: "anti-aliasing-none");
+            this.renderer = Optional::None;
+            this.stage = 11;
+        }
+        return true;
+    }
+}

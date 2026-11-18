@@ -26,7 +26,7 @@ import {
     graphics::MaterialSettings, graphics::NodeBuilder, graphics::PixelRead, graphics::PixelStatus, graphics::ToneMapping,
     graphics::vec4, graphics::vec3, graphics::constant, graphics::saturate, graphics::exp2, graphics::positionWorld,
     graphics::blenderAgxTable, graphics::Vec3Node, graphics::FloatNode,
-    Verdicts, halfValue, checkGolden,
+    gpuResolved, Verdicts, halfValue, checkGolden,
 };
 export { ToneMapRun };
 
@@ -253,7 +253,7 @@ type resource ToneMapRun {
     // The job at `next` drawn, by one renderer, so Blender's table is made once, and its read started.
     unsafe fn void startJob() {
         Job job = this.jobs[this.next];
-        if (this.renderer.isNone()) { this.renderer = Optional::Some(value: Renderer.withDevice(device: copy this.device, queue: copy this.queue)); }
+        if (this.renderer.isNone()) { this.renderer = Optional::Some(value: gpuResolved(device: copy this.device, queue: copy this.queue)); }
         bool ramp = match (job) { case Golden(curve: c): true; case _: false; };
         bool ignored = match (job) { case Ignored: true; case _: false; };
         uint32 wide = ramp ? RAMP_WIDE : SMALL_WIDE;

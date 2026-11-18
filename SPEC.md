@@ -82,14 +82,36 @@ a resource the program owns.
     set, and each mesh shaded where its depth is what the prepass kept, the depth tested Equal and read only, so each
     texel is shaded once, as Godot's Forward+. A 16-bit float target is that texture; an 8-bit target has one of its
     own, made beside its colour.
-  - **Both passes draw at 4x MSAA, on by default** (area 3; part 4's question 1): every pipeline, the scene and the
-    depth at 4 samples a texel, the one count above 1 WebGPU guarantees on every device. As the shaded pass ends, the
-    GPU resolves the samples into the scene's texture, averaging the linear scene, the ladder's second rung; the samples
-    are not kept. So an edge's texel holds the coverage of k of its 4 samples, and an 8-bit target encodes it after the
-    resolve: white on black reads 137, 188 or 225 where 1, 2 or 3 samples are covered. The clip
-    position is `@invariant` (§ The compiler), so both passes compute it bit for bit: naga and Tint write it as HLSL's
-    `precise` and SPIR-V's `Invariant`, and a prepass and a shaded pass shade exactly the texels one pass does on every
-    leg (kyoten's part 4 check 1);
+  - **Both passes draw at the samples a texel of the renderer's anti-aliasing method** (area 3; part 4's question 1; the
+    owner's (A) of 2026-11-18, one list of whole methods on the renderer): every pipeline, the scene and the depth.
+    `antialiasing()` and `antialiasingMut()` are a property pair, an `Antialiasing`, which is `@nonExhaustive`, so a
+    program's `match` on it has a `case _:`:
+    - **`Antialiasing::Msaa4ToneMapped`, the default:** 4 samples a texel, the one count above 1 WebGPU guarantees on
+      every device, resolved by the tone-mapped resolve, the ladder's best rung. The shaded pass keeps its samples, and a
+      pass of its own, one full-screen triangle reading them as a `texture_multisampled_2d<f32>`, writes the scene's
+      texture: each sample's colour, at most the largest half float (65504), over 1 + its brightest channel, the four
+      averaged, then the mean over 1 − its brightest channel, each brightest channel taken at 0 or above; alpha averaged
+      plainly (Lottes' reversible weight, as Filament's `customResolve`). The scene stays linear, and a highlight's edge
+      keeps its coverage after tone mapping: a texel one sample of four on a box of (20, 4, 1) over a dark clear holds a
+      red of 0.38, where the GPU's resolve holds 5.04, which a curve shows nearly as bright as the box itself, so one
+      sample of four reads as most of the edge (kyoten's rendering.md § Decided, part 4's question 1, measures it under
+      r187's AgX: 242, 250 and 254 of 255 for 1, 2 and 3 samples, the tone-mapped resolve 162, 202 and 231). A sample
+      stored as infinity resolves as 65504, never NaN, and a negative clear colour is weighed by 1 and given back as it
+      was;
+    - **`Antialiasing::Msaa4`:** 4 samples a texel, resolved by the GPU as the shaded pass ends, averaging the linear
+      scene into the scene's texture; the samples are not kept. So an edge's texel holds the coverage of k of its 4
+      samples, and an 8-bit target encodes it after the resolve: white on black reads 137, 188 or 225 where 1, 2 or 3
+      samples are covered. It costs a tiled GPU least;
+    - **`Antialiasing::None`:** one sample a texel, the shaded pass drawing the scene's texture itself.
+
+    A change takes effect at the next render: its pipelines are made at the method's count, and kept per count, so a
+    method set back compiles nothing; a target's multisampled scene and depth are made again at it (§ Render targets).
+    The resolve pass is the frame's, as the output pass is, so `info()` does not count it. Every method is core WebGPU,
+    so none falls back yet; later methods join the list, each naming the GPU features it needs, the next one down taken
+    and reported when one is missing: 8x natively where the adapter has it, TAA, SMAA and FXAA. Quality presets set the
+    method (part 5). The clip position is `@invariant` (§ The compiler), so both passes compute it bit for bit: naga and
+    Tint write it as HLSL's `precise` and SPIR-V's `Invariant`, and a prepass and a shaded pass shade exactly the texels
+    one pass does on every leg (kyoten's part 4 check 1);
   - each mesh is one draw in each pass, of its geometry's triangles, with back faces not drawn (three.js's `FrontSide`),
     its vertex shader reading its world matrix and normal matrix from the scene's records by its instance index, and
     each vertex's position and normal from the geometry's buffers;
@@ -155,8 +177,10 @@ Decided, GFX-1's part 2, question 4), as `@kama/gpu` reports every misuse of Web
   `format()` says which, and `holdsScene()` whether it is the scene itself.
 - **It is shared:** every holder of its `Shared` names the same target, and the last drop frees it.
 - **It is made with no device.** A renderer makes its textures the first time it uses it, on its own device: the colour;
-  for an 8-bit target, the 16-bit float texture its scene is resolved into; and at the renderer's 4 samples a texel, the
-  multisampled 16-bit float scene a render draws and a 32-bit float depth. A target used by renderers on two devices
+  for an 8-bit target, the 16-bit float texture its scene is resolved into; and at the samples a texel of the renderer's
+  anti-aliasing method, the multisampled 16-bit float scene a render draws, which at one sample is the scene's texture
+  itself, and a 32-bit float depth. A render at another count makes those two again at it and lets the old ones go, so
+  a method changed for good costs no memory for the one it left. A target used by renderers on two devices
   has textures on each, as three.js keeps one per renderer. A target never cleared reads back as WebGPU makes a
   texture, every byte 0.
 
@@ -679,6 +703,19 @@ Firefox's WebGPU does.
   half and three quarters found: in a float target as linear values, within a half float's step, and in an 8-bit target
   sRGB-encoded after the resolve, within a step (137, 188 and 225). Every golden with an edge was written again for it;
   the normals cases hold an edge's texel to the resolve of 4 samples of the faces' colours and the backdrop.
+- **Part 4's step 5, the anti-aliasing methods, on each leg's GPU** (`tests/src/antialias.kama`): one renderer draws a
+  box turned 30 degrees, in (20, 4, 1) on a dark clear of alpha 0.25, into one float target, its method changed between
+  renders, so each change is held to take effect at the next render. Each texel is held to what its method makes of k
+  of its 4 samples, worked in float64, and each of k = 1, 2 and 3 found: the tone-mapped resolve by default, within two
+  half-float steps, since it rounds twice, the samples stored and the texel written, and undoing the weight multiplies
+  the first (WARP measured 1.1 steps); the GPU's average under `Msaa4`, within a step; only the clear's and the box's
+  under `None`; the tone-mapped resolve again once set back. Then the tone-mapped resolve into an 8-bit target, clamped
+  and sRGB-encoded after it; a box whose shader squares 10^30, stored as infinity, resolved as one at 65504 and never
+  NaN; and a clear colour of linear (−1, −0.5, −0.25), given back as it was. The goldens
+  `anti-aliasing-msaa4-tone-mapped`, `anti-aliasing-msaa4` and `anti-aliasing-none` draw a bright box's edges over a dim
+  one and the dark, through Blender's AgX, one renderer drawing all three. **Every test written before step 5 makes its
+  renderer with `gpuResolved` (`tests/src/coverage.kama`), the GPU's resolve,** so its goldens and colour checks keep
+  their bytes, as step 3 set the earlier tests' tone mapping to `None`.
 - **Part 2's golden holds part 3's compiler:** `boxes/<gpu>.png` is matched byte for byte with `MeshBasicMaterial`'s
   nodes, as it was with its WGSL by hand.
 - **Printed from outside the program:** the gate counts each leg's printed lines: one for the render refused by the

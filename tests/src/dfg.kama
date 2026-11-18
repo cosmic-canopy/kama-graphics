@@ -24,7 +24,7 @@ import {
     graphics::ExprKind, graphics::FloatNode, graphics::Vec2Node, graphics::Vec4Node, graphics::vec2, graphics::vec3,
     graphics::vec4, graphics::constant, graphics::dfg, graphics::dfgTable, graphics::positionLocal,
     graphics::ShaderFunction, graphics::param, graphics::called,
-    Verdicts, encoded,
+    gpuResolved, Verdicts, encoded,
 };
 export { dfgCases, DfgRun, sampledAt, halfValue };
 
@@ -319,7 +319,7 @@ type resource DfgRun {
 
     // The sixteen boxes, each showing the table at its point, rendered, and the read started.
     unsafe fn void renderGrid() {
-        Renderer r = Renderer.withDevice(device: copy this.device, queue: copy this.queue);
+        Renderer r = gpuResolved(device: copy this.device, queue: copy this.queue);
         r.clearColorMut() = Color.fromHex(hex: 0x000000);
         Shared<RenderTarget> t = new RenderTarget.make(width: SIDE, height: SIDE);
         Shared<PerspectiveCamera> cam = new PerspectiveCamera.make(fovRad: radians(deg: 50.0), aspect: 1.0, near: 0.1, far: 100.0);

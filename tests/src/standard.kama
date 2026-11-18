@@ -22,7 +22,7 @@ import {
     graphics::MaterialSettings, graphics::NodeBuilder, graphics::MeshBasicMaterial, graphics::MeshStandardMaterial,
     graphics::PixelRead, graphics::PixelStatus, graphics::FloatNode, graphics::Vec3Node, graphics::vec3, graphics::vec4,
     graphics::constant,
-    Verdicts, encoded,
+    gpuResolved, Verdicts, encoded,
 };
 export { standardCases, StandardRun, Counting };
 
@@ -308,7 +308,7 @@ type resource StandardRun {
 
     public unsafe fn bool step() {
         if (this.stage == 0) {
-            Renderer r = Renderer.withDevice(device: copy this.device, queue: copy this.queue);
+            Renderer r = gpuResolved(device: copy this.device, queue: copy this.queue);
             r.clearColorMut() = Color.fromHex(hex: BACKDROP);
             Shared<RenderTarget> t = new RenderTarget.make(width: WIDE, height: HIGH);
             Shared<PerspectiveCamera> cam = new PerspectiveCamera.make(fovRad: radians(deg: 50.0),

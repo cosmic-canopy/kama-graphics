@@ -22,7 +22,7 @@ import {
     graphics::MaterialGpu, graphics::MaterialSettings, graphics::NodeBuilder, graphics::RendererErrors,
     graphics::GraphicsErrorKind, graphics::modelWorldMatrix, graphics::positionLocal, graphics::vec4, graphics::constant,
     graphics::FloatNode, graphics::Vec4Node, graphics::Mat4Node, graphics::cameraViewProjectionMatrix,
-    Verdicts, ShaderCase, nodeShaders,
+    gpuResolved, Verdicts, ShaderCase, nodeShaders,
 };
 export { ShaderRun };
 
@@ -127,7 +127,7 @@ type resource ShaderRun {
 
     // A scene of two boxes, one with a material its compile refuses: the other draws, the refusal is reported once.
     unsafe fn void refusedMaterial() {
-        Renderer r = Renderer.withDevice(device: copy this.device, queue: copy this.queue);
+        Renderer r = gpuResolved(device: copy this.device, queue: copy this.queue);
         Shared<RenderTarget> t = new RenderTarget.make(width: 32, height: 24);
         Shared<PerspectiveCamera> cam = new PerspectiveCamera.make(fovRad: radians(deg: 50.0), aspect: 32.0 / 24.0, near: 0.1, far: 100.0);
         cam.toneMappingMut() = ToneMapping::None;
@@ -176,7 +176,7 @@ type resource ShaderRun {
     // box is 4 metres across around the camera, with a blue box not mirrored in front, drawn first; from outside when it
     // is 1 metre across, 3 metres ahead.
     unsafe fn void renderMirrored(bool inside) {
-        Renderer r = Renderer.withDevice(device: copy this.device, queue: copy this.queue);
+        Renderer r = gpuResolved(device: copy this.device, queue: copy this.queue);
         r.clearColorMut() = Color.fromHex(hex: 0x202020);
         Shared<RenderTarget> t = new RenderTarget.make(width: 32, height: 24);
         Shared<PerspectiveCamera> cam = new PerspectiveCamera.make(fovRad: radians(deg: 50.0), aspect: 32.0 / 24.0, near: 0.1, far: 100.0);
@@ -210,7 +210,7 @@ type resource ShaderRun {
     // a #cc3333 box 1 metre across outside the room, 5 metres ahead, about 30 texels: the box is seen through the walls.
     // A depth prepass that wrote the walls it does not shade would hide it.
     unsafe fn void renderThroughRoom() {
-        Renderer r = Renderer.withDevice(device: copy this.device, queue: copy this.queue);
+        Renderer r = gpuResolved(device: copy this.device, queue: copy this.queue);
         r.clearColorMut() = Color.fromHex(hex: 0x202020);
         Shared<RenderTarget> t = new RenderTarget.make(width: 32, height: 24);
         Shared<PerspectiveCamera> cam = new PerspectiveCamera.make(fovRad: radians(deg: 50.0), aspect: 32.0 / 24.0, near: 0.1, far: 100.0);

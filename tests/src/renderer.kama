@@ -17,7 +17,7 @@ import {
     gpu::Device, gpu::Queue, gpu::GpuError, gpu::DeviceErrors,
     image::Image, image::PixelFormat, image::AlphaMode, image::ColorSpace, image::Primaries, image::Transfer,
     graphics::Color, graphics::Renderer, graphics::RenderTarget, graphics::PixelRead, graphics::PixelStatus,
-    Verdicts, checkGolden,
+    gpuResolved, Verdicts, checkGolden,
 };
 export { colorCases, RendererRun };
 
@@ -185,7 +185,7 @@ type resource RendererRun {
     public unsafe fn bool step() {
         if (this.stage == 0) {
             // a target cleared to #336699 reads back as written
-            Renderer r = Renderer.withDevice(device: copy this.device, queue: copy this.queue);
+            Renderer r = gpuResolved(device: copy this.device, queue: copy this.queue);
             Shared<RenderTarget> t = new RenderTarget.make(width: 37, height: 23);
             r.clearColorMut() = Color.fromHex(hex: 0x336699);
             this.clearAndRead(renderer: r, target: t);
@@ -279,7 +279,7 @@ type resource RendererRun {
             this.found.add(name: "readback: a read dropped while pending leaves the next one whole",
                            why: this.read(width: 37, height: 23, r: 0xff, g: 0x80, b: 0x00, a: 102));
             // a second renderer on the same device, with three.js's defaults: black, alpha 1
-            Renderer second = Renderer.withDevice(device: copy this.device, queue: copy this.queue);
+            Renderer second = gpuResolved(device: copy this.device, queue: copy this.queue);
             uint32 hex = second.clearColor().hex();
             float32 alpha = second.clearAlpha();
             this.found.add(name: "Renderer: its clear colour is black and its alpha 1, as three.js's",

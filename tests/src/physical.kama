@@ -26,7 +26,7 @@ import {
     graphics::FloatNode, graphics::vec3, graphics::vec4, graphics::constant, graphics::varying, graphics::cameraPosition,
     graphics::normalWorld, graphics::lit, graphics::PhysicalLightingModel, graphics::MeshStandardMaterial,
     graphics::DirectionalLight, graphics::AmbientLight, graphics::dfgTable, graphics::fSchlick,
-    Verdicts, encoded, sampledAt,
+    gpuResolved, Verdicts, encoded, sampledAt,
 };
 export { physicalCases, PhysicalRun, Lighting, storedAs, nearTo };
 
@@ -526,7 +526,7 @@ type resource PhysicalRun {
 
     public unsafe fn bool step() {
         if (this.stage == 0) {
-            Renderer r = Renderer.withDevice(device: copy this.device, queue: copy this.queue);
+            Renderer r = gpuResolved(device: copy this.device, queue: copy this.queue);
             r.clearColorMut() = Color.fromHex(hex: BACKDROP);
             Shared<RenderTarget> t = new RenderTarget.make(width: WIDE, height: HIGH);
             Shared<PerspectiveCamera> cam = new PerspectiveCamera.make(fovRad: radians(deg: 50.0),

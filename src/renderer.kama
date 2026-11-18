@@ -14,7 +14,10 @@
 // test Greater), keeps each texel's nearest depth; and the shaded pass clears the colour to the clear colour and shades
 // each mesh where its depth equals the prepass's, so each texel is shaded once. Each mesh is one draw a pass, reading its
 // record by its instance index. Sorting draws and drawing a mesh and material in common as one instanced draw come with
-// automatic instancing (GFX-2). `info()` says what the last render did, as three.js's `renderer.info`.
+// automatic instancing (GFX-2). Both passes draw at the samples a texel of the renderer's anti-aliasing method
+// (antialiasing.kama), and the scene's 16-bit float texture is made from them by the GPU's resolve, by the tone-mapped
+// resolve's own pass, or, at one sample, by drawing it; then the output pass writes an 8-bit target from it through the
+// camera's tone mapping. `info()` says what the last render did, as three.js's `renderer.info`.
 //
 // The scene's lights reach every material as data in the frame's group (kyoten's rendering.md § Decided, GFX-1's part
 // 3, the lights' question 1): the frame block carries the ambient lights' sum and how many directional lights there
@@ -44,10 +47,10 @@ import {
     gpu::FragmentState, gpu::ColorTargetState, gpu::CullMode, gpu::FrontFace, gpu::DepthStencilState, gpu::CompareFunction,
     gpu::TextureDescriptor, gpu::TextureUsage, gpu::TextureBindingLayout, gpu::SamplerBindingLayout, gpu::Sampler,
     gpu::SamplerDescriptor, gpu::AddressMode, gpu::FilterMode, gpu::MipmapFilterMode, gpu::TexelCopyTextureInfo,
-    gpu::TexelCopyBufferLayout, gpu::Extent3D, gpu::TextureDimension, gpu::TextureViewDimension,
+    gpu::TexelCopyBufferLayout, gpu::Extent3D, gpu::TextureDimension, gpu::TextureViewDimension, gpu::TextureSampleType,
     image::Image, image::ImageError, image::PixelFormat, image::AlphaMode, image::ColorSpace,
     Color, RenderTarget, Scene, Walk, PerspectiveCamera, Geometry, BufferGeometry, Material, MaterialSettings, NodeBuilder,
-    dfgTable, ToneMapping, outputWgsl, readsTable, blenderAgxTable, blenderAgxSize,
+    dfgTable, ToneMapping, outputWgsl, readsTable, blenderAgxTable, blenderAgxSize, Antialiasing, samplesOf, resolveWgsl,
 };
 export { Renderer, RenderInfo, PixelRead, PixelStatus, GraphicsErrorKind, GraphicsErrorReport, RendererErrors };
 
@@ -170,6 +173,7 @@ type resource Renderer {
     Sampler dfgSampling;              // linear, clamped to the edge, as r187's
     DynamicArray<string> sources;     // the pipelines made, by the WGSL they run
     DynamicArray<bool> flipped;       // ...and whether they draw mirrored meshes, whose front faces wind clockwise
+    DynamicArray<uint32> drawnAt;     // ...and the samples a texel they draw at, so a method changed back compiles nothing
     DynamicArray<RenderPipeline> pipelines;
     DynamicArray<RenderPipeline> prepasses;     // ...and each one's depth-only twin, for the depth prepass
     BindGroupLayout outputLayout;               // the output pass's one binding: the scene's 16-bit float texture
@@ -180,10 +184,14 @@ type resource Renderer {
     DynamicArray<ToneMapping> outputCurves;     // the output pipelines made, by the tone mapping they apply
     DynamicArray<RenderPipeline> outputs;
     RenderInfo last = RenderInfo.of(calls: 0, triangles: 0, objects: 0, matrices: 0);
-    // The samples a render draws each texel with: 4x MSAA, on by default (kyoten's rendering.md § Decided, area 3), the
-    // one count above 1 WebGPU guarantees on every device. The scene is resolved by the GPU, the ladder's second rung
-    // (part 4's question 1); the pipelines above are made at this count.
-    uint32 samples = 4;
+    BindGroupLayout resolveLayout;              // the tone-mapped resolve's one binding: the multisampled scene
+    PipelineLayout resolvePipelineLayout;
+    Optional<RenderPipeline> resolving = Optional::None;   // the tone-mapped resolve's pipeline, made the first time
+    // How a render anti-aliases (antialiasing.kama; kyoten's rendering.md § Decided, part 4's question 1 and the owner's
+    // (A) of 2026-11-18): 4x MSAA by default, the one count above 1 WebGPU guarantees on every device, resolved by the
+    // tone-mapped resolve, the ladder's best rung. Its samples a texel are what the pipelines and a target's
+    // multisampled textures are made at.
+    Antialiasing method = Antialiasing::Msaa4ToneMapped;
     bool printing = true;                       // printErrors
     DynamicArray<GraphicsErrorReport> errors;   // the misuses refused since the last takeErrors, at most KEPT
     int64 overflow = 0;                         // those past KEPT, counted
@@ -244,6 +252,7 @@ type resource Renderer {
         this.dfgSampling = device.createSampler(descriptor: give sampling);
         this.sources = DynamicArray.empty();
         this.flipped = DynamicArray.empty();
+        this.drawnAt = DynamicArray.empty();
         this.pipelines = DynamicArray.empty();
         this.prepasses = DynamicArray.empty();
         BindGroupLayoutDescriptor o = BindGroupLayoutDescriptor.make();
@@ -265,6 +274,19 @@ type resource Renderer {
         tableGroups.group(layout: copy this.tableLayout);
         tableGroups.label(text: "the output pass's group, with Blender's AgX table");
         this.tablePipelineLayout = device.createPipelineLayout(descriptor: give tableGroups);
+        // the tone-mapped resolve's: the multisampled scene, its samples read as unfilterable floats, as core WebGPU
+        // reads a multisampled texture
+        BindGroupLayoutDescriptor stored = BindGroupLayoutDescriptor.make();
+        TextureBindingLayout everySample = TextureBindingLayout.make();
+        everySample.sampleType = TextureSampleType::UnfilterableFloat;
+        everySample.multisampled = true;
+        stored.entry(binding: 0, visibility: ShaderStage::Fragment, layout: BindingLayout::Texture(layout: everySample));
+        stored.label(text: "the tone-mapped resolve's samples");
+        this.resolveLayout = device.createBindGroupLayout(descriptor: give stored);
+        PipelineLayoutDescriptor resolveGroups = PipelineLayoutDescriptor.make();
+        resolveGroups.group(layout: copy this.resolveLayout);
+        resolveGroups.label(text: "the tone-mapped resolve's group");
+        this.resolvePipelineLayout = device.createPipelineLayout(descriptor: give resolveGroups);
         this.outputCurves = DynamicArray.empty();
         this.outputs = DynamicArray.empty();
         this.errors = DynamicArray.empty();
@@ -279,6 +301,11 @@ type resource Renderer {
     // Its alpha, 0 to 1, which is never sRGB-encoded: 1, as three.js's.
     public const fn float32 clearAlpha() { return this.alpha; }
     public fn ref float32 clearAlphaMut() { return this.alpha; }
+
+    // How the renderer anti-aliases what it draws (antialiasing.kama): `Antialiasing::Msaa4ToneMapped` by default. A
+    // property pair, as `clearColor`; a change takes effect at the next render.
+    public const fn Antialiasing antialiasing() { return this.method; }
+    public fn ref Antialiasing antialiasingMut() { return this.method; }
 
     // What the last render did.
     public const fn RenderInfo info() { return this.last; }
@@ -364,6 +391,24 @@ type resource Renderer {
         return match (this.agxTableView) { case Some(value: v): copy v; case None: { panic(msg: "made above"); } };
     }
 
+    // The tone-mapped resolve's pipeline, made the first time a render takes the method (antialiasing.kama): it writes
+    // the scene's 16-bit float texture at one sample a texel.
+    unsafe fn RenderPipeline resolver() {
+        if (this.resolving.isNone()) {
+            ShaderModuleDescriptor described = ShaderModuleDescriptor.make(wgsl: resolveWgsl());
+            described.label(text: "the tone-mapped resolve");
+            ShaderModule shader = this.device.createShaderModule(descriptor: give described);
+            FragmentState fragment = FragmentState.make(module: copy shader, entryPoint: "fs");
+            fragment.target(state: ColorTargetState.make(format: TextureFormat::RGBA16Float));
+            RenderPipelineDescriptor pipeline = RenderPipelineDescriptor.make(layout: Layout::Explicit(layout: copy this.resolvePipelineLayout),
+                                                                              vertex: VertexState.make(module: give shader, entryPoint: "vs"));
+            pipeline.fragment(state: give fragment);
+            pipeline.label(text: "the tone-mapped resolve");
+            this.resolving = Optional::Some(value: this.device.createRenderPipeline(descriptor: give pipeline));
+        }
+        return match (this.resolving) { case Some(value: p): copy p; case None: { panic(msg: "made above"); } };
+    }
+
     fn GpuColor clearing() {
         return GpuColor.of(r: cast<float64>(this.clearTo.linearR()), g: cast<float64>(this.clearTo.linearG()),
                            b: cast<float64>(this.clearTo.linearB()), a: cast<float64>(this.alpha));
@@ -372,7 +417,7 @@ type resource Renderer {
     // Fill the target with the clear colour. On the default 8-bit sRGB target it reads back as written: a target
     // cleared to #336699 reads 0x33 0x66 0x99.
     public unsafe fn void clear(Shared<RenderTarget> target) {
-        Texture texture = target.textureOn(device: ref this.device, count: this.samples);
+        Texture texture = target.textureOn(device: ref this.device, count: samplesOf(method: this.method));
         TextureView view = texture.createView(descriptor: TextureViewDescriptor.make());
         RenderPassDescriptor pass = RenderPassDescriptor.make();
         pass.color(attachment: ColorAttachment.clearing(view: give view, color: this.clearing()));
@@ -384,11 +429,11 @@ type resource Renderer {
         this.queue.submit(commands: give commands);
     }
 
-    // The pipelines that run `source`, a material's WGSL, for a mirrored mesh or not, made the first time: the shaded one,
-    // and its depth-only twin for the depth prepass, each culling the same faces.
-    unsafe fn isize pipelineFor(const ref string source, bool mirrored) {
+    // The pipelines that run `source`, a material's WGSL, for a mirrored mesh or not, at `count` samples a texel, made the
+    // first time: the shaded one, and its depth-only twin for the depth prepass, each culling the same faces.
+    unsafe fn isize pipelineFor(const ref string source, bool mirrored, uint32 count) {
         for (isize i = 0; i < this.sources.length(); i = i + 1) {
-            if (this.sources[i] == source && this.flipped[i] == mirrored) { return i; }
+            if (this.sources[i] == source && this.flipped[i] == mirrored && this.drawnAt[i] == count) { return i; }
         }
         ShaderModuleDescriptor described = ShaderModuleDescriptor.make(wgsl: copy source);
         described.label(text: "a material's shader");
@@ -405,7 +450,7 @@ type resource Renderer {
         // Godot's Forward+ (kyoten's rendering.md § Decided, part 4), which `@invariant` on the clip position makes exact
         pipeline.depthStencil(state: DepthStencilState.make(format: TextureFormat::Depth32Float, depthWriteEnabled: false,
                                                             depthCompare: CompareFunction::Equal));
-        pipeline.multisampleMut().count = this.samples;
+        pipeline.multisampleMut().count = count;
         pipeline.label(text: "a mesh");
         // the depth prepass: the same vertex stage and culling, no fragment stage, the nearest depth kept (reversed: the
         // greater)
@@ -415,10 +460,11 @@ type resource Renderer {
         if (mirrored) { depthOnly.primitiveMut().frontFace = FrontFace::CW; }
         depthOnly.depthStencil(state: DepthStencilState.make(format: TextureFormat::Depth32Float, depthWriteEnabled: true,
                                                              depthCompare: CompareFunction::Greater));
-        depthOnly.multisampleMut().count = this.samples;
+        depthOnly.multisampleMut().count = count;
         depthOnly.label(text: "a mesh's depth");
         this.sources.add(item: copy source);
         this.flipped.add(item: mirrored);
+        this.drawnAt.add(item: count);
         this.pipelines.add(item: this.device.createRenderPipeline(descriptor: give pipeline));
         this.prepasses.add(item: this.device.createRenderPipeline(descriptor: give depthOnly));
         return this.pipelines.length() - 1;
@@ -462,10 +508,14 @@ type resource Renderer {
             return;
         }
         Shared<RenderTarget> target = match (give named) { case Some(value: t): give t; case None: { panic(msg: "checked above"); } };
-        Texture colour = target.textureOn(device: ref this.device, count: this.samples);
-        Texture depth = target.depthOn(device: ref this.device, count: this.samples);
-        Texture sceneTexture = target.sceneOn(device: ref this.device, count: this.samples);
-        Texture sampled = target.samplesOn(device: ref this.device, count: this.samples);
+        // the method, as set now: its samples a texel, and how they become the scene (antialiasing.kama)
+        uint32 perTexel = samplesOf(method: this.method);
+        bool byGpu = this.method == Antialiasing::Msaa4;
+        bool toneMappedResolve = this.method == Antialiasing::Msaa4ToneMapped;
+        Texture colour = target.textureOn(device: ref this.device, count: perTexel);
+        Texture depth = target.depthOn(device: ref this.device, count: perTexel);
+        Texture sceneTexture = target.sceneOn(device: ref this.device, count: perTexel);
+        Texture sampled = target.samplesOn(device: ref this.device, count: perTexel);
         float32 exposure = camera.exposureScale();
 
         DynamicArray<uint8> frameBytes = DynamicArray.empty();
@@ -523,7 +573,7 @@ type resource Renderer {
             DynamicArray<string> refused = material.gpuMut().refused();
             if (refused.length() > 0) { continue; }
             string source = material.gpuMut().source();
-            chosen.add(item: this.pipelineFor(source: source, mirrored: scene.mirroredAt(slot: slot)));
+            chosen.add(item: this.pipelineFor(source: source, mirrored: scene.mirroredAt(slot: slot), count: perTexel));
             DynamicArray<uint8> settings = DynamicArray.empty();
             if (material.gpuMut().staleOn(device: this.device, version: material.version())) {
                 MaterialSettings declared = MaterialSettings.make();
@@ -555,14 +605,15 @@ type resource Renderer {
                  normals: normalsOf, indices: indicesOf, formats: formats, counts: counts, slots: drawn);
         give dp.end();
         // the shaded pass, into the multisampled scene: cleared to the clear colour, exposed, then each mesh shaded where
-        // the prepass's depth is its own, that depth read and never written. The GPU resolves its samples into the scene's
-        // 16-bit float texture as the pass ends, averaging the linear scene, and the samples are not kept (part 4's
-        // question 1, the ladder's second rung)
+        // the prepass's depth is its own, that depth read and never written. Under `Msaa4` the GPU resolves its samples
+        // into the scene's 16-bit float texture as the pass ends, averaging the linear scene, and the samples are not kept
+        // (part 4's question 1, the ladder's second rung); under `Msaa4ToneMapped` they are kept for the resolve pass
+        // below; under `None` the pass draws the scene's texture itself, one sample a texel
         RenderPassDescriptor pass = RenderPassDescriptor.make();
         ColorAttachment shaded = ColorAttachment.make(view: sampled.createView(descriptor: TextureViewDescriptor.make()),
                                                       load: LoadOp::Clear(color: this.clearingExposed(scale: exposure)),
-                                                      store: StoreOp::Discard);
-        shaded.resolveTarget(view: sceneTexture.createView(descriptor: TextureViewDescriptor.make()));
+                                                      store: byGpu ? StoreOp::Discard : StoreOp::Store);
+        if (byGpu) { shaded.resolveTarget(view: sceneTexture.createView(descriptor: TextureViewDescriptor.make())); }
         pass.color(attachment: give shaded);
         DepthStencilAttachment tested = DepthStencilAttachment.make(view: depth.createView(descriptor: TextureViewDescriptor.make()));
         tested.depth(access: DepthAccess::ReadOnly);
@@ -573,6 +624,25 @@ type resource Renderer {
         drawEach(pass: ref rp, pipelines: this.pipelines, chosen: chosen, looks: looks, positions: positionsOf,
                  normals: normalsOf, indices: indicesOf, formats: formats, counts: counts, slots: drawn);
         give rp.end();
+        // the tone-mapped resolve (part 4's question 1, the ladder's best rung): one full-screen triangle writing the
+        // scene's 16-bit float texture from the samples the shaded pass kept, each weighed by 1/(1 + its brightest
+        // channel), averaged and the weight undone, so it stays linear (antialiasing.kama). The frame's own pass, as the
+        // output pass is, so `info()` does not count it
+        if (toneMappedResolve) {
+            BindGroupDescriptor samplesRead = BindGroupDescriptor.make(layout: copy this.resolveLayout);
+            samplesRead.entry(binding: 0, resource: BindingResource::Texture(view: sampled.createView(descriptor: TextureViewDescriptor.make())));
+            samplesRead.label(text: "the tone-mapped resolve's samples");
+            BindGroup resolveGroup = this.device.createBindGroup(descriptor: give samplesRead);
+            RenderPassDescriptor resolvePass = RenderPassDescriptor.make();
+            resolvePass.color(attachment: ColorAttachment.clearing(view: sceneTexture.createView(descriptor: TextureViewDescriptor.make()),
+                                                            color: GpuColor.of(r: 0.0, g: 0.0, b: 0.0, a: 0.0)));
+            resolvePass.label(text: "the tone-mapped resolve");
+            RenderPass tp = encoder.beginRenderPass(descriptor: give resolvePass);
+            tp.setPipeline(pipeline: this.resolver());
+            tp.setBindGroup(index: 0, group: resolveGroup);
+            tp.draw(vertexCount: 3, instanceCount: 1, firstVertex: 0, firstInstance: 0);
+            give tp.end();
+        }
         // the output pass, into an 8-bit target: the scene through the camera's tone mapping. A 16-bit float target holds
         // the scene itself, so it has none.
         if (!target.holdsScene()) {
@@ -605,7 +675,7 @@ type resource Renderer {
     // Start reading the target back, as three.js's `readRenderTargetPixelsAsync`: poll the read until it hands back its
     // image, the target's size in 8-bit RGBA, sRGB, top row first.
     public unsafe fn PixelRead readRenderTargetPixels(Shared<RenderTarget> target) {
-        Texture texture = target.textureOn(device: ref this.device, count: this.samples);
+        Texture texture = target.textureOn(device: ref this.device, count: samplesOf(method: this.method));
         uint32 width = target.width();
         uint32 height = target.height();
         bool wide = target.holdsScene();       // 16-bit float: 8 bytes a texel

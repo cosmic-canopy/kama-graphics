@@ -25,7 +25,7 @@ import {
     graphics::MaterialGpu, graphics::MaterialSettings, graphics::NodeBuilder, graphics::PixelRead, graphics::PixelStatus,
     graphics::ToneMapping, graphics::vec4, graphics::vec3, graphics::constant,
     graphics::ev100For, graphics::ev100Sunlight, graphics::ev100Overcast, graphics::ev100Indoor, graphics::ev100Blender,
-    Verdicts, halfValue,
+    gpuResolved, Verdicts, halfValue,
 };
 export { FrameRun };
 
@@ -102,7 +102,7 @@ type resource FrameRun {
     // A WIDE x HIGH target of `format`, seen by a camera at the origin looking down -z at EV100 `ev`, a 1 metre box 2
     // metres ahead in `look` filling its centre, the corners the clear colour: rendered, and its read started.
     unsafe fn void renderBox(TargetFormat format, float32 ev, Shared<Material> look, Color clearTo, float32 clearAlpha) {
-        Renderer r = Renderer.withDevice(device: copy this.device, queue: copy this.queue);
+        Renderer r = gpuResolved(device: copy this.device, queue: copy this.queue);
         r.clearColorMut() = clearTo;
         r.clearAlphaMut() = clearAlpha;
         Shared<RenderTarget> t = new RenderTarget.withFormat(width: WIDE, height: HIGH, format: format);
@@ -156,7 +156,7 @@ type resource FrameRun {
 
     // A 16-bit float target cleared by `clear(target:)` alone, its read started.
     unsafe fn void clearFloat(Color clearTo) {
-        Renderer r = Renderer.withDevice(device: copy this.device, queue: copy this.queue);
+        Renderer r = gpuResolved(device: copy this.device, queue: copy this.queue);
         r.clearColorMut() = clearTo;
         r.clearAlphaMut() = 0.25;
         Shared<RenderTarget> t = new RenderTarget.withFormat(width: WIDE, height: HIGH, format: TargetFormat::Rgba16Float);

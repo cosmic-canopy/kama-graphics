@@ -359,6 +359,34 @@ natively. The library's own `examples/cube` is the same scene without an engine.
   Edge, each debug and release, Edge's real GPU giving the same quarters. 6 of 7 mutations caught (kyoten's
   `.scratch/s35/kg/list2.py`); the seventh, the samples stored rather than discarded, is equivalent, since nothing reads
   them. Next, step 5: the tone-mapped resolve.
+- **Decided at step 5's start, how a program chooses the method** (kyoten's rendering.md § Decided, 2026-11-18, the
+  owner's "A (Recommended)"): one list of whole methods, a property pair on the renderer, the default the tone-mapped
+  resolve; a change takes effect at the next render; later methods (8x natively, TAA, SMAA, FXAA) join the same list.
+- **Built, part 4's step 5, the anti-aliasing methods** (2026-11-18, [SPEC.md](SPEC.md) § The renderer, § Render targets
+  and § Tests), the ladder's best rung and the method on the renderer:
+  - `Antialiasing` (`@nonExhaustive`): `Msaa4ToneMapped`, the default; `Msaa4`, the GPU's resolve; `None`, one sample a
+    texel; `antialiasing()` and `antialiasingMut()`;
+  - the tone-mapped resolve, a pass of its own reading the shaded pass's stored samples: each weighed by 1/(1 + its
+    brightest channel), averaged, the weight undone, alpha averaged plainly, with two guards, a sample stored as
+    infinity taken as 65504 and a brightest channel below 0 taken as 0, in the weight and its undoing alike;
+  - pipelines kept per count, and a target's multisampled scene and depth made again when the count changes, the
+    scene's texture drawn itself at one sample.
+
+  **Settled, and reported** (laid out with the question): the tests written before this step keep the GPU's resolve
+  (`gpuResolved`), so their goldens keep their bytes; Lottes' max3 weight; the resolve pass uncounted by `info()`;
+  `antialiasing()` says the method asked for, since nothing falls back yet. **Settled while building:** the tone-mapped
+  resolve is held within two half-float steps, since it rounds twice and undoing the weight multiplies the first (WARP
+  measured 1.1); the undoing floored at 0 as the weight is, found while writing the negative clear colour's case, since
+  the weight floored alone turned a texel all clear to the clear colour over 1.25.
+
+  Red first: on step 4's renderer with the method's stub, every tone-mapped case read the GPU's averages (red 5.04 where
+  the tone-mapped resolve gives 0.38), `None` read partial texels, and the three goldens did not exist; every earlier
+  case passed on `gpuResolved`. The three goldens written by `tools/update-goldens.sh`, WARP's two legs agreeing. 299 cases
+  natively, in Firefox and in Chrome for Testing, 286 in Edge, each debug and release. 24 of 24 mutations caught (kyoten's
+  `.scratch/s36/kg/list1.py`), among them a luma weight, each guard, and the older tests left on the default, which
+  fails their goldens. The one expected to be equivalent, the target's record of its count not kept once its textures
+  are made again, is caught too: a method set back then keeps the other count's textures.
+- **Next, part 5:** pipelines compiled off the frame, and the quality presets.
 - **Done:**
   - `examples/cube` draws from one source on both legs;
   - its golden passes on a software GPU on each leg CI has, and perceptually on the reference machines present;

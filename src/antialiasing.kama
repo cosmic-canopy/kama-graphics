@@ -1,0 +1,61 @@
+// How a renderer anti-aliases its frame (kyoten's rendering.md § Decided, part 4's question 1, and the owner's (A) of
+// 2026-11-18): one list of whole methods, the technique's ladder, best first, set on the renderer, where part 5's quality
+// presets set it. Every value is a method the renderer can draw with, so none is a misuse. A change takes effect at the
+// next render, which makes its pipelines and a target's textures at the method's sample count.
+//
+// Later methods join the list as rungs of the same ladder, each naming the GPU features it needs, the next one down
+// taken and reported when one is missing: 8x natively where the adapter has it (WebGPU's core allows 1 and 4 samples
+// alone), TAA, SMAA and FXAA.
+
+export { Antialiasing, samplesOf, resolveWgsl };
+
+// - `Msaa4ToneMapped`, the default: 4x MSAA, each texel's 4 samples resolved by the renderer's own pass, each weighted by
+//   1/(1 + its brightest channel) before they are averaged and the weight undone, so a highlight's edge keeps its
+//   coverage after tone mapping (Lottes' reversible weight, as Filament's `customResolve`). The presets for desktop and
+//   the web take it;
+// - `Msaa4`: 4x MSAA resolved by the GPU, averaging the linear scene, which costs a tiled GPU least;
+// - `None`: one sample a texel.
+@nonExhaustive
+type enum Antialiasing { Msaa4ToneMapped, Msaa4, None }
+
+// The samples a texel `method` draws with.
+fn uint32 samplesOf(Antialiasing method) {
+    return match (method) { case Msaa4ToneMapped: 4; case Msaa4: 4; case None: 1; };
+}
+
+// The tone-mapped resolve's pass: one full-screen triangle, drawn with no vertex buffer, reading each texel's stored
+// samples from the multisampled scene (core WebGPU's `texture_multisampled_2d<f32>`, an unfilterable float binding) and
+// writing the resolved texel into the scene's 16-bit float texture, linear, which the output pass then reads.
+//
+// Each sample is weighed by Lottes' reversible tone map, its colour over 1 + its brightest channel (AMD's "Optimized
+// Reversible Tonemapper for Resolve", Filament's `customResolve`); the weighed samples are averaged; and the mean is
+// over 1 − its brightest channel, which undoes the weight, so the scene stays linear for later effects. A highlight's
+// edge texel then keeps its coverage after tone mapping, where the linear average lets one bright sample swamp three
+// dark ones. Alpha is averaged plainly, as the GPU's resolve averages it. Two guards, each a pixel the weight alone
+// would spoil: a colour is taken at most the largest half float, 65504, since a sample stored as infinity would make the
+// weight infinity over infinity, NaN; and the brightest channel is taken at 0 or above, in the weight and in its undoing
+// alike, so a negative colour, which only a clear colour can be, is weighed by 1 and given back as it was, never
+// divided by 0 or less.
+fn string resolveWgsl() {
+    return "@group(0) @binding(0) var scene: texture_multisampled_2d<f32>;\n"
+        + "@vertex fn vs(@builtin(vertex_index) corner: u32) -> @builtin(position) vec4f {\n"
+        + "  let x = f32((corner << 1u) & 2u);\n"
+        + "  let y = f32(corner & 2u);\n"
+        + "  return vec4f(x * 2.0 - 1.0, 1.0 - y * 2.0, 0.0, 1.0);\n"
+        + "}\n"
+        + "fn weighed(c: vec3f) -> vec3f {\n"
+        + "  let held = min(c, vec3f(65504.0));\n"
+        + "  return held / (1.0 + max(max(held.r, max(held.g, held.b)), 0.0));\n"
+        + "}\n"
+        + "@fragment fn fs(@builtin(position) at: vec4f) -> @location(0) vec4f {\n"
+        + "  let p = vec2i(at.xy);\n"
+        + "  let n = textureNumSamples(scene);\n"
+        + "  var sum = vec4f(0.0);\n"
+        + "  for (var i = 0u; i < n; i = i + 1u) {\n"
+        + "    let s = textureLoad(scene, p, i);\n"
+        + "    sum = sum + vec4f(weighed(s.rgb), s.a);\n"
+        + "  }\n"
+        + "  let mean = sum / f32(n);\n"
+        + "  return vec4f(mean.rgb / (1.0 - max(max(mean.r, max(mean.g, mean.b)), 0.0)), mean.a);\n"
+        + "}\n";
+}

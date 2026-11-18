@@ -2,12 +2,26 @@
 // question 1): the GPU averages a texel's 4 samples in the linear scene, and the output pass then encodes the average.
 // So a case that holds every texel to a scene's colours holds an edge's texel to the average of 4 of them, which a wrong
 // colour almost never is.
+//
+// Every test written before part 4's step 5 makes its renderer with `gpuResolved`, which keeps the GPU's resolve
+// (`Antialiasing::Msaa4`): their goldens and colour checks were written at it, so they keep their bytes. The default, the
+// tone-mapped resolve, is held by tests/src/antialias.kama (kyoten's rendering.md § Decided, 2026-11-18), as step 3 set
+// the earlier tests' tone mapping to `None` and held the curves in their own cases.
 
 import {
     std::collections::DynamicArray,
     std::math::pow, std::math::floor,
+    gpu::Device, gpu::Queue,
+    graphics::Renderer, graphics::Antialiasing,
 };
-export { fromSamples };
+export { fromSamples, gpuResolved };
+
+// A renderer on `device` resolving its 4x MSAA by the GPU, `Antialiasing::Msaa4`.
+unsafe fn Renderer gpuResolved(Device device, Queue queue) {
+    Renderer r = Renderer.withDevice(device: give device, queue: give queue);
+    r.antialiasingMut() = Antialiasing::Msaa4;
+    return r;
+}
 
 // An sRGB byte's linear value, and a linear value's sRGB byte, clamped to 0 to 1.
 fn float64 linearOf(int32 encoded) {

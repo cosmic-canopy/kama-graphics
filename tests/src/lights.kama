@@ -34,7 +34,7 @@ import {
     graphics::vec3, graphics::vec4, graphics::dot, graphics::max, graphics::varying, graphics::normalWorld,
     graphics::normalLocal, graphics::modelNormalMatrix, graphics::ReflectedLight, graphics::LightingModel, graphics::lit,
     graphics::PixelRead, graphics::PixelStatus,
-    Verdicts, Counting, encoded,
+    gpuResolved, Verdicts, Counting, encoded,
 };
 export { lightCases, LightsRun };
 
@@ -731,7 +731,7 @@ type resource LightsRun {
 
     public unsafe fn bool step() {
         if (this.stage == 0) {
-            Renderer r = Renderer.withDevice(device: copy this.device, queue: copy this.queue);
+            Renderer r = gpuResolved(device: copy this.device, queue: copy this.queue);
             r.clearColorMut() = Color.fromHex(hex: 0x336699);
             Shared<RenderTarget> t = new RenderTarget.make(width: WIDE, height: HIGH);
             Shared<PerspectiveCamera> cam = new PerspectiveCamera.make(fovRad: radians(deg: 50.0),

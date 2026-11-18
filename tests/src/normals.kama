@@ -21,7 +21,7 @@ import {
     graphics::MaterialSettings, graphics::NodeBuilder, graphics::Euler, graphics::EulerOrder, graphics::PixelRead,
     graphics::PixelStatus, graphics::Vec3Node, graphics::Vec4Node, graphics::normalWorld, graphics::vec3, graphics::vec4,
     graphics::constant,
-    Verdicts, fromSamples,
+    gpuResolved, Verdicts, fromSamples,
 };
 export { NormalsRun, encoded };
 
@@ -134,7 +134,7 @@ type resource NormalsRun {
 
     // The box under a parent scaled (sx, 0.5, 1), rendered, and its read started.
     unsafe fn void renderBox(float32 sx) {
-        Renderer r = Renderer.withDevice(device: copy this.device, queue: copy this.queue);
+        Renderer r = gpuResolved(device: copy this.device, queue: copy this.queue);
         r.clearColorMut() = Color.fromHex(hex: 0x000000);
         Shared<RenderTarget> t = new RenderTarget.make(width: WIDE, height: HIGH);
         Shared<PerspectiveCamera> cam = new PerspectiveCamera.make(fovRad: radians(deg: 50.0),

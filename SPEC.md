@@ -479,7 +479,9 @@ WGSL's reserved words beyond its keywords are refused by the GPU's own compile, 
 - then `tests/`, one program, built debug and release and run natively, and built for the web and run under `kama run`
   in Edge, Firefox and the pinned Chrome for Testing, each started as `tools/browsers.mjs` says.
 
-It is 266 cases on each leg that names a software GPU, and 258 in Edge, whose leg names none.
+It is 286 cases on each leg that names a software GPU, and 276 in Edge, whose leg names none. Natively on Windows the
+legs run with `@kama/gpu`'s `dxcompiler.dll` on the PATH (`tools/legs.sh`), so Direct3D 12 compiles with DXC, as
+Firefox's WebGPU does.
 
 - **The goldens** (kyoten's rendering.md § Decided, GFX-1's part 1, questions 2 and 3):
   - Each leg names its software GPU: `--golden warp` natively on Windows and in Firefox, `--golden swiftshader` in the
@@ -645,9 +647,10 @@ It is 266 cases on each leg that names a software GPU, and 258 in Edge, whose le
     green sit between entries, where the formulas part from it by 10 to 22 steps); `AgX` within a step of r187's formulas
     worked in float64; `None` clamped and sRGB-encoded;
   - a camera drawing into a 16-bit float target ignoring its tone mapping;
-  - `tone-mapping-blender-agx/<gpu>.png`: a box running red to blue across it and over about nine stops up it, through
-    Blender's AgX. r187's, `tone-mapping-agx`, joins once WARP's two legs agree: natively wgpu-native compiles with FXC,
-    and Firefox with DXC, and they round 2 of its 2,048 texels a step apart (kyoten's rendering.md § Decided, DXC).
+  - `tone-mapping-blender-agx/<gpu>.png` and `tone-mapping-agx/<gpu>.png`: a box running red to blue across it and over
+    about nine stops up it, through Blender's AgX and through r187's. Natively on Windows the legs compile with DXC, as
+    Firefox does (`tools/legs.sh` puts `@kama/gpu`'s `dxcompiler.dll` on the PATH): under FXC, WARP's two legs round 2
+    of r187's 2,048 texels a step apart (kyoten's rendering.md § Decided, DXC).
 
   The earlier tests set each camera's tone mapping to `None`, so each holds its own feature apart from the curve.
 - **Part 4's step 2, the HDR frame, on each leg's GPU** (`tests/src/frame.kama`):

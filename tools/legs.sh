@@ -12,6 +12,10 @@
 #
 # It needs kama ($KAMA, else `kama` on PATH, else ../kama's build) and, natively, wgpu-native's SDK: $KAMA_WGPU_DIR, else
 # this package's third_party/wgpu/<platform>, else @kama/gpu's beside it (../kama-gpu, which the tests depend on by path).
+# On Windows it also needs DXC's dxcompiler.dll, found the same way ($KAMA_DXC_DIR, else third_party/dxc/<platform> here
+# or in ../kama-gpu, which @kama/gpu's tools/fetch-dxc.sh fills): with it Direct3D 12 compiles shaders with DXC, as
+# Firefox's WebGPU does, so WARP draws one picture on both its legs (kyoten's rendering.md § Decided, DXC; @kama/gpu's
+# AGENTS.gpu.md item 16).
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
@@ -37,6 +41,21 @@ export KAMA_WGPU_DIR
 }
 # the native leg links wgpu_native dynamically: the loader finds it on PATH (Windows) or the rpath kama sets
 export PATH="$KAMA_WGPU_DIR/lib:$PATH"
+case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*)
+        if [ -z "${KAMA_DXC_DIR:-}" ]; then
+            if [ -f "$ROOT/third_party/dxc/$PLAT/dxcompiler.dll" ]; then KAMA_DXC_DIR="$ROOT/third_party/dxc/$PLAT"
+            else KAMA_DXC_DIR="$ROOT/../kama-gpu/third_party/dxc/$PLAT"
+            fi
+        fi
+        [ -f "$KAMA_DXC_DIR/dxcompiler.dll" ] || {
+            echo "legs: no dxcompiler.dll at $KAMA_DXC_DIR (set KAMA_DXC_DIR, or fetch it with ../kama-gpu/tools/fetch-dxc.sh)" >&2
+            exit 1
+        }
+        export KAMA_DXC_DIR
+        export PATH="$KAMA_DXC_DIR:$PATH"
+        ;;
+esac
 mkdir -p tests/out
 
 # A browser run, bounded where `timeout` exists: `kama run` has no time limit, and a browser that never asks for the page

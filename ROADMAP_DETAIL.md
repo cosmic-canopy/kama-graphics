@@ -328,12 +328,18 @@ natively. The library's own `examples/cube` is the same scene without an engine.
 
   **Decided on the way** (kyoten's `docs/design/rendering.md` § Decided): WARP natively (wgpu-native's FXC) and in Firefox
   (DXC) round r187's ramp 2 of 2,048 texels a step apart, and under DXC natively every frame matches Firefox's, so
-  `@kama/gpu` builds DXC from its open source, as Firefox does; r187's golden is written once it does.
+  `@kama/gpu` ships DXC natively on Windows: Microsoft's release, fetched (its AGENTS.gpu.md item 16, 2026-11-18), and
+  the native legs put it on the PATH. r187's golden, `tone-mapping-agx`, is written with WARP's two legs agreeing.
 
   Written beside the code and held by mutation: 17 of 17 caught (kyoten's `.scratch/s34/kg-tools/list3.py`), among them
   the table read at its lower corner alone, a tetrahedron's two weights swapped, the hue mixed the other way, the sRGB
   guard rail dropped and the half floats truncated, which the table check caught once tightened to half a step. 285 cases
   natively, in Firefox and in Chrome for Testing, 276 in Edge, each debug and release.
+- **Built, r187's golden** (2026-11-18, [SPEC.md](SPEC.md) § Tests): `tone-mapping-agx` on WARP and SwiftShader, written by
+  `tools/update-goldens.sh` with WARP's two legs agreeing once the native legs compile with DXC (`tools/legs.sh` puts
+  `@kama/gpu`'s `dxcompiler.dll` on the PATH). Red first: "no golden yet", the other seven goldens matching natively
+  under DXC. 286 cases natively, in Firefox and in Chrome for Testing, 276 in Edge, each debug and release. Next, step 4:
+  4x MSAA with the GPU's resolve.
 - **Done:**
   - `examples/cube` draws from one source on both legs;
   - its golden passes on a software GPU on each leg CI has, and perceptually on the reference machines present;

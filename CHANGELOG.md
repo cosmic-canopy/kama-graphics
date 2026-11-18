@@ -133,3 +133,6 @@ package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   tetrahedrally; `ToneMapping::AgX`, three.js r187's. **Changed:** a camera's tone mapping is Blender's AgX by default, so
   an 8-bit target shows the scene tone mapped. THIRD-PARTY-NOTICES credits EaryChow's and Troy Sobotka's AgX, whose
   generator states no licence (one has been asked for), and carries colour-science's BSD licence.
+- r187's tone-mapping golden, `tone-mapping-agx`, on WARP and SwiftShader. Natively on Windows the gate and
+  `tools/update-goldens.sh` put `@kama/gpu`'s `dxcompiler.dll` on the PATH (its `tools/fetch-dxc.sh`), so Direct3D 12
+  compiles with DXC, as Firefox does, and WARP draws the same bytes on both its legs; they need it there.

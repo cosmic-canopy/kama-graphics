@@ -10,8 +10,10 @@
 // - **`AgX`, three.js r187's,** shows each colour within a step of r187's formulas worked here in float64;
 // - **`None`** shows each colour clamped and sRGB-encoded;
 // - **a camera drawing into a 16-bit float target ignores its tone mapping;**
-// - **the golden** `tone-mapping-blender-agx`: a box whose colour runs from red to blue across it and over about nine
-//   stops up it, through Blender's AgX. r187's, `tone-mapping-agx`, waits on DXC natively (below).
+// - **the goldens** `tone-mapping-blender-agx` and `tone-mapping-agx`: a box whose colour runs from red to blue across it
+//   and over about nine stops up it, through Blender's AgX and through r187's. r187's needs DXC natively, as Firefox
+//   compiles with it: under FXC, WARP's two legs round 2 of its 2,048 texels a step apart (kyoten's rendering.md §
+//   Decided, DXC).
 
 import {
     std::collections::DynamicArray,
@@ -224,8 +226,7 @@ type resource ToneMapRun {
         }
         this.jobs.add(item: Job::Ignored);
         this.jobs.add(item: Job::Golden(curve: ToneMapping::BlenderAgX));
-        // r187's golden, `tone-mapping-agx`, joins once WARP's two legs agree under DXC (kyoten's rendering.md § Decided,
-        // the owner, 2026-11-17): natively FXC rounds 2 of its 2,048 texels a step from Firefox's DXC
+        this.jobs.add(item: Job::Golden(curve: ToneMapping::AgX));
     }
 
     public fn ref Verdicts verdicts() { return this.found; }

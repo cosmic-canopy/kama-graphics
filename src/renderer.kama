@@ -34,6 +34,7 @@ import {
     gpu::Device, gpu::Queue, gpu::GpuError, gpu::Texture, gpu::TextureView, gpu::TextureViewDescriptor, gpu::TextureFormat,
     gpu::Buffer, gpu::BufferDescriptor, gpu::BufferUsage, gpu::BufferRead, gpu::ReadStatus, gpu::BufferBinding,
     gpu::CommandEncoder, gpu::CommandBuffer, gpu::RenderPass, gpu::RenderPassDescriptor, gpu::ColorAttachment,
+    gpu::LoadOp, gpu::StoreOp,
     gpu::DepthStencilAttachment, gpu::DepthAccess, gpu::IndexFormat, gpu::Color as GpuColor,
     gpu::ShaderModule, gpu::ShaderModuleDescriptor, gpu::ShaderStage,
     gpu::BindGroupLayout, gpu::BindGroupLayoutDescriptor, gpu::BindingLayout, gpu::BufferBindingLayout,
@@ -179,6 +180,10 @@ type resource Renderer {
     DynamicArray<ToneMapping> outputCurves;     // the output pipelines made, by the tone mapping they apply
     DynamicArray<RenderPipeline> outputs;
     RenderInfo last = RenderInfo.of(calls: 0, triangles: 0, objects: 0, matrices: 0);
+    // The samples a render draws each texel with: 4x MSAA, on by default (kyoten's rendering.md § Decided, area 3), the
+    // one count above 1 WebGPU guarantees on every device. The scene is resolved by the GPU, the ladder's second rung
+    // (part 4's question 1); the pipelines above are made at this count.
+    uint32 samples = 4;
     bool printing = true;                       // printErrors
     DynamicArray<GraphicsErrorReport> errors;   // the misuses refused since the last takeErrors, at most KEPT
     int64 overflow = 0;                         // those past KEPT, counted
@@ -367,7 +372,7 @@ type resource Renderer {
     // Fill the target with the clear colour. On the default 8-bit sRGB target it reads back as written: a target
     // cleared to #336699 reads 0x33 0x66 0x99.
     public unsafe fn void clear(Shared<RenderTarget> target) {
-        Texture texture = target.textureOn(device: ref this.device);
+        Texture texture = target.textureOn(device: ref this.device, count: this.samples);
         TextureView view = texture.createView(descriptor: TextureViewDescriptor.make());
         RenderPassDescriptor pass = RenderPassDescriptor.make();
         pass.color(attachment: ColorAttachment.clearing(view: give view, color: this.clearing()));
@@ -400,6 +405,7 @@ type resource Renderer {
         // Godot's Forward+ (kyoten's rendering.md § Decided, part 4), which `@invariant` on the clip position makes exact
         pipeline.depthStencil(state: DepthStencilState.make(format: TextureFormat::Depth32Float, depthWriteEnabled: false,
                                                             depthCompare: CompareFunction::Equal));
+        pipeline.multisampleMut().count = this.samples;
         pipeline.label(text: "a mesh");
         // the depth prepass: the same vertex stage and culling, no fragment stage, the nearest depth kept (reversed: the
         // greater)
@@ -409,6 +415,7 @@ type resource Renderer {
         if (mirrored) { depthOnly.primitiveMut().frontFace = FrontFace::CW; }
         depthOnly.depthStencil(state: DepthStencilState.make(format: TextureFormat::Depth32Float, depthWriteEnabled: true,
                                                              depthCompare: CompareFunction::Greater));
+        depthOnly.multisampleMut().count = this.samples;
         depthOnly.label(text: "a mesh's depth");
         this.sources.add(item: copy source);
         this.flipped.add(item: mirrored);
@@ -455,9 +462,10 @@ type resource Renderer {
             return;
         }
         Shared<RenderTarget> target = match (give named) { case Some(value: t): give t; case None: { panic(msg: "checked above"); } };
-        Texture colour = target.textureOn(device: ref this.device);
-        Texture depth = target.depthOn(device: ref this.device);
-        Texture sceneTexture = target.sceneOn(device: ref this.device);
+        Texture colour = target.textureOn(device: ref this.device, count: this.samples);
+        Texture depth = target.depthOn(device: ref this.device, count: this.samples);
+        Texture sceneTexture = target.sceneOn(device: ref this.device, count: this.samples);
+        Texture sampled = target.samplesOn(device: ref this.device, count: this.samples);
         float32 exposure = camera.exposureScale();
 
         DynamicArray<uint8> frameBytes = DynamicArray.empty();
@@ -546,11 +554,16 @@ type resource Renderer {
         drawEach(pass: ref dp, pipelines: this.prepasses, chosen: chosen, looks: looks, positions: positionsOf,
                  normals: normalsOf, indices: indicesOf, formats: formats, counts: counts, slots: drawn);
         give dp.end();
-        // the shaded pass, into the scene's 16-bit float texture: cleared to the clear colour, exposed, then each mesh
-        // shaded where the prepass's depth is its own, that depth read and never written
+        // the shaded pass, into the multisampled scene: cleared to the clear colour, exposed, then each mesh shaded where
+        // the prepass's depth is its own, that depth read and never written. The GPU resolves its samples into the scene's
+        // 16-bit float texture as the pass ends, averaging the linear scene, and the samples are not kept (part 4's
+        // question 1, the ladder's second rung)
         RenderPassDescriptor pass = RenderPassDescriptor.make();
-        pass.color(attachment: ColorAttachment.clearing(view: sceneTexture.createView(descriptor: TextureViewDescriptor.make()),
-                                                        color: this.clearingExposed(scale: exposure)));
+        ColorAttachment shaded = ColorAttachment.make(view: sampled.createView(descriptor: TextureViewDescriptor.make()),
+                                                      load: LoadOp::Clear(color: this.clearingExposed(scale: exposure)),
+                                                      store: StoreOp::Discard);
+        shaded.resolveTarget(view: sceneTexture.createView(descriptor: TextureViewDescriptor.make()));
+        pass.color(attachment: give shaded);
         DepthStencilAttachment tested = DepthStencilAttachment.make(view: depth.createView(descriptor: TextureViewDescriptor.make()));
         tested.depth(access: DepthAccess::ReadOnly);
         pass.depthStencil(attachment: give tested);
@@ -592,7 +605,7 @@ type resource Renderer {
     // Start reading the target back, as three.js's `readRenderTargetPixelsAsync`: poll the read until it hands back its
     // image, the target's size in 8-bit RGBA, sRGB, top row first.
     public unsafe fn PixelRead readRenderTargetPixels(Shared<RenderTarget> target) {
-        Texture texture = target.textureOn(device: ref this.device);
+        Texture texture = target.textureOn(device: ref this.device, count: this.samples);
         uint32 width = target.width();
         uint32 height = target.height();
         bool wide = target.holdsScene();       // 16-bit float: 8 bytes a texel

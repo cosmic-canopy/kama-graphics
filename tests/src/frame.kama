@@ -7,7 +7,12 @@
 //   (pre-exposure, as Filament, Bevy and Unreal), by 2^−EV100 / 1.2;
 // - **`max(0)`** keeps a material's output at 0 or above, as three.js r187's, which the float target would otherwise keep;
 // - **an 8-bit target** shows the scene exposed, clamped and sRGB-encoded, with no tone mapping (`ToneMapping::None`);
-// - `clear(target:)` fills a float target with the linear clear colour, as it is (no camera, so no exposure).
+// - `clear(target:)` fills a float target with the linear clear colour, as it is (no camera, so no exposure);
+// - **4x MSAA, resolved by the GPU** (part 4's question 1, the ladder's second rung): a white box turned 30 degrees on
+//   black, so its edges cross texels slantwise, reads back with every texel's red k quarters of white, the coverage of k
+//   of a texel's 4 samples, and each of a quarter, a half and three quarters somewhere: in a float target as linear
+//   values, and in an 8-bit target sRGB-encoded after the resolve (137, 188 and 225 of 255), since the GPU averages the
+//   linear scene.
 
 import {
     std::collections::DynamicArray,
@@ -84,6 +89,7 @@ type resource FrameRun {
     Optional<PixelRead> reading = Optional::None;
     Optional<Image> got = Optional::None;
     bool failed = false;
+    float32 turn = 0.0;   // the box's turn about the view axis, in degrees: 30 for the MSAA cases' slanted edges
 
     public ctor make(Device device, Queue queue) {
         this.found = Verdicts.make();
@@ -108,11 +114,44 @@ type resource FrameRun {
         Shared<BoxGeometry> box = new BoxGeometry.make(width: 1.0, height: 1.0, depth: 1.0);
         Shared<Mesh> m = new Mesh.make(geometry: box, material: look);
         m.positionMut() = Vec3.of(x: 0.0, y: 0.0, z: -2.0);
+        m.rotationMut().z = radians(deg: this.turn);
         s.add(object: m);
         r.render(scene: copy s, camera: copy cam);
         this.reading = Optional::Some(value: r.readRenderTargetPixels(target: copy t));
         this.renderer = Optional::Some(value: give r);
         this.began = monotonicNow();
+    }
+
+    // Each texel's red read as k quarters of `full`, the coverage of k of its 4 samples: "" when every texel is one and
+    // each of a quarter, a half and three quarters is found, in the float image or, `eight`, sRGB-encoded in the 8-bit one.
+    fn string quarters(float64 full, bool eight) {
+        int32 quarter = 0;
+        int32 middle = 0;
+        int32 most = 0;
+        string odd = "";
+        for (isize y = 0; y < cast<isize>(HIGH); y = y + 1) {
+            for (isize x = 0; x < cast<isize>(WIDE); x = x + 1) {
+                int32 level = -1;
+                for (int32 k = 0; k < 5 && level < 0; k = k + 1) {
+                    float64 want = full * cast<float64>(k) / 4.0;
+                    bool near = eight
+                        ? apart(a: cast<int32>(this.byte(x: x, y: y, c: 0)), b: srgb8(linear: want)) <= 1
+                        : halfNear(got: this.half(x: x, y: y, c: 0), want: want, what: "red").isEmpty();
+                    if (near) { level = k; }
+                }
+                if (level < 0 && odd.isEmpty()) {
+                    int32 b = cast<int32>(this.byte(x: x, y: y, c: 0));
+                    float64 v = halfValue(h: this.half(x: x, y: y, c: 0));
+                    odd = eight ? "texel (${x}, ${y}) shows ${b}, no quarter's; " : "texel (${x}, ${y}) holds ${v}, no quarter's; ";
+                }
+                if (level == 1) { quarter = quarter + 1; }
+                if (level == 2) { middle = middle + 1; }
+                if (level == 3) { most = most + 1; }
+            }
+        }
+        string missing = quarter > 0 && middle > 0 && most > 0 ? ""
+            : "texels at a quarter, a half and three quarters: ${quarter}, ${middle} and ${most}";
+        return odd + missing;
     }
 
     // A 16-bit float target cleared by `clear(target:)` alone, its read started.
@@ -289,8 +328,36 @@ type resource FrameRun {
                 + halfNear(got: this.half(x: 3, y: 3, c: 2), want: cast<float64>(c.linearB()), what: "blue")
                 + halfNear(got: this.half(x: 3, y: 3, c: 3), want: 0.25, what: "alpha");
             this.found.add(name: "clear(target:) fills a float target with the linear clear colour, as it is", why: give cleared);
-            this.renderer = Optional::None;
+            // 4x MSAA: a white box turned 30 degrees on black, into a float target
+            Shared<MeshBasicMaterial> white = new MeshBasicMaterial.make();
+            white.colorMut() = Color.fromHex(hex: 0xffffff);
+            this.turn = 30.0;
+            this.renderBox(format: TargetFormat::Rgba16Float, ev: ev100For(exposure: 1.0), look: white,
+                           clearTo: Color.fromHex(hex: 0x000000), clearAlpha: 1.0);
             this.stage = 6;
+            return false;
+        }
+        if (this.stage == 6) {
+            if (!this.answered()) { return false; }
+            float64 full = scaleAt(ev: ev100For(exposure: 1.0));
+            string resolved = this.failed ? "the read failed" : this.quarters(full: full, eight: false);
+            this.found.add(name: "4x MSAA: a slanted edge's texels hold the linear average of their 4 samples in a float target, a quarter, a half and three quarters among them",
+                           why: give resolved);
+            Shared<MeshBasicMaterial> white = new MeshBasicMaterial.make();
+            white.colorMut() = Color.fromHex(hex: 0xffffff);
+            this.renderBox(format: TargetFormat::Rgba8UnormSrgb, ev: ev100For(exposure: 1.0), look: white,
+                           clearTo: Color.fromHex(hex: 0x000000), clearAlpha: 1.0);
+            this.stage = 7;
+            return false;
+        }
+        if (this.stage == 7) {
+            if (!this.answered()) { return false; }
+            float64 full = scaleAt(ev: ev100For(exposure: 1.0));
+            string encoded = this.failed ? "the read failed" : this.quarters(full: full, eight: true);
+            this.found.add(name: "4x MSAA: in an 8-bit target the edge's texels are sRGB-encoded after the resolve, 137, 188 and 225 among them",
+                           why: give encoded);
+            this.renderer = Optional::None;
+            this.stage = 8;
         }
         return true;
     }

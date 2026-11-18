@@ -3,9 +3,10 @@
 //
 // - **The golden, `tests/goldens/boxes/<gpu>.png`:** two boxes crossing in depth, in two colours, so the frame holds
 //   reversed depth and the crossing line, not only a silhouette.
-// - **On every leg, hardware too:** every texel is the clear colour or one of the boxes' (nothing is blended or
-//   multisampled yet), both boxes show; two scenes that draw the same boxes in opposite orders read back the same bytes,
-//   the nearer box in front; and `info()` counts the draws, and the world matrices made only where something changed.
+// - **On every leg, hardware too:** every texel is the clear colour or one of the boxes', or at an edge the GPU's resolve
+//   of 4 samples of them (4x MSAA, part 4's step 4; nothing is blended), both boxes show; two scenes that draw the same
+//   boxes in opposite orders read back the same bytes, the nearer box in front; and `info()` counts the draws, and the
+//   world matrices made only where something changed.
 // - **The tree's world matrices:** through a turned parent, `lookAt`, `rotateOnWorldAxis` under a turned parent, and a
 //   mesh's record given up when it leaves its scene.
 
@@ -20,7 +21,7 @@ import {
     graphics::PixelStatus, graphics::Scene, graphics::Group, graphics::Mesh, graphics::PerspectiveCamera, graphics::ToneMapping,
     graphics::BoxGeometry, graphics::MeshBasicMaterial, graphics::Euler, graphics::EulerOrder,
     graphics::RendererErrors, graphics::GraphicsErrorKind,
-    Verdicts, checkGolden,
+    Verdicts, checkGolden, fromSamples,
 };
 export { BoxesRun };
 
@@ -46,9 +47,14 @@ fn uint32 texel(const ref DynamicArray<uint8> frame, isize x, isize y) {
     return (cast<uint32>(frame[at]) << 16) | (cast<uint32>(frame[at + 1]) << 8) | cast<uint32>(frame[at + 2]);
 }
 
-// "" when every texel is one of the colours, opaque, and each colour shows.
+// "" when every texel is one of the colours, or at an edge the GPU's resolve of 4 samples of them, opaque, and each
+// colour shows.
 fn string onlyColours(const ref DynamicArray<uint8> frame, uint32 a, uint32 b, uint32 c) {
     isize na = 0; isize nb = 0; isize nc = 0; isize other = 0; uint32 first = 0;
+    DynamicArray<uint32> colours = DynamicArray.empty();
+    colours.add(item: a);
+    colours.add(item: b);
+    colours.add(item: c);
     for (isize y = 0; y < cast<isize>(HIGH); y = y + 1) {
         for (isize x = 0; x < cast<isize>(WIDE); x = x + 1) {
             uint32 t = texel(frame: frame, x: x, y: y);
@@ -57,7 +63,7 @@ fn string onlyColours(const ref DynamicArray<uint8> frame, uint32 a, uint32 b, u
             else if (t == a) { na = na + 1; }
             else if (t == b) { nb = nb + 1; }
             else if (t == c) { nc = nc + 1; }
-            else { if (other == 0) { first = t; } other = other + 1; }
+            else if (!fromSamples(t: t, colours: colours, tolerance: 1)) { if (other == 0) { first = t; } other = other + 1; }
         }
     }
     if (other > 0) { return "${other} texels are none of the colours, the first ${first}"; }
@@ -223,7 +229,7 @@ type resource BoxesRun {
             if (!this.settled()) { return false; }
             DynamicArray<uint8> frame = this.frame();
             string why = this.failed.isEmpty() ? onlyColours(frame: frame, a: BACKDROP, b: RED, c: BLUE) : copy this.failed;
-            this.found.add(name: "render: two boxes crossing in depth: every texel the backdrop or a box's colour, as written in sRGB, each showing",
+            this.found.add(name: "render: two boxes crossing in depth: every texel the backdrop or a box's colour, as written in sRGB, or at an edge their 4x MSAA resolve, each showing",
                            why: copy why);
             this.leftEdge = this.leftmost(frame: frame);
             if (!this.gpu.isEmpty()) {

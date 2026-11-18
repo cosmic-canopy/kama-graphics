@@ -136,3 +136,6 @@ package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - r187's tone-mapping golden, `tone-mapping-agx`, on WARP and SwiftShader. Natively on Windows the gate and
   `tools/update-goldens.sh` put `@kama/gpu`'s `dxcompiler.dll` on the PATH (its `tools/fetch-dxc.sh`), so Direct3D 12
   compiles with DXC, as Firefox does, and WARP draws the same bytes on both its legs; they need it there.
+- GFX-1's part 4, step 4: 4x MSAA, on by default. A render draws every mesh at 4 samples a texel, and the GPU resolves
+  them into the scene's 16-bit float texture, averaging the linear scene, before the output pass tone maps it. **Changed:**
+  an edge's texels are its coverage, so every golden with an edge was written again.

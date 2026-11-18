@@ -5,8 +5,9 @@
 // A box turned 25 degrees about x and 35 about y, under a parent scaled (2, 0.5, 1): its world matrix is S R, which
 // shears it, so a normal multiplied by the world matrix tilts off its face, and only the inverse transpose, S⁻¹ R, keeps
 // it at right angles. A program's own material shows `normalWorld()` as a colour (n / 2 + 1/2), and every texel of the
-// box is held to one of its faces' normals worked here in float64, encoded as the 8-bit sRGB target holds it. Then the
-// same under a parent mirrored on x, (-2, 0.5, 1), whose normals must still point out.
+// box is held to one of its faces' normals worked here in float64, encoded as the 8-bit sRGB target holds it, or at an
+// edge to the GPU's resolve of 4 samples of them and the black backdrop (4x MSAA, part 4's step 4). Then the same under
+// a parent mirrored on x, (-2, 0.5, 1), whose normals must still point out.
 
 import {
     std::collections::DynamicArray,
@@ -20,7 +21,7 @@ import {
     graphics::MaterialSettings, graphics::NodeBuilder, graphics::Euler, graphics::EulerOrder, graphics::PixelRead,
     graphics::PixelStatus, graphics::Vec3Node, graphics::Vec4Node, graphics::normalWorld, graphics::vec3, graphics::vec4,
     graphics::constant,
-    Verdicts,
+    Verdicts, fromSamples,
 };
 export { NormalsRun, encoded };
 
@@ -78,13 +79,16 @@ fn uint32 faceColour(float64 x, float64 y, float64 z, float64 sx) {
 fn int32 channel(uint32 c, int32 shift) { return cast<int32>((c >> cast<uint32>(shift)) & 255); }
 fn int32 apart(int32 a, int32 b) { return a > b ? a - b : b - a; }
 
-// "" when every texel is the backdrop or within 2 steps of one face's colour, and two faces or more each show on 20
-// texels or more; else what differs.
+// "" when every texel is the backdrop or within 2 steps of one face's colour, or at an edge of the GPU's resolve of 4
+// samples of them, and two faces or more each show on 20 texels or more; else what differs.
 fn string heldToFaces(const ref DynamicArray<uint8> frame, float64 sx) {
     DynamicArray<uint32> faces = DynamicArray.empty();
     faces.add(item: faceColour(x: 1.0, y: 0.0, z: 0.0, sx: sx)); faces.add(item: faceColour(x: -1.0, y: 0.0, z: 0.0, sx: sx));
     faces.add(item: faceColour(x: 0.0, y: 1.0, z: 0.0, sx: sx)); faces.add(item: faceColour(x: 0.0, y: -1.0, z: 0.0, sx: sx));
     faces.add(item: faceColour(x: 0.0, y: 0.0, z: 1.0, sx: sx)); faces.add(item: faceColour(x: 0.0, y: 0.0, z: -1.0, sx: sx));
+    DynamicArray<uint32> withBackdrop = DynamicArray.empty();
+    for (isize f = 0; f < 6; f = f + 1) { withBackdrop.add(item: faces[f]); }
+    withBackdrop.add(item: 0);
     DynamicArray<int32> counts = DynamicArray.empty();
     for (isize f = 0; f < 6; f = f + 1) { counts.add(item: 0); }
     isize off = 0;
@@ -102,7 +106,7 @@ fn string heldToFaces(const ref DynamicArray<uint8> frame, float64 sx) {
                 && apart(a: channel(c: t, shift: 0), b: channel(c: w, shift: 0)) <= 2;
             if (near && !matched) { counts[f] = counts[f] + 1; matched = true; }
         }
-        if (!matched) { if (off == 0) { firstOff = t; } off = off + 1; }
+        if (!matched && !fromSamples(t: t, colours: withBackdrop, tolerance: 2)) { if (off == 0) { firstOff = t; } off = off + 1; }
     }
     int32 shown = 0;
     for (isize f = 0; f < 6; f = f + 1) { if (counts[f] >= 20) { shown = shown + 1; } }

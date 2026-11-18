@@ -1,0 +1,49 @@
+// What a texel resolved from 4x MSAA may hold (GFX-1's part 4, step 4; kyoten's rendering.md § Decided, part 4's
+// question 1): the GPU averages a texel's 4 samples in the linear scene, and the output pass then encodes the average.
+// So a case that holds every texel to a scene's colours holds an edge's texel to the average of 4 of them, which a wrong
+// colour almost never is.
+
+import {
+    std::collections::DynamicArray,
+    std::math::pow, std::math::floor,
+};
+export { fromSamples };
+
+// An sRGB byte's linear value, and a linear value's sRGB byte, clamped to 0 to 1.
+fn float64 linearOf(int32 encoded) {
+    float64 v = cast<float64>(encoded) / 255.0;
+    return v <= 0.04045 ? v / 12.92 : pow(x: (v + 0.055) / 1.055, y: 2.4);
+}
+fn int32 encodedOf(float64 linear) {
+    float64 v = linear < 0.0 ? 0.0 : linear > 1.0 ? 1.0 : linear;
+    float64 e = v <= 0.0031308 ? 12.92 * v : 1.055 * pow(x: v, y: 1.0 / 2.4) - 0.055;
+    return cast<int32>(floor(x: e * 255.0 + 0.5));
+}
+fn int32 channelOf(uint32 rgb, uint32 shift) { return cast<int32>((rgb >> shift) & 255); }
+fn int32 distance(int32 a, int32 b) { return a > b ? a - b : b - a; }
+
+// Whether `t`, an sRGB texel written 0xRRGGBB, is what the GPU's resolve gives when each of a texel's 4 samples is one
+// of `colours`, also sRGB: their linear values averaged, then encoded, within `tolerance` steps a channel. One colour
+// four times is the colour itself.
+fn bool fromSamples(uint32 t, const ref DynamicArray<uint32> colours, int32 tolerance) {
+    isize n = colours.length();
+    for (isize i = 0; i < n; i = i + 1) {
+        for (isize j = i; j < n; j = j + 1) {
+            for (isize k = j; k < n; k = k + 1) {
+                for (isize m = k; m < n; m = m + 1) {
+                    bool near = true;
+                    for (uint32 shift = 0; shift <= 16 && near; shift = shift + 8) {
+                        float64 sum = linearOf(encoded: channelOf(rgb: colours[i], shift: shift))
+                            + linearOf(encoded: channelOf(rgb: colours[j], shift: shift))
+                            + linearOf(encoded: channelOf(rgb: colours[k], shift: shift))
+                            + linearOf(encoded: channelOf(rgb: colours[m], shift: shift));
+                        int32 want = encodedOf(linear: sum / 4.0);
+                        if (distance(a: channelOf(rgb: t, shift: shift), b: want) > tolerance) { near = false; }
+                    }
+                    if (near) { return true; }
+                }
+            }
+        }
+    }
+    return false;
+}

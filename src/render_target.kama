@@ -8,9 +8,10 @@
 // It is an asset, shared (area 1, item 2; part 2, question 3): a program makes it with `new`, every holder of its
 // `Shared` names the same target, and the last drop frees it. It is made with no device, as three.js's
 // `new RenderTarget(width, height)` is, and a renderer makes its textures on its device the first time it uses it: the
-// colour, the depth a render draws against, 32-bit float with reversed depth (GFX-1's question 1), and for an 8-bit
-// target the scene's 16-bit float texture. A target used by renderers on two devices has textures on each, as three.js
-// keeps one per renderer.
+// colour; for an 8-bit target the scene's 16-bit float texture; and, at the renderer's samples a texel (4x MSAA, part
+// 4's question 1), the multisampled scene a render draws, resolved into the scene's texture, and the depth it draws
+// against, 32-bit float with reversed depth (GFX-1's question 1). A target used by renderers on two devices has textures
+// on each, as three.js keeps one per renderer.
 
 import {
     std::collections::DynamicArray,
@@ -29,13 +30,14 @@ type resource RenderTarget {
     TargetFormat kind;
     DynamicArray<UnsafePtr> devices;   // the device each texture below was made on, by its handle
     DynamicArray<Texture> colours;
-    DynamicArray<Texture> depths;
-    DynamicArray<Texture> scenes;      // the 16-bit float texture a render draws the scene into: the colour itself on a
+    DynamicArray<Texture> scenes;      // the 16-bit float texture the scene is resolved into: the colour itself on a
                                        // 16-bit float target
+    DynamicArray<Texture> samples;     // the multisampled 16-bit float scene a render draws
+    DynamicArray<Texture> depths;      // ...and the depth it draws against, at the same samples
 
     friend Renderer::clear[textureOn, entryOn];
     friend Renderer::readRenderTargetPixels[textureOn, entryOn];
-    friend Renderer::render[textureOn, depthOn, sceneOn, entryOn];
+    friend Renderer::render[textureOn, depthOn, sceneOn, samplesOn, entryOn];
 
     // A target `width` by `height` texels, 8-bit sRGB.
     public unsafe ctor make(uint32 width, uint32 height) {
@@ -44,8 +46,9 @@ type resource RenderTarget {
         this.kind = TargetFormat::Rgba8UnormSrgb;
         this.devices = DynamicArray.empty();
         this.colours = DynamicArray.empty();
-        this.depths = DynamicArray.empty();
         this.scenes = DynamicArray.empty();
+        this.samples = DynamicArray.empty();
+        this.depths = DynamicArray.empty();
     }
 
     // A target `width` by `height` texels of `format`: `TargetFormat::Rgba16Float` holds the linear scene.
@@ -55,8 +58,9 @@ type resource RenderTarget {
         this.kind = format;
         this.devices = DynamicArray.empty();
         this.colours = DynamicArray.empty();
-        this.depths = DynamicArray.empty();
         this.scenes = DynamicArray.empty();
+        this.samples = DynamicArray.empty();
+        this.depths = DynamicArray.empty();
     }
 
     public const fn uint32 width() { return this.w; }
@@ -65,9 +69,27 @@ type resource RenderTarget {
     // Whether the target holds the linear scene, so a render writes no output pass into it.
     public const fn bool holdsScene() { return match (this.kind) { case Rgba16Float: true; case Rgba8UnormSrgb: false; }; }
 
-    // Which entry `device` has, made the first time: a texture holds its device, so a device's handle is never reused
-    // while its textures are kept here.
-    unsafe fn isize entryOn(ref Device device) {
+    // The multisampled scene and its depth on `device`, `count` samples a texel.
+    unsafe fn Texture multisampled(ref Device device, uint32 count) {
+        TextureDescriptor m = TextureDescriptor.make(width: this.w, height: this.h, format: TextureFormat::RGBA16Float,
+                                                     usage: TextureUsage::RenderAttachment);
+        m.sampleCount(count: count);
+        m.label(text: "a render target's multisampled scene");
+        return device.createTexture(descriptor: give m);
+    }
+    unsafe fn Texture depthAt(ref Device device, uint32 count) {
+        // TextureBinding too: on wgpu-native v29's D3D12 a depth texture that is only a RenderAttachment loses the
+        // device in a read-only depth pass (@kama/gpu's AGENTS.gpu.md item 13), which the shaded pass is.
+        TextureDescriptor d = TextureDescriptor.make(width: this.w, height: this.h, format: TextureFormat::Depth32Float,
+                                                     usage: TextureUsage::RenderAttachment | TextureUsage::TextureBinding);
+        d.sampleCount(count: count);
+        d.label(text: "a render target's depth");
+        return device.createTexture(descriptor: give d);
+    }
+
+    // Which entry `device` has, made the first time, its multisampled textures at `count` samples a texel, the
+    // renderer's: a texture holds its device, so a device's handle is never reused while its textures are kept here.
+    unsafe fn isize entryOn(ref Device device, uint32 count) {
         UnsafePtr at = device.raw();
         for (isize i = 0; i < this.devices.length(); i = i + 1) {
             if (this.devices[i] == at) { return i; }
@@ -80,12 +102,6 @@ type resource RenderTarget {
                                                      usage: TextureUsage::RenderAttachment | TextureUsage::CopySrc | TextureUsage::TextureBinding);
         c.label(text: "a render target");
         Texture colour = device.createTexture(descriptor: give c);
-        // TextureBinding too: on wgpu-native v29's D3D12 a depth texture that is only a RenderAttachment loses the
-        // device in a read-only depth pass (@kama/gpu's AGENTS.gpu.md item 13), which the shaded pass is.
-        TextureDescriptor d = TextureDescriptor.make(width: this.w, height: this.h, format: TextureFormat::Depth32Float,
-                                                     usage: TextureUsage::RenderAttachment | TextureUsage::TextureBinding);
-        d.label(text: "a render target's depth");
-        Texture depth = device.createTexture(descriptor: give d);
         if (this.holdsScene()) {
             this.scenes.add(item: copy colour);
         } else {
@@ -94,14 +110,29 @@ type resource RenderTarget {
             s.label(text: "a render target's scene");
             this.scenes.add(item: device.createTexture(descriptor: give s));
         }
+        this.samples.add(item: this.multisampled(device: ref device, count: count));
+        this.depths.add(item: this.depthAt(device: ref device, count: count));
         this.devices.add(item: at);
         this.colours.add(item: give colour);
-        this.depths.add(item: give depth);
         return this.devices.length() - 1;
     }
 
-    // The target's colour, depth and scene textures on `device`: each a handle of its own to the one texture.
-    unsafe fn Texture textureOn(ref Device device) { isize i = this.entryOn(device: ref device); return copy this.colours[i]; }
-    unsafe fn Texture depthOn(ref Device device) { isize i = this.entryOn(device: ref device); return copy this.depths[i]; }
-    unsafe fn Texture sceneOn(ref Device device) { isize i = this.entryOn(device: ref device); return copy this.scenes[i]; }
+    // The target's textures on `device`, each a handle of its own to the one texture: its colour; the scene's 16-bit
+    // float texture; and, at `count` samples a texel, the multisampled scene a render draws and its depth.
+    unsafe fn Texture textureOn(ref Device device, uint32 count) {
+        isize i = this.entryOn(device: ref device, count: count);
+        return copy this.colours[i];
+    }
+    unsafe fn Texture sceneOn(ref Device device, uint32 count) {
+        isize i = this.entryOn(device: ref device, count: count);
+        return copy this.scenes[i];
+    }
+    unsafe fn Texture samplesOn(ref Device device, uint32 count) {
+        isize i = this.entryOn(device: ref device, count: count);
+        return copy this.samples[i];
+    }
+    unsafe fn Texture depthOn(ref Device device, uint32 count) {
+        isize i = this.entryOn(device: ref device, count: count);
+        return copy this.depths[i];
+    }
 }

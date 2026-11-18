@@ -81,7 +81,12 @@ a resource the program owns.
     clear colour, linear and scaled by the camera's exposure as every material's light is (§ The camera), its alpha as
     set, and each mesh shaded where its depth is what the prepass kept, the depth tested Equal and read only, so each
     texel is shaded once, as Godot's Forward+. A 16-bit float target is that texture; an 8-bit target has one of its
-    own, made beside its colour. The clip
+    own, made beside its colour.
+  - **Both passes draw at 4x MSAA, on by default** (area 3; part 4's question 1): every pipeline, the scene and the
+    depth at 4 samples a texel, the one count above 1 WebGPU guarantees on every device. As the shaded pass ends, the
+    GPU resolves the samples into the scene's texture, averaging the linear scene, the ladder's second rung; the samples
+    are not kept. So an edge's texel holds the coverage of k of its 4 samples, and an 8-bit target encodes it after the
+    resolve: white on black reads 137, 188 or 225 where 1, 2 or 3 samples are covered. The clip
     position is `@invariant` (§ The compiler), so both passes compute it bit for bit: naga and Tint write it as HLSL's
     `precise` and SPIR-V's `Invariant`, and a prepass and a shaded pass shade exactly the texels one pass does on every
     leg (kyoten's part 4 check 1);
@@ -149,9 +154,11 @@ Decided, GFX-1's part 2, question 4), as `@kama/gpu` reports every misuse of Web
 
   `format()` says which, and `holdsScene()` whether it is the scene itself.
 - **It is shared:** every holder of its `Shared` names the same target, and the last drop frees it.
-- **It is made with no device.** A renderer makes its textures the first time it uses it, on its own device: the colour,
-  a 32-bit float depth and, for an 8-bit target, the 16-bit float texture its scene is drawn into. A target used by renderers on two devices has textures on each, as three.js keeps one per
-  renderer. A target never cleared reads back as WebGPU makes a texture, every byte 0.
+- **It is made with no device.** A renderer makes its textures the first time it uses it, on its own device: the colour;
+  for an 8-bit target, the 16-bit float texture its scene is resolved into; and at the renderer's 4 samples a texel, the
+  multisampled 16-bit float scene a render draws and a 32-bit float depth. A target used by renderers on two devices
+  has textures on each, as three.js keeps one per renderer. A target never cleared reads back as WebGPU makes a
+  texture, every byte 0.
 
 ## The scene graph
 
@@ -479,7 +486,7 @@ WGSL's reserved words beyond its keywords are refused by the GPU's own compile, 
 - then `tests/`, one program, built debug and release and run natively, and built for the web and run under `kama run`
   in Edge, Firefox and the pinned Chrome for Testing, each started as `tools/browsers.mjs` says.
 
-It is 286 cases on each leg that names a software GPU, and 276 in Edge, whose leg names none. Natively on Windows the
+It is 288 cases on each leg that names a software GPU, and 278 in Edge, whose leg names none. Natively on Windows the
 legs run with `@kama/gpu`'s `dxcompiler.dll` on the PATH (`tools/legs.sh`), so Direct3D 12 compiles with DXC, as
 Firefox's WebGPU does.
 
@@ -540,7 +547,8 @@ Firefox's WebGPU does.
     parent or a node elsewhere, and following a node `add` moved.
 - **Part 2, on each leg's GPU** (`tests/src/boxes.kama`):
   - two boxes crossing in depth, against `boxes/<gpu>.png`, and on every leg every texel the backdrop or a box's colour,
-    exactly;
+    exactly, or at an edge the GPU's resolve of 4 samples of them (`tests/src/coverage.kama`: their linear values
+    averaged, then encoded, within a step), which a wrong colour almost never is;
   - `info()` as the scene changes: nothing changed, one box moved, the scene moved, a mesh added and removed;
   - the nearer box covering the farther, and the same bytes in either draw order;
   - world matrices through a turned parent, `rotateOnWorldAxis` under one, `lookAt`, and a mesh removed giving up its
@@ -666,6 +674,11 @@ Firefox's WebGPU does.
 
   The lit goldens were written again for it: storing the scene as half floats before the 8-bit encode moves 2 to 44
   texels of each by one step, never more.
+- **Part 4's step 4, 4x MSAA resolved by the GPU, on each leg's GPU** (`tests/src/frame.kama`): a white box turned 30
+  degrees on black, so its edges cross texels slantwise, every texel's red k quarters of white and each of a quarter, a
+  half and three quarters found: in a float target as linear values, within a half float's step, and in an 8-bit target
+  sRGB-encoded after the resolve, within a step (137, 188 and 225). Every golden with an edge was written again for it;
+  the normals cases hold an edge's texel to the resolve of 4 samples of the faces' colours and the backdrop.
 - **Part 2's golden holds part 3's compiler:** `boxes/<gpu>.png` is matched byte for byte with `MeshBasicMaterial`'s
   nodes, as it was with its WGSL by hand.
 - **Printed from outside the program:** the gate counts each leg's printed lines: one for the render refused by the

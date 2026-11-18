@@ -340,6 +340,25 @@ natively. The library's own `examples/cube` is the same scene without an engine.
   `@kama/gpu`'s `dxcompiler.dll` on the PATH). Red first: "no golden yet", the other seven goldens matching natively
   under DXC. 286 cases natively, in Firefox and in Chrome for Testing, 276 in Edge, each debug and release. Next, step 4:
   4x MSAA with the GPU's resolve.
+- **Built, part 4's step 4, 4x MSAA resolved by the GPU** (2026-11-18, [SPEC.md](SPEC.md) § The renderer, § Render
+  targets and § Tests), the ladder's second rung:
+  - both passes draw at 4 samples a texel, on by default: every pipeline, and a render target's multisampled 16-bit
+    float scene and its depth, made at the renderer's count;
+  - as the shaded pass ends the GPU resolves the samples into the scene's texture, averaging the linear scene, and the
+    samples are discarded; the output pass reads the resolved scene as before.
+
+  **Settled, and reported:** the count is the renderer's, fixed at 4 until the presets set the method (part 5); no
+  public switch yet, so step 5's tone-mapped resolve and the method's choice arrive together. A target makes its
+  multisampled textures at the count it is first given.
+
+  Red first: a white box turned 30 degrees on black read only 0 and white at one sample, where 4x gives a quarter, a
+  half and three quarters at its edges, linear in a float target and sRGB-encoded after the resolve in an 8-bit one (137,
+  188 and 225). Three earlier cases held every texel to a scene's colours; each now holds an edge's texel to the GPU's
+  resolve of 4 samples of them (`tests/src/coverage.kama`), which a wrong colour almost never is. The four goldens with
+  edges were written again, WARP's two legs agreeing. 288 cases natively, in Firefox and in Chrome for Testing, 278 in
+  Edge, each debug and release, Edge's real GPU giving the same quarters. 6 of 7 mutations caught (kyoten's
+  `.scratch/s35/kg/list2.py`); the seventh, the samples stored rather than discarded, is equivalent, since nothing reads
+  them. Next, step 5: the tone-mapped resolve.
 - **Done:**
   - `examples/cube` draws from one source on both legs;
   - its golden passes on a software GPU on each leg CI has, and perceptually on the reference machines present;

@@ -316,6 +316,24 @@ natively. The library's own `examples/cube` is the same scene without an engine.
   image by name. The three lit goldens were written again: half floats move 2 to 44 texels of each by one step, never
   more, WARP's two legs agreeing. 279 cases natively, in Firefox and in Chrome for Testing, 271 in Edge, each debug and
   release.
+- **Built, part 4's step 3, tone mapping** (2026-11-17, [SPEC.md](SPEC.md) § The camera, § The renderer and § Tests):
+  - `ToneMapping::BlenderAgX`, the default: a 57³ table a renderer makes once, from the formulas that made Blender 5.3's
+    `AgX_Base_sRGB.cube`, ported to float64 (`src/agx.kama`), read tetrahedrally in the output pass as OpenColorIO reads
+    Blender's, then Rec.1886-decoded;
+  - `ToneMapping::AgX`, three.js r187's.
+
+  **Settled, and reported:** the earlier tests set their cameras' tone mapping to `None`, so each golden and face check
+  holds its own feature, and the curves are held by the swatches and the tone-mapping golden; the table's values are half
+  floats, within Blender's display by one step at 3 % of its entries.
+
+  **Decided on the way** (kyoten's `docs/design/rendering.md` § Decided): WARP natively (wgpu-native's FXC) and in Firefox
+  (DXC) round r187's ramp 2 of 2,048 texels a step apart, and under DXC natively every frame matches Firefox's, so
+  `@kama/gpu` builds DXC from its open source, as Firefox does; r187's golden is written once it does.
+
+  Written beside the code and held by mutation: 17 of 17 caught (kyoten's `.scratch/s34/kg-tools/list3.py`), among them
+  the table read at its lower corner alone, a tetrahedron's two weights swapped, the hue mixed the other way, the sRGB
+  guard rail dropped and the half floats truncated, which the table check caught once tightened to half a step. 285 cases
+  natively, in Firefox and in Chrome for Testing, 276 in Edge, each debug and release.
 - **Done:**
   - `examples/cube` draws from one source on both legs;
   - its golden passes on a software GPU on each leg CI has, and perceptually on the reference machines present;

@@ -146,8 +146,8 @@ steps (SPEC § The renderer, § Materials, § The scene graph, § Typed nodes, �
 **Part 3 is built** (2026-11-17). Part 4, the frame, is under way: the depth prepass, 4x MSAA, the 16-bit float target
 and AgX. Its three questions are decided (2026-11-17, ROADMAP_DETAIL § GFX-1): a ladder of MSAA resolves, the
 tone-mapped one best; both AgXs, Blender's the default; exposure on each camera in EV100; and tone mapping, the owner
-added, on each camera too. Its first steps are built (SPEC § The renderer): the depth prepass, and the HDR frame with each camera's exposure.
-Next, AgX.
+added, on each camera too. Its first steps are built (SPEC § The renderer and § The camera): the depth prepass; the HDR frame with each camera's
+exposure; and tone mapping, Blender's AgX by default through a table the renderer makes, and r187's AgX. Next, 4x MSAA.
 GFX-1 is built depth-first, and every example is a test: a headless readback and a golden image, on web and native. A
 feature a program does not use drops out at link time. [SPEC.md](SPEC.md) is what is built so far, and grows with each
 part.

@@ -43,10 +43,10 @@ import {
     gpu::FragmentState, gpu::ColorTargetState, gpu::CullMode, gpu::FrontFace, gpu::DepthStencilState, gpu::CompareFunction,
     gpu::TextureDescriptor, gpu::TextureUsage, gpu::TextureBindingLayout, gpu::SamplerBindingLayout, gpu::Sampler,
     gpu::SamplerDescriptor, gpu::AddressMode, gpu::FilterMode, gpu::MipmapFilterMode, gpu::TexelCopyTextureInfo,
-    gpu::TexelCopyBufferLayout, gpu::Extent3D,
+    gpu::TexelCopyBufferLayout, gpu::Extent3D, gpu::TextureDimension, gpu::TextureViewDimension,
     image::Image, image::ImageError, image::PixelFormat, image::AlphaMode, image::ColorSpace,
     Color, RenderTarget, Scene, Walk, PerspectiveCamera, Geometry, BufferGeometry, Material, MaterialSettings, NodeBuilder,
-    dfgTable, ToneMapping, outputWgsl,
+    dfgTable, ToneMapping, outputWgsl, readsTable, blenderAgxTable, blenderAgxSize,
 };
 export { Renderer, RenderInfo, PixelRead, PixelStatus, GraphicsErrorKind, GraphicsErrorReport, RendererErrors };
 
@@ -173,6 +173,9 @@ type resource Renderer {
     DynamicArray<RenderPipeline> prepasses;     // ...and each one's depth-only twin, for the depth prepass
     BindGroupLayout outputLayout;               // the output pass's one binding: the scene's 16-bit float texture
     PipelineLayout outputPipelineLayout;
+    BindGroupLayout tableLayout;                // ...and with Blender's AgX table beside it
+    PipelineLayout tablePipelineLayout;
+    Optional<TextureView> agxTableView = Optional::None;   // Blender's AgX table, made the first time a camera uses it
     DynamicArray<ToneMapping> outputCurves;     // the output pipelines made, by the tone mapping they apply
     DynamicArray<RenderPipeline> outputs;
     RenderInfo last = RenderInfo.of(calls: 0, triangles: 0, objects: 0, matrices: 0);
@@ -246,6 +249,17 @@ type resource Renderer {
         outputGroups.group(layout: copy this.outputLayout);
         outputGroups.label(text: "the output pass's group");
         this.outputPipelineLayout = device.createPipelineLayout(descriptor: give outputGroups);
+        BindGroupLayoutDescriptor withTable = BindGroupLayoutDescriptor.make();
+        withTable.entry(binding: 0, visibility: ShaderStage::Fragment, layout: BindingLayout::Texture(layout: TextureBindingLayout.make()));
+        TextureBindingLayout cube = TextureBindingLayout.make();
+        cube.viewDimension = TextureViewDimension::D3;
+        withTable.entry(binding: 1, visibility: ShaderStage::Fragment, layout: BindingLayout::Texture(layout: cube));
+        withTable.label(text: "the output pass's scene and Blender's AgX table");
+        this.tableLayout = device.createBindGroupLayout(descriptor: give withTable);
+        PipelineLayoutDescriptor tableGroups = PipelineLayoutDescriptor.make();
+        tableGroups.group(layout: copy this.tableLayout);
+        tableGroups.label(text: "the output pass's group, with Blender's AgX table");
+        this.tablePipelineLayout = device.createPipelineLayout(descriptor: give tableGroups);
         this.outputCurves = DynamicArray.empty();
         this.outputs = DynamicArray.empty();
         this.errors = DynamicArray.empty();
@@ -308,13 +322,41 @@ type resource Renderer {
         ShaderModule shader = this.device.createShaderModule(descriptor: give described);
         FragmentState fragment = FragmentState.make(module: copy shader, entryPoint: "fs");
         fragment.target(state: ColorTargetState.make(format: TextureFormat::RGBA8UnormSrgb));
-        RenderPipelineDescriptor pipeline = RenderPipelineDescriptor.make(layout: Layout::Explicit(layout: copy this.outputPipelineLayout),
+        PipelineLayout groups = readsTable(curve: curve) ? copy this.tablePipelineLayout : copy this.outputPipelineLayout;
+        RenderPipelineDescriptor pipeline = RenderPipelineDescriptor.make(layout: Layout::Explicit(layout: give groups),
                                                                           vertex: VertexState.make(module: give shader, entryPoint: "vs"));
         pipeline.fragment(state: give fragment);
         pipeline.label(text: "the output pass");
         this.outputCurves.add(item: curve);
         this.outputs.add(item: this.device.createRenderPipeline(descriptor: give pipeline));
         return this.outputs.length() - 1;
+    }
+
+    // Blender's AgX table, made the first time a camera uses it (agx.kama): 57³ texels of four half floats, a 3D texture
+    // the output pass reads at its grid points and interpolates itself, as OpenColorIO does.
+    unsafe fn TextureView agxTable() {
+        if (this.agxTableView.isNone()) {
+            uint32 side = cast<uint32>(blenderAgxSize());
+            TextureDescriptor made = TextureDescriptor.make(width: side, height: side, format: TextureFormat::RGBA16Float,
+                                                            usage: TextureUsage::TextureBinding | TextureUsage::CopyDst);
+            made.dimension(kind: TextureDimension::D3);
+            made.depthOrArrayLayers(count: side);
+            made.label(text: "Blender's AgX table");
+            Texture table = this.device.createTexture(descriptor: give made);
+            DynamicArray<uint16> halves = blenderAgxTable();
+            DynamicArray<uint8> bytes = DynamicArray.empty();
+            for (isize i = 0; i < halves.length(); i = i + 1) {
+                bytes.add(item: truncate<uint8>(halves[i]));
+                bytes.add(item: truncate<uint8>(halves[i] >> 8));
+            }
+            TexelCopyBufferLayout rows = TexelCopyBufferLayout.make();
+            rows.bytesPerRow(bytes: side * 8);
+            rows.rowsPerImage(count: side);
+            this.queue.writeTexture(destination: TexelCopyTextureInfo.make(texture: copy table), data: bytes.view(), layout: rows,
+                                    size: Extent3D.of(width: side, height: side, depthOrArrayLayers: side));
+            this.agxTableView = Optional::Some(value: table.createView(descriptor: TextureViewDescriptor.make()));
+        }
+        return match (this.agxTableView) { case Some(value: v): copy v; case None: { panic(msg: "made above"); } };
     }
 
     fn GpuColor clearing() {
@@ -521,9 +563,12 @@ type resource Renderer {
         // the output pass, into an 8-bit target: the scene through the camera's tone mapping. A 16-bit float target holds
         // the scene itself, so it has none.
         if (!target.holdsScene()) {
-            isize o = this.outputFor(curve: camera.toneMapping());
-            BindGroupDescriptor sceneRead = BindGroupDescriptor.make(layout: copy this.outputLayout);
+            ToneMapping curve = camera.toneMapping();
+            isize o = this.outputFor(curve: curve);
+            bool table = readsTable(curve: curve);
+            BindGroupDescriptor sceneRead = BindGroupDescriptor.make(layout: table ? copy this.tableLayout : copy this.outputLayout);
             sceneRead.entry(binding: 0, resource: BindingResource::Texture(view: sceneTexture.createView(descriptor: TextureViewDescriptor.make())));
+            if (table) { sceneRead.entry(binding: 1, resource: BindingResource::Texture(view: this.agxTable())); }
             sceneRead.label(text: "the output pass's scene");
             BindGroup readGroup = this.device.createBindGroup(descriptor: give sceneRead);
             RenderPassDescriptor outputPass = RenderPassDescriptor.make();

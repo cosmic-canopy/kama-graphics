@@ -92,7 +92,8 @@ a resource the program owns.
     r187 flips it (`WebGPUPipelineUtils.js`), so its front faces stay its front. Its pipelines are its material's
     other ones;
   - **then, into an 8-bit target, the output pass:** one full-screen triangle reading the scene's texture at each texel
-    and writing it through the camera's tone mapping (§ The camera). The target's format clamps each channel to 0 to 1
+    and writing it through the camera's tone mapping (§ The camera), Blender's AgX by default, with its table bound beside
+    the scene when the curve reads it. The target's format clamps each channel to 0 to 1
     and encodes sRGB as it stores, so the pass writes linear light, its alpha the scene's. A 16-bit float target holds
     the scene itself, so it has no output pass;
   - sorting draws, and drawing a geometry and material in common as one instanced draw, come with automatic instancing
@@ -443,8 +444,19 @@ WGSL's reserved words beyond its keywords are refused by the GPU's own compile, 
     within a half float. It is the camera's, whatever its tone mapping, where three.js's `toneMappingExposure` is applied
     by the tone mapping alone.
 - **Its tone mapping is its own,** `toneMapping()`/`toneMappingMut()` (the owner's (A), 2026-11-17), so two views of one
-  scene can look different with nothing on the renderer to set and reset. `ToneMapping::None` writes the scene as it is,
-  each channel clamped, as three.js's `NoToneMapping`. A camera drawing into a 16-bit float target ignores it.
+  scene can look different with nothing on the renderer to set and reset. A camera drawing into a 16-bit float target
+  ignores it. `ToneMapping` (part 4's question 2):
+  - **`BlenderAgX`, the default:** Blender's AgX view as Blender 5.3 shows it on an sRGB display, "AgX Base Rec.1886".
+    The scene goes from linear Rec.709 into Linear FilmLight E-Gamut and an lg2 allocation over −12.47393 to
+    12.5260688117 (Blender's `config.ocio`), is read from a 57³ table interpolated tetrahedrally, as OpenColorIO reads
+    `AgX_Base_sRGB.cube`, and its value, Rec.1886-encoded, is decoded with its 2.4 power, so the target's sRGB encoding
+    shows what Blender's display shows. A renderer makes the table the first time a camera uses it, `blenderAgxTable()`:
+    the formulas of the script that made Blender's (EaryChow's AgX_LUT_Gen at `ab7415e`), worked in float64, each value
+    stored as a half float, 1.48 MB in a 3D texture. They reproduce Blender's 185,193 entries to their 7-decimal
+    rounding. Interpolating, rather than computing the formulas at each texel, is what Blender shows: between entries the
+    two part by up to 22 steps on saturated colours with a channel near zero;
+  - **`AgX`:** three.js r187's (`agxToneMapping`, from Filament), its exposure the scene's;
+  - **`None`:** the scene as it is, each channel clamped, as three.js's `NoToneMapping`.
 
 ## Reading a target back
 
@@ -624,6 +636,20 @@ It is 266 cases on each leg that names a software GPU, and 258 in Edge, whose le
   step of r187's formulas worked in float64 along the exact ray through that texel (`physical.kama`'s reference, at any
   point, normal and eye). WARP draws the same bytes natively and in Firefox. SwiftShader's frames differ from WARP's in
   4, 32 and 380 texels. No WebGPU error.
+- **Part 4's step 3, tone mapping, on each leg's GPU** (`tests/src/tonemap.kama`), one renderer making Blender's table
+  once for every job:
+  - `blenderAgxTable()` holding twelve of Blender 5.3's entries, copied from its file, each within half a half float's
+    step of Blender's value and its 7-decimal rounding;
+  - eighteen swatches, from black to 1,000, the primaries, skin, sky and gold, through each curve: `BlenderAgX` within a
+    step of what Blender 5.3 shows, worked from its own table interpolated tetrahedrally (a blue, a deep cyan and a sea
+    green sit between entries, where the formulas part from it by 10 to 22 steps); `AgX` within a step of r187's formulas
+    worked in float64; `None` clamped and sRGB-encoded;
+  - a camera drawing into a 16-bit float target ignoring its tone mapping;
+  - `tone-mapping-blender-agx/<gpu>.png`: a box running red to blue across it and over about nine stops up it, through
+    Blender's AgX. r187's, `tone-mapping-agx`, joins once WARP's two legs agree: natively wgpu-native compiles with FXC,
+    and Firefox with DXC, and they round 2 of its 2,048 texels a step apart (kyoten's rendering.md § Decided, DXC).
+
+  The earlier tests set each camera's tone mapping to `None`, so each holds its own feature apart from the curve.
 - **Part 4's step 2, the HDR frame, on each leg's GPU** (`tests/src/frame.kama`):
   - a 16-bit float target read back as a 16 x 12 `Rgba16Float` image in linear sRGB;
   - at EV100 1, a `#336699` box stored as its linear colour × 2^−1 / 1.2, and the clear colour exposed with it, its
@@ -633,7 +659,7 @@ It is 266 cases on each leg that names a software GPU, and 258 in Edge, whose le
   - an 8-bit target showing white at EV100 1 as sRGB(2^−1 / 1.2), its clear alpha of 0.4 kept through the output pass
     as 102;
   - `clear(target:)` filling a float target with the linear clear colour;
-  - and with no GPU, the camera's default exposure and tone mapping, `ev100For` and the named exposures.
+  - and with no GPU, the camera's default exposure and tone mapping (Blender's AgX), `ev100For` and the named exposures.
 
   The lit goldens were written again for it: storing the scene as half floats before the 8-bit encode moves 2 to 44
   texels of each by one step, never more.

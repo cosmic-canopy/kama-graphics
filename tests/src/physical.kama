@@ -21,7 +21,7 @@ import {
     std::time::Instant, std::time::monotonicNow,
     gpu::Device, gpu::Queue, gpu::DeviceErrors, gpu::GpuError,
     graphics::Color, graphics::Renderer, graphics::RenderTarget, graphics::Scene, graphics::Mesh, graphics::Group,
-    graphics::PerspectiveCamera, graphics::BoxGeometry, graphics::Material, graphics::MaterialGpu,
+    graphics::PerspectiveCamera, graphics::ToneMapping, graphics::BoxGeometry, graphics::Material, graphics::MaterialGpu,
     graphics::MaterialSettings, graphics::NodeBuilder, graphics::PixelRead, graphics::PixelStatus, graphics::Vec3Node,
     graphics::FloatNode, graphics::vec3, graphics::vec4, graphics::constant, graphics::varying, graphics::cameraPosition,
     graphics::normalWorld, graphics::lit, graphics::PhysicalLightingModel, graphics::MeshStandardMaterial,
@@ -532,6 +532,7 @@ type resource PhysicalRun {
             Shared<PerspectiveCamera> cam = new PerspectiveCamera.make(fovRad: radians(deg: 50.0),
                                                                         aspect: cast<float32>(WIDE) / cast<float32>(HIGH),
                                                                         near: 0.1, far: 100.0);
+            cam.toneMappingMut() = ToneMapping::None;
             // off the axis, looking down -Z, so its centre ray still meets the box's front face
             cam.positionMut() = Vec3.of(x: 0.3, y: 0.2, z: 4.0);
             cam.targetMut() = Optional::Some(value: copy t);
@@ -600,6 +601,7 @@ type resource PhysicalRun {
             Shared<PerspectiveCamera> cam = new PerspectiveCamera.make(fovRad: radians(deg: 50.0),
                                                                         aspect: cast<float32>(WIDE) / cast<float32>(HIGH),
                                                                         near: 0.1, far: 100.0);
+            cam.toneMappingMut() = ToneMapping::None;
             cam.positionMut() = Vec3.of(x: 0.35, y: 0.25, z: 4.0);
             match (this.target) { case Some(value: t): { cam.targetMut() = Optional::Some(value: copy t); } case None: { } };
             this.camera = Optional::Some(value: give cam);

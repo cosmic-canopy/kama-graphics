@@ -1,0 +1,385 @@
+// GFX-1's part 4, step 3: tone mapping on each camera (kyoten's rendering.md § Decided, part 4's question 2, and the
+// owner's (A) on where it is chosen). A step a tick on the device the check opened:
+// - **Blender's AgX, the default,** shows each colour as Blender 5.3 shows it on an sRGB display, within a step: the
+//   bytes below were worked from Blender's own `AgX_Base_sRGB.cube`, interpolated tetrahedrally as OpenColorIO does
+//   (kyoten's `.scratch/s34/agx/tools/expected_bytes.py`). A pure blue, a deep cyan and a sea green sit between the
+//   table's entries, where its interpolation and the formulas part by 10 to 22 steps: only a renderer reading the table
+//   as Blender does shows them so;
+// - **the table a renderer makes** holds Blender's entries within a half float's rounding (`blenderAgxTable()`), each
+//   below copied from Blender's file;
+// - **`AgX`, three.js r187's,** shows each colour within a step of r187's formulas worked here in float64;
+// - **`None`** shows each colour clamped and sRGB-encoded;
+// - **a camera drawing into a 16-bit float target ignores its tone mapping;**
+// - **the golden** `tone-mapping-blender-agx`: a box whose colour runs from red to blue across it and over about nine
+//   stops up it, through Blender's AgX. r187's, `tone-mapping-agx`, waits on DXC natively (below).
+
+import {
+    std::collections::DynamicArray,
+    std::math::Vec3, std::math::radians, std::math::pow, std::math::log2, std::math::floor,
+    std::time::Instant, std::time::monotonicNow,
+    image::Image,
+    gpu::Device, gpu::Queue, gpu::GpuError,
+    graphics::Color, graphics::Renderer, graphics::RenderTarget, graphics::TargetFormat, graphics::Scene, graphics::Mesh,
+    graphics::PerspectiveCamera, graphics::BoxGeometry, graphics::Material, graphics::MaterialGpu,
+    graphics::MaterialSettings, graphics::NodeBuilder, graphics::PixelRead, graphics::PixelStatus, graphics::ToneMapping,
+    graphics::vec4, graphics::vec3, graphics::constant, graphics::saturate, graphics::exp2, graphics::positionWorld,
+    graphics::blenderAgxTable, graphics::Vec3Node, graphics::FloatNode,
+    Verdicts, halfValue, checkGolden,
+};
+export { ToneMapRun };
+
+comptime int64 TONE_MS = 10000;
+
+// A program's own material showing one linear colour, its light as given.
+type resource LinearLook implements Material {
+    MaterialGpu cache;
+    float32 r;
+    float32 g;
+    float32 b;
+    public ctor make(float32 r, float32 g, float32 b) { this.cache = MaterialGpu.make(); this.r = r; this.g = g; this.b = b; }
+    public fn ref MaterialGpu gpuMut() { return this.cache; }
+    public const fn uint32 version() { return 0; }
+    public const fn uint32 graphVersion() { return 0; }
+    public const fn void settings(ref MaterialSettings into) { into.addVec3(name: "c", x: this.r, y: this.g, z: this.b); }
+    public fn void shade(ref NodeBuilder builder) {
+        builder.fragmentColor(node: vec4(xyz: builder.uniformVec3(name: "c"), w: constant(value: 1.0)));
+    }
+}
+
+// The golden's ramp: red to blue across the box, and ten stops up it, from 2^−5 to 2^5.
+type resource Ramp implements Material {
+    MaterialGpu cache;
+    public ctor make() { this.cache = MaterialGpu.make(); }
+    public fn ref MaterialGpu gpuMut() { return this.cache; }
+    public const fn uint32 version() { return 0; }
+    public const fn uint32 graphVersion() { return 0; }
+    public const fn void settings(ref MaterialSettings into) { }
+    public fn void shade(ref NodeBuilder builder) {
+        Vec3Node at = positionWorld();
+        FloatNode across = saturate(x: at.x() + 0.5);
+        FloatNode stops = exp2(x: at.y() * 10.0);
+        Vec3Node hue = vec3(x: across, y: constant(value: 0.2), z: 1.0 - across);
+        builder.fragmentColor(node: vec4(xyz: hue * stops, w: constant(value: 1.0)));
+    }
+}
+
+// One colour through each curve: its linear value, and what Blender 5.3 shows of it.
+type value Swatch {
+    public float32 r; public float32 g; public float32 b;
+    public int32 br; public int32 bg; public int32 bb;
+    public ctor of(float32 r, float32 g, float32 b, int32 br, int32 bg, int32 bb) {
+        this.r = r; this.g = g; this.b = b; this.br = br; this.bg = bg; this.bb = bb;
+    }
+}
+
+// Worked from Blender 5.3.0's AgX_Base_sRGB.cube by kyoten's .scratch/s34/agx/tools/expected_bytes.py.
+fn DynamicArray<Swatch> swatches() {
+    DynamicArray<Swatch> s = DynamicArray.empty();
+    s.add(item: Swatch.of(r: 0.0, g: 0.0, b: 0.0, br: 0, bg: 0, bb: 0));
+    s.add(item: Swatch.of(r: 0.01, g: 0.01, b: 0.01, br: 18, bg: 18, bb: 18));
+    s.add(item: Swatch.of(r: 0.18, g: 0.18, b: 0.18, br: 118, bg: 118, bb: 118));
+    s.add(item: Swatch.of(r: 0.5, g: 0.5, b: 0.5, br: 170, bg: 170, bb: 170));
+    s.add(item: Swatch.of(r: 1.0, g: 1.0, b: 1.0, br: 197, bg: 197, bb: 197));
+    s.add(item: Swatch.of(r: 4.0, g: 4.0, b: 4.0, br: 233, bg: 233, bb: 233));
+    s.add(item: Swatch.of(r: 16.0, g: 16.0, b: 16.0, br: 255, bg: 255, bb: 255));
+    s.add(item: Swatch.of(r: 1000.0, g: 1000.0, b: 1000.0, br: 255, bg: 255, bb: 255));
+    s.add(item: Swatch.of(r: 1.0, g: 0.0, b: 0.0, br: 219, bg: 57, bb: 33));
+    s.add(item: Swatch.of(r: 0.0, g: 1.0, b: 0.0, br: 110, bg: 197, bb: 81));
+    s.add(item: Swatch.of(r: 0.0, g: 0.0, b: 1.0, br: 20, bg: 86, bb: 209));
+    s.add(item: Swatch.of(r: 8.0, g: 0.2, b: 0.1, br: 255, bg: 188, bb: 178));
+    s.add(item: Swatch.of(r: 0.4, g: 0.25, b: 0.18, br: 160, bg: 135, bb: 119));
+    s.add(item: Swatch.of(r: 0.8, g: 1.2, b: 2.0, br: 192, bg: 204, bb: 219));
+    s.add(item: Swatch.of(r: 0.75, g: 0.55, b: 0.2, br: 188, bg: 170, bb: 134));
+    s.add(item: Swatch.of(r: 0.00025, g: 0.18, b: 0.51, br: 8, bg: 123, bb: 176));
+    s.add(item: Swatch.of(r: 0.0, g: 0.36, b: 0.204, br: 32, bg: 153, bb: 125));
+    s.add(item: Swatch.of(r: 3.0, g: 0.05, b: 2.5, br: 235, bg: 174, bb: 226));
+    return s;
+}
+
+// ---- three.js r187's AgX, worked in float64 (ToneMappingFunctions.js), each matrix by its columns as TSL's mat3
+type value Lin {
+    public float64 r; public float64 g; public float64 b;
+    public ctor of(float64 r, float64 g, float64 b) { this.r = r; this.g = g; this.b = b; }
+}
+// The matrix whose columns are (a, b, c), (d, e, f), (g, h, i), times `v`.
+fn Lin byColumns(float64 a, float64 b, float64 c, float64 d, float64 e, float64 f, float64 g, float64 h, float64 i, Lin v) {
+    return Lin.of(r: a * v.r + d * v.g + g * v.b, g: b * v.r + e * v.g + h * v.b, b: c * v.r + f * v.g + i * v.b);
+}
+fn float64 contrast(float64 x) {
+    float64 x2 = x * x;
+    float64 x4 = x2 * x2;
+    return 15.5 * x4 * x2 - 40.14 * x4 * x + 31.96 * x4 - 6.868 * x2 * x + 0.4298 * x2 + 0.1191 * x - 0.00232;
+}
+fn float64 encodeEv(float64 v) {
+    float64 floor10 = v > 1e-10 ? v : 1e-10;
+    float64 t = (log2::<float64>(x: floor10) + 12.47393) / (4.026069 + 12.47393);
+    return t < 0.0 ? 0.0 : t > 1.0 ? 1.0 : t;
+}
+fn float64 unit(float64 v) { return v < 0.0 ? 0.0 : v > 1.0 ? 1.0 : v; }
+fn Lin agxR187(Lin c) {
+    Lin wide = byColumns(a: 0.6274, b: 0.0691, c: 0.0164, d: 0.3293, e: 0.9195, f: 0.0880, g: 0.0433, h: 0.0113, i: 0.8956, v: c);
+    Lin inside = byColumns(a: 0.856627153315983, b: 0.137318972929847, c: 0.11189821299995,
+                           d: 0.0951212405381588, e: 0.761241990602591, f: 0.0767994186031903,
+                           g: 0.0482516061458583, h: 0.101439036467562, i: 0.811302368396859, v: wide);
+    Lin curved = Lin.of(r: contrast(x: encodeEv(v: inside.r)), g: contrast(x: encodeEv(v: inside.g)), b: contrast(x: encodeEv(v: inside.b)));
+    Lin out2020 = byColumns(a: 1.1271005818144368, b: -0.1413297634984383, c: -0.14132976349843826,
+                            d: -0.11060664309660323, e: 1.157823702216272, f: -0.11060664309660294,
+                            g: -0.016493938717834573, h: -0.016493938717834257, i: 1.2519364065950405, v: curved);
+    Lin linear2020 = Lin.of(r: pow::<float64>(x: out2020.r > 0.0 ? out2020.r : 0.0, y: 2.2),
+                            g: pow::<float64>(x: out2020.g > 0.0 ? out2020.g : 0.0, y: 2.2),
+                            b: pow::<float64>(x: out2020.b > 0.0 ? out2020.b : 0.0, y: 2.2));
+    Lin back = byColumns(a: 1.6605, b: -0.1246, c: -0.0182, d: -0.5876, e: 1.1329, f: -0.1006, g: -0.0728, h: -0.0083, i: 1.1187, v: linear2020);
+    return Lin.of(r: unit(v: back.r), g: unit(v: back.g), b: unit(v: back.b));
+}
+// sRGB's curve to 8 bits of a linear value from 0 to 1.
+fn int32 shown(float64 linear) {
+    float64 c = unit(v: linear);
+    float64 e = c <= 0.0031308 ? 12.92 * c : 1.055 * pow::<float64>(x: c, y: 1.0 / 2.4) - 0.055;
+    return cast<int32>(floor::<float64>(x: e * 255.0 + 0.5));
+}
+fn int32 apart(int32 a, int32 b) { return a > b ? a - b : b - a; }
+
+// One of Blender's table entries: its grid place and its value, copied from Blender 5.3.0's AgX_Base_sRGB.cube.
+type value TableEntry {
+    public isize r; public isize g; public isize b;
+    public float64 vr; public float64 vg; public float64 vb;
+    public ctor of(isize r, isize g, isize b, float64 vr, float64 vg, float64 vb) {
+        this.r = r; this.g = g; this.b = b; this.vr = vr; this.vg = vg; this.vb = vb;
+    }
+}
+fn DynamicArray<TableEntry> blenderEntries() {
+    DynamicArray<TableEntry> s = DynamicArray.empty();
+    s.add(item: TableEntry.of(r: 0, g: 0, b: 0, vr: 2e-07, vg: 0.0, vb: 1.8e-06));
+    s.add(item: TableEntry.of(r: 28, g: 28, b: 28, vr: 0.7853074, vg: 0.7853064, vb: 0.7853274));
+    s.add(item: TableEntry.of(r: 10, g: 40, b: 20, vr: 0.8719417, vg: 1.0, vb: 0.8926852));
+    s.add(item: TableEntry.of(r: 25, g: 34, b: 19, vr: 0.6580422, vg: 0.9907072, vb: 0.6658513));
+    s.add(item: TableEntry.of(r: 5, g: 30, b: 40, vr: 0.7817274, vg: 0.8834252, vb: 1.0));
+    s.add(item: TableEntry.of(r: 20, g: 20, b: 10, vr: 0.3887664, vg: 0.3707552, vb: 0.0));
+    s.add(item: TableEntry.of(r: 15, g: 15, b: 15, vr: 0.1626314, vg: 0.1626307, vb: 0.1626441));
+    s.add(item: TableEntry.of(r: 40, g: 10, b: 30, vr: 1.0, vg: 0.9177676, vb: 0.9165886));
+    s.add(item: TableEntry.of(r: 3, g: 5, b: 7, vr: 0.0, vg: 0.0310668, vb: 0.0444032));
+    s.add(item: TableEntry.of(r: 30, g: 35, b: 8, vr: 0.8083604, vg: 0.9968764, vb: 0.7422121));
+    s.add(item: TableEntry.of(r: 36, g: 30, b: 33, vr: 1.0, vg: 0.8701424, vb: 0.9226458));
+    s.add(item: TableEntry.of(r: 12, g: 25, b: 33, vr: 0.2978479, vg: 0.6503526, vb: 0.9972335));
+    return s;
+}
+
+// "" when the half `got` is `want` rounded to a half float: within half a half float's step of it, and of Blender's own
+// 7-decimal rounding, 5e-8, so a table that truncated rather than rounded fails.
+fn string halfWithin(uint16 got, float64 want, const ref string what) {
+    float64 value = halfValue(h: got);
+    float64 two = 2.0;
+    float64 step = want >= pow::<float64>(x: two, y: -14.0) ? pow::<float64>(x: two, y: floor::<float64>(x: log2::<float64>(x: want)) - 10.0)
+                                                             : pow::<float64>(x: two, y: -24.0);
+    float64 gap = value > want ? value - want : want - value;
+    return gap <= step / 2.0 + 0.00000005 ? "" : what + " is ${value}, not ${want}";
+}
+
+comptime uint32 SMALL_WIDE = 8;
+comptime uint32 SMALL_HIGH = 6;
+comptime uint32 RAMP_WIDE = 64;
+comptime uint32 RAMP_HIGH = 32;
+
+// What a job draws: a swatch through a curve, a swatch into a float target through `AgX`, or a curve's golden.
+type enum Job { Swatch(isize index, ToneMapping curve), Ignored, Golden(ToneMapping curve) }
+
+fn string curveName(ToneMapping curve) {
+    return match (curve) { case None: "None"; case AgX: "AgX"; case BlenderAgX: "BlenderAgX"; };
+}
+
+type resource ToneMapRun {
+    isize next = 0;
+    Instant began = monotonicNow();
+    Verdicts found;
+    Device device;
+    Queue queue;
+    string gpu;
+    bool software;
+    int32 declaredCount = 0;
+    int32 matchedCount = 0;
+    DynamicArray<Job> jobs;
+    DynamicArray<Swatch> colours;
+    Optional<Renderer> renderer = Optional::None;
+    Optional<PixelRead> reading = Optional::None;
+    bool started = false;
+    // What each curve's swatches said: one verdict a curve, every swatch that missed named in it.
+    string blenderWhy = "";
+    string r187Why = "";
+    string noneWhy = "";
+    string ignoredWhy = "";
+    DynamicArray<uint8> frame = DynamicArray.empty();
+
+    public ctor make(string gpu, bool software, Device device, Queue queue) {
+        this.found = Verdicts.make();
+        this.gpu = give gpu;
+        this.software = software;
+        this.device = give device;
+        this.queue = give queue;
+        this.colours = swatches();
+        this.jobs = DynamicArray.empty();
+        for (isize i = 0; i < this.colours.length(); i = i + 1) {
+            this.jobs.add(item: Job::Swatch(index: i, curve: ToneMapping::BlenderAgX));
+            this.jobs.add(item: Job::Swatch(index: i, curve: ToneMapping::AgX));
+            this.jobs.add(item: Job::Swatch(index: i, curve: ToneMapping::None));
+        }
+        this.jobs.add(item: Job::Ignored);
+        this.jobs.add(item: Job::Golden(curve: ToneMapping::BlenderAgX));
+        // r187's golden, `tone-mapping-agx`, joins once WARP's two legs agree under DXC (kyoten's rendering.md § Decided,
+        // the owner, 2026-11-17): natively FXC rounds 2 of its 2,048 texels a step from Firefox's DXC
+    }
+
+    public fn ref Verdicts verdicts() { return this.found; }
+    public const fn int32 declared() { return this.declaredCount; }
+    public const fn int32 matched() { return this.matchedCount; }
+
+    // The table a renderer makes, held to Blender's entries: no GPU.
+    fn void tableCases() {
+        DynamicArray<uint16> table = blenderAgxTable();
+        DynamicArray<TableEntry> entries = blenderEntries();
+        isize count = table.length();
+        string why = count == 57 * 57 * 57 * 4 ? "" : "the table holds ${count} halves";
+        for (isize i = 0; i < entries.length() && why.isEmpty(); i = i + 1) {
+            TableEntry e = entries[i];
+            isize at = (e.r + 57 * e.g + 57 * 57 * e.b) * 4;
+            string where = "(${e.r}, ${e.g}, ${e.b})";
+            why = halfWithin(got: table[at], want: e.vr, what: where + "'s red")
+                + halfWithin(got: table[at + 1], want: e.vg, what: where + "'s green")
+                + halfWithin(got: table[at + 2], want: e.vb, what: where + "'s blue");
+        }
+        this.found.add(name: "BlenderAgX: the table a renderer makes holds Blender 5.3's entries within a half float's rounding",
+                       why: give why);
+    }
+    // The job at `next` drawn, by one renderer, so Blender's table is made once, and its read started.
+    unsafe fn void startJob() {
+        Job job = this.jobs[this.next];
+        if (this.renderer.isNone()) { this.renderer = Optional::Some(value: Renderer.withDevice(device: copy this.device, queue: copy this.queue)); }
+        bool ramp = match (job) { case Golden(curve: c): true; case _: false; };
+        bool ignored = match (job) { case Ignored: true; case _: false; };
+        uint32 wide = ramp ? RAMP_WIDE : SMALL_WIDE;
+        uint32 high = ramp ? RAMP_HIGH : SMALL_HIGH;
+        TargetFormat format = ignored ? TargetFormat::Rgba16Float : TargetFormat::Rgba8UnormSrgb;
+        ToneMapping curve = match (job) {
+            case Swatch(index: i, curve: c): c;
+            case Ignored: ToneMapping::AgX;
+            case Golden(curve: c): c;
+        };
+        Shared<RenderTarget> t = new RenderTarget.withFormat(width: wide, height: high, format: format);
+        Shared<PerspectiveCamera> cam = new PerspectiveCamera.make(fovRad: radians(deg: 50.0), aspect: cast<float32>(wide) / cast<float32>(high),
+                                                                   near: 0.1, far: 100.0);
+        cam.targetMut() = Optional::Some(value: copy t);
+        cam.toneMappingMut() = curve;
+        Shared<Scene> s = new Scene.make();
+        Shared<BoxGeometry> box = new BoxGeometry.make(width: 1.0, height: 1.0, depth: 1.0);
+        if (ramp) {
+            Shared<Ramp> look = new Ramp.make();
+            Shared<Mesh> m = new Mesh.make(geometry: copy box, material: look);
+            m.positionMut() = Vec3.of(x: 0.0, y: 0.0, z: -1.0);
+            s.add(object: m);
+        } else {
+            isize index = match (job) { case Swatch(index: i, curve: c): i; case _: 4; };
+            Swatch w = this.colours[index];
+            Shared<LinearLook> look = new LinearLook.make(r: w.r, g: w.g, b: w.b);
+            Shared<Mesh> m = new Mesh.make(geometry: copy box, material: look);
+            m.positionMut() = Vec3.of(x: 0.0, y: 0.0, z: -1.2);
+            s.add(object: m);
+        }
+        match (this.renderer) {
+            case Some(value: r): {
+                r.render(scene: copy s, camera: copy cam);
+                this.reading = Optional::Some(value: r.readRenderTargetPixels(target: copy t));
+            }
+            case None: { }
+        };
+        this.began = monotonicNow();
+    }
+
+    // The read's image once it answers: None while pending; a failed read is an image of nothing.
+    unsafe fn Optional<Image> polled(ref bool failed) {
+        PixelStatus s = match (this.reading) {
+            case Some(value: r): r.poll();
+            case None: PixelStatus::Failed(error: GpuError::Taken);
+        };
+        bool pending = match (s) { case Pending: true; case _: false; };
+        if (pending && this.began.elapsed().asMillis() < TONE_MS) { failed = false; return Optional::None; }
+        this.reading = Optional::None;
+        failed = true;
+        return match (give s) {
+            case Ready(image: img): Optional::Some(value: give img);
+            case _: Optional::None;
+        };
+    }
+
+    // The job at `next` judged from its image.
+    unsafe fn void judge(const ref Image img) {
+        Job job = this.jobs[this.next];
+        match (job) {
+            case Swatch(index: i, curve: c): {
+                Swatch w = this.colours[i];
+                isize at = (cast<isize>(SMALL_HIGH / 2) * cast<isize>(SMALL_WIDE) + cast<isize>(SMALL_WIDE / 2)) * 4;
+                int32 r = cast<int32>(img.samples8()[at]);
+                int32 g = cast<int32>(img.samples8()[at + 1]);
+                int32 b = cast<int32>(img.samples8()[at + 2]);
+                int32 wr = w.br; int32 wg = w.bg; int32 wb = w.bb;
+                if (c == ToneMapping::AgX) {
+                    Lin want = agxR187(c: Lin.of(r: cast<float64>(w.r), g: cast<float64>(w.g), b: cast<float64>(w.b)));
+                    wr = shown(linear: want.r); wg = shown(linear: want.g); wb = shown(linear: want.b);
+                }
+                if (c == ToneMapping::None) {
+                    wr = shown(linear: cast<float64>(w.r)); wg = shown(linear: cast<float64>(w.g)); wb = shown(linear: cast<float64>(w.b));
+                }
+                if (apart(a: r, b: wr) > 1 || apart(a: g, b: wg) > 1 || apart(a: b, b: wb) > 1) {
+                    string miss = "swatch ${i} shows ${r} ${g} ${b}, not ${wr} ${wg} ${wb}; ";
+                    if (c == ToneMapping::BlenderAgX) { this.blenderWhy = this.blenderWhy + miss; }
+                    if (c == ToneMapping::AgX) { this.r187Why = this.r187Why + miss; }
+                    if (c == ToneMapping::None) { this.noneWhy = this.noneWhy + miss; }
+                }
+            }
+            case Ignored: {
+                isize at = (cast<isize>(SMALL_HIGH / 2) * cast<isize>(SMALL_WIDE) + cast<isize>(SMALL_WIDE / 2)) * 4;
+                Swatch w = this.colours[4];
+                this.ignoredWhy = halfWithin(got: img.samples16()[at], want: cast<float64>(w.r), what: "red")
+                    + halfWithin(got: img.samples16()[at + 1], want: cast<float64>(w.g), what: "green");
+            }
+            case Golden(curve: c): {
+                string test = c == ToneMapping::BlenderAgX ? "tone-mapping-blender-agx" : "tone-mapping-agx";
+                this.frame = DynamicArray.empty();
+                borrow img.samples8() as px {
+                    for (isize k = 0; k < px.length(); k = k + 1) { this.frame.add(item: px[k]); }
+                }
+                if (!this.gpu.isEmpty()) {
+                    this.declaredCount = this.declaredCount + 1;
+                    string said = this.software
+                        ? checkGolden(test: test, gpu: this.gpu, width: cast<isize>(RAMP_WIDE), height: cast<isize>(RAMP_HIGH), frame: this.frame)
+                        : "the adapter is not the software GPU the leg names, so its frame is not compared";
+                    if (said.isEmpty()) { this.matchedCount = this.matchedCount + 1; }
+                    this.found.add(name: "golden " + test + " on " + this.gpu, why: give said);
+                }
+            }
+        };
+    }
+
+    public unsafe fn bool step() {
+        if (!this.started) {
+            this.tableCases();
+            this.started = true;
+            this.startJob();
+            return false;
+        }
+        bool failed = false;
+        Optional<Image> got = this.polled(failed: ref failed);
+        if (got.isNone() && !failed) { return false; }
+        match (give got) {
+            case Some(value: img): { this.judge(img: img); }
+            case None: { this.blenderWhy = this.blenderWhy + "job ${this.next}'s read failed; "; }
+        };
+        this.next = this.next + 1;
+        if (this.next < this.jobs.length()) { this.startJob(); return false; }
+        this.found.add(name: "BlenderAgX, the default, shows each swatch as Blender 5.3 shows it on an sRGB display, within a step",
+                       why: copy this.blenderWhy);
+        this.found.add(name: "AgX shows each swatch within a step of three.js r187's AgX worked in float64", why: copy this.r187Why);
+        this.found.add(name: "None shows each swatch clamped and sRGB-encoded", why: copy this.noneWhy);
+        this.found.add(name: "a camera drawing into a 16-bit float target ignores its tone mapping: the scene, linear", why: copy this.ignoredWhy);
+        this.renderer = Optional::None;
+        return true;
+    }
+}

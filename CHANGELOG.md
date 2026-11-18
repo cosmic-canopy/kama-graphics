@@ -128,3 +128,8 @@ package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `toneMapping()`/`toneMappingMut()` (`ToneMapping::None` so far), and `ev100For`, `ev100Sunlight`, `ev100Overcast`,
   `ev100Indoor` and `ev100Blender`. **Changed:** the frame block's last field is the exposure, and `shaded` is a name the
   compiler writes.
+- GFX-1's part 4, step 3: tone mapping. `ToneMapping::BlenderAgX`, the default, Blender 5.3's AgX as Blender shows it,
+  through a 57³ table a renderer makes from the formulas that made Blender's (`blenderAgxTable()`) and reads
+  tetrahedrally; `ToneMapping::AgX`, three.js r187's. **Changed:** a camera's tone mapping is Blender's AgX by default, so
+  an 8-bit target shows the scene tone mapped. THIRD-PARTY-NOTICES credits EaryChow's and Troy Sobotka's AgX, whose
+  generator states no licence (one has been asked for), and carries colour-science's BSD licence.

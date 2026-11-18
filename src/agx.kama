@@ -1,0 +1,279 @@
+// Blender's AgX as the table Blender shows it through (kyoten's rendering.md § Decided, part 4, question 2, and the
+// owner's (A) on how it is computed). Blender 5.3's AgX view for an sRGB display, "AgX Base Rec.1886", reads a 57³ table,
+// `AgX_Base_sRGB.cube`, through OpenColorIO's tetrahedral interpolation. A renderer makes the same table here, from the
+// formulas of the script that made Blender's (EaryChow's AgX_LUT_Gen as of `ab7415e`, 2023-09-07, the last before
+// Blender's table of 2023-10-06), worked in float64, with the colour-science 0.4.3 functions it calls. Ported in
+// kyoten's `.scratch/s34/agx/tools/agx_blender.py` first, which reproduces all 185,193 of Blender's entries to their
+// 7-decimal rounding. Credited in THIRD-PARTY-NOTICES.md.
+//
+// The table's input is the scene in Linear FilmLight E-Gamut, log2-encoded over −10 to +15 stops about 0.18; its value is
+// Rec.709, encoded with a 2.4 power (Rec.1886), clipped to 1.
+
+import {
+    std::collections::DynamicArray,
+    std::math::pow, std::math::log2, std::math::floor,
+};
+export { blenderAgxTable, blenderAgxSize };
+
+// The table's size on each axis, Blender's.
+comptime isize BLENDER_AGX_SIZE = 57;
+fn isize blenderAgxSize() { return BLENDER_AGX_SIZE; }
+
+// A colour worked in float64.
+type value Rgb64 {
+    public float64 r;
+    public float64 g;
+    public float64 b;
+    public ctor of(float64 r, float64 g, float64 b) { this.r = r; this.g = g; this.b = b; }
+}
+
+// A 3x3 matrix by rows, applied to a column.
+type value M3 {
+    public float64 a; public float64 b; public float64 c;
+    public float64 d; public float64 e; public float64 f;
+    public float64 g; public float64 h; public float64 i;
+    public ctor of(float64 a, float64 b, float64 c, float64 d, float64 e, float64 f, float64 g, float64 h, float64 i) {
+        this.a = a; this.b = b; this.c = c; this.d = d; this.e = e; this.f = f; this.g = g; this.h = h; this.i = i;
+    }
+    public const fn Rgb64 times(Rgb64 v) {
+        return Rgb64.of(r: this.a * v.r + this.b * v.g + this.c * v.b,
+                        g: this.d * v.r + this.e * v.g + this.f * v.b,
+                        b: this.g * v.r + this.h * v.g + this.i * v.b);
+    }
+}
+
+fn float64 dot3(Rgb64 a, Rgb64 b) { return a.r * b.r + a.g * b.g + a.b * b.b; }
+fn float64 most(Rgb64 v) { return v.r > v.g ? (v.r > v.b ? v.r : v.b) : (v.g > v.b ? v.g : v.b); }
+fn float64 least(Rgb64 v) { return v.r < v.g ? (v.r < v.b ? v.r : v.b) : (v.g < v.b ? v.g : v.b); }
+
+// ---- the generator's matrices (luminance_compenstation_bt2020.py, AgXBaseRec2020.py, luminance_compenstation_srgb.py)
+fn M3 bt2020ToXyz() {
+    return M3.of(a: 0.6369535067850740, b: 0.1446191846692331, c: 0.1688558539228734,
+                 d: 0.2626983389565560, e: 0.6780087657728165, f: 0.0592928952706273,
+                 g: 0.0000000000000000, h: 0.0280731358475570, i: 1.0608272349505707);
+}
+fn M3 xyzToBt2020() {
+    return M3.of(a: 1.7166634277958805, b: -0.3556733197301399, c: -0.2533680878902478,
+                 d: -0.6666738361988869, e: 1.6164557398246981, f: 0.0157682970961337,
+                 g: 0.0176424817849772, h: -0.0427769763827532, i: 0.9422432810184308);
+}
+fn M3 eGamutToXyz() {
+    return M3.of(a: 0.7053968501, b: 0.1640413283, c: 0.08101774865,
+                 d: 0.2801307241, e: 0.8202066415, f: -0.1003373656,
+                 g: -0.1037815116, h: -0.07290725703, i: 1.265746519);
+}
+fn M3 xyzToBt709() {
+    return M3.of(a: 3.24100323297635872776822907326277, b: -1.53739896948878551619088739244035, c: -0.49861588199636291962590917137277,
+                 d: -0.96922425220251640087809619217296, e: 1.87592998369517593992839010752505, f: 0.04155422634008471699518239006466,
+                 g: 0.05563941985197547179797794569822, h: -0.20401120612390993835916219723003, i: 1.05714897718753331190555400098674);
+}
+fn M3 inset() {
+    return M3.of(a: 0.856627153315983, b: 0.0951212405381588, c: 0.0482516061458583,
+                 d: 0.137318972929847, e: 0.761241990602591, f: 0.101439036467562,
+                 g: 0.11189821299995, h: 0.0767994186031903, i: 0.811302368396859);
+}
+// The outset: the inverse of SB2383's for rotate [0, 0, 0], inset [0.4, 0.22, 0.04], worked in float64.
+fn M3 outset() {
+    return M3.of(a: 1.1271005818144368, b: -0.11060664309660322, c: -0.01649393871783457,
+                 d: -0.1413297634984383, e: 1.1578237022162718, f: -0.016493938717834257,
+                 g: -0.14132976349843826, h: -0.11060664309660294, i: 1.2519364065950402);
+}
+// BT.709 to BT.2020, through colour-science's normalised primary matrices, D65 at (0.3127, 0.3290): the sRGB guard
+// rail weighs luminance in BT.2020.
+fn M3 bt709ToBt2020() {
+    return M3.of(a: 0.627403895934699, b: 0.3292830383778838, c: 0.0433130656874172,
+                 d: 0.06909728935823199, e: 0.919540395075459, f: 0.011362315566309157,
+                 g: 0.016391438875150228, h: 0.08801330787722578, i: 0.895595253247624);
+}
+// BT.2020's luminance weights as the 2023 generator has them.
+fn Rgb64 lum2020() { return Rgb64.of(r: 0.2658180370250449, g: 0.59846986045365, b: 0.1357121025213052); }
+
+// ---- colour-science 0.4.3
+comptime float64 MIDGREY = 0.18;
+
+// log_encoding_Log2, with no clamp: a 0 is −infinity's code, which the sigmoid takes to 0.
+fn float64 log2Encoding(float64 x, float64 low, float64 high) {
+    return (log2::<float64>(x: x / MIDGREY) - low) / (high - low);
+}
+fn float64 log2Decoding(float64 x, float64 low, float64 high) {
+    float64 two = 2.0;
+    return pow::<float64>(x: two, y: x * (high - low) + low) * MIDGREY;
+}
+// exponent_function_basic's basicFwd and basicRev: a negative is 0.
+fn float64 basicForward(float64 x, float64 power) { return x >= 0.0 ? pow::<float64>(x: x, y: power) : 0.0; }
+fn float64 basicReverse(float64 x, float64 power) { return x >= 0.0 ? pow::<float64>(x: x, y: 1.0 / power) : 0.0; }
+// sdiv in "Ignore Zero Conversion": a division by 0 is 0.
+fn float64 safeDivide(float64 a, float64 b) { return b == 0.0 ? 0.0 : a / b; }
+
+fn Rgb64 rgbToHsv(Rgb64 c) {
+    float64 maximum = most(v: c);
+    float64 delta = maximum - least(v: c);
+    float64 s = safeDivide(a: delta, b: maximum);
+    float64 dr = safeDivide(a: (maximum - c.r) / 6.0 + delta / 2.0, b: delta);
+    float64 dg = safeDivide(a: (maximum - c.g) / 6.0 + delta / 2.0, b: delta);
+    float64 db = safeDivide(a: (maximum - c.b) / 6.0 + delta / 2.0, b: delta);
+    float64 hue = db - dg;
+    if (maximum == c.g) { hue = 1.0 / 3.0 + dr - db; }
+    if (maximum == c.b) { hue = 2.0 / 3.0 + dg - dr; }
+    if (hue < 0.0) { hue = hue + 1.0; }
+    if (hue > 1.0) { hue = hue - 1.0; }
+    if (delta == 0.0) { hue = 0.0; }
+    return Rgb64.of(r: hue, g: s, b: maximum);
+}
+fn Rgb64 hsvToRgb(Rgb64 hsv) {
+    float64 h = hsv.r * 6.0;
+    if (h == 6.0) { h = 0.0; }
+    float64 sector = floor::<float64>(x: h);
+    float64 v = hsv.b;
+    float64 j = v * (1.0 - hsv.g);
+    float64 k = v * (1.0 - hsv.g * (h - sector));
+    float64 l = v * (1.0 - hsv.g * (1.0 - (h - sector)));
+    isize i = cast<isize>(sector);
+    if (i <= 0) { return Rgb64.of(r: v, g: l, b: j); }
+    if (i == 1) { return Rgb64.of(r: k, g: v, b: j); }
+    if (i == 2) { return Rgb64.of(r: j, g: v, b: l); }
+    if (i == 3) { return Rgb64.of(r: j, g: k, b: v); }
+    if (i == 4) { return Rgb64.of(r: l, g: j, b: v); }
+    return Rgb64.of(r: v, g: j, b: k);
+}
+
+// ---- Troy Sobotka's sigmoid (sigmoid.py), with AgXBaseRec2020.py's arguments: the fulcrum at −10 / 16.5 of the log
+// range in and 0.18^(1/2.4) out, a slope of 2.4, toe and shoulder powers of 1.5, limits 0 to 1
+comptime float64 LOG_LOW = -10.0;
+comptime float64 LOG_HIGH = 6.5;
+comptime float64 SLOPE = 2.4;
+comptime float64 POWER = 1.5;
+
+fn float64 pivotX() { return 10.0 / 16.5; }
+fn float64 pivotY() { return pow::<float64>(x: MIDGREY, y: 1.0 / 2.4); }
+fn float64 curveScale(float64 transitionX, float64 transitionY) {
+    float64 termA = pow::<float64>(x: SLOPE * (1.0 - transitionX), y: -POWER);
+    float64 termB = pow::<float64>(x: SLOPE * (1.0 - transitionX) / (1.0 - transitionY), y: POWER) - 1.0;
+    return pow::<float64>(x: termA * termB, y: -1.0 / POWER);
+}
+fn float64 exponential(float64 x) { return x / pow::<float64>(x: 1.0 + pow::<float64>(x: x, y: POWER), y: 1.0 / POWER); }
+fn float64 sigmoid(float64 x) {
+    float64 px = pivotX();
+    float64 py = pivotY();
+    if (x < px) {
+        float64 toe = -curveScale(transitionX: 1.0 - px, transitionY: 1.0 - py);
+        return toe * exponential(x: SLOPE * (x - px) / toe) + py;
+    }
+    if (x <= px) { return SLOPE * x + (py - SLOPE * px); }
+    float64 shoulder = curveScale(transitionX: px, transitionY: py);
+    return shoulder * exponential(x: SLOPE * (x - px) / shoulder) + py;
+}
+
+// ---- the lower guard rails: a negative channel offset away, the luminance kept
+fn Rgb64 offsetUp(Rgb64 c) {
+    float64 lowest = least(v: c);
+    float64 offset = lowest < 0.0 ? -lowest : 0.0;
+    return Rgb64.of(r: c.r + offset, g: c.g + offset, b: c.b + offset);
+}
+fn Rgb64 opposite(Rgb64 c) {
+    float64 top = most(v: c);
+    return Rgb64.of(r: top - c.r, g: top - c.g, b: top - c.b);
+}
+// luminance_compenstation_bt2020.compensate_low_side
+fn Rgb64 compensateLow2020(Rgb64 c) {
+    Rgb64 weights = lum2020();
+    Rgb64 inverse = opposite(c: c);
+    float64 y = most(v: inverse) - dot3(a: inverse, b: weights) + dot3(a: c, b: weights);
+    Rgb64 raised = offsetUp(c: c);
+    Rgb64 inverseRaised = opposite(c: raised);
+    float64 yNew = most(v: inverseRaised) - dot3(a: inverseRaised, b: weights) + dot3(a: raised, b: weights);
+    float64 ratio = yNew > y ? y / yNew : 1.0;
+    return Rgb64.of(r: ratio * raised.r, g: ratio * raised.g, b: ratio * raised.b);
+}
+// clip(Y^0.08, 0, 1), as numpy has it: a negative Y's power is NaN, which no comparison holds
+fn float64 lumaWeight(float64 y) {
+    float64 w = pow::<float64>(x: y, y: 0.08);
+    return w < 0.0 ? 0.0 : w > 1.0 ? 1.0 : w;
+}
+// luminance_compenstation_srgb.compensate_low_side, its luminance weighed in BT.2020
+fn Rgb64 compensateLowSrgb(Rgb64 c) {
+    Rgb64 weights = lum2020();
+    M3 into2020 = bt709ToBt2020();
+    float64 y = dot3(a: into2020.times(v: c), b: weights);
+    Rgb64 inverse = opposite(c: c);
+    float64 yNegative = most(v: inverse) - dot3(a: into2020.times(v: inverse), b: weights) + y;
+    float64 t = lumaWeight(y: y);
+    y = (1.0 - t) * yNegative + t * y;
+    Rgb64 raised = offsetUp(c: c);
+    Rgb64 inverseRaised = opposite(c: raised);
+    float64 yNew = dot3(a: into2020.times(v: raised), b: weights);
+    float64 yNewNegative = most(v: inverseRaised) - dot3(a: into2020.times(v: inverseRaised), b: weights) + yNew;
+    float64 u = lumaWeight(y: yNew);
+    yNew = (1.0 - u) * yNewNegative + u * yNew;
+    float64 ratio = yNew > y ? y / (yNew > 1e-100 ? yNew : 1e-100) : 1.0;
+    return Rgb64.of(r: ratio * raised.r, g: ratio * raised.g, b: ratio * raised.b);
+}
+
+// ---- AgXBaseRec2020.AgX_Base_Rec2020, its hue mixed 40 % towards the formed image's, without wrapping, as in 2023
+fn float64 formed(float64 code) { return basicForward(x: sigmoid(x: code), power: 2.4); }
+fn Rgb64 agxBaseRec2020(Rgb64 c) {
+    Rgb64 guarded = compensateLow2020(c: c);
+    Rgb64 inside = inset().times(v: guarded);
+    float64 before = rgbToHsv(c: inside).r;
+    Rgb64 shaped = Rgb64.of(r: formed(code: log2Encoding(x: inside.r, low: LOG_LOW, high: LOG_HIGH)),
+                           g: formed(code: log2Encoding(x: inside.g, low: LOG_LOW, high: LOG_HIGH)),
+                           b: formed(code: log2Encoding(x: inside.b, low: LOG_LOW, high: LOG_HIGH)));
+    Rgb64 hsv = rgbToHsv(c: shaped);
+    Rgb64 mixed = Rgb64.of(r: 0.6 * before + 0.4 * hsv.r, g: hsv.g, b: hsv.b);
+    return outset().times(v: hsvToRgb(hsv: mixed));
+}
+
+// ---- AgXBasesRGB.main's cell: the table's input, E-Gamut log2-encoded over −10 to +15 stops, to its stored value
+fn Rgb64 tableCell(Rgb64 code) {
+    Rgb64 e = Rgb64.of(r: log2Decoding(x: code.r, low: -10.0, high: 15.0), g: log2Decoding(x: code.g, low: -10.0, high: 15.0),
+                       b: log2Decoding(x: code.b, low: -10.0, high: 15.0));
+    Rgb64 rec2020 = xyzToBt2020().times(v: eGamutToXyz().times(v: e));
+    Rgb64 shaped = agxBaseRec2020(c: rec2020);
+    Rgb64 rec709 = compensateLowSrgb(c: xyzToBt709().times(v: bt2020ToXyz().times(v: shaped)));
+    // encoded with a 2.4 power, and clipped to 1 as Blender's table is (its commit of 2023-10-06)
+    float64 r = basicReverse(x: rec709.r, power: 2.4);
+    float64 g = basicReverse(x: rec709.g, power: 2.4);
+    float64 b = basicReverse(x: rec709.b, power: 2.4);
+    return Rgb64.of(r: r > 1.0 ? 1.0 : r, g: g > 1.0 ? 1.0 : g, b: b > 1.0 ? 1.0 : b);
+}
+
+// A float64 from 0 to 1 as a half float's bits, rounded to the nearest, ties to even.
+fn uint16 halfOf(float64 v) {
+    if (!(v > 0.0)) { return 0; }
+    float64 two = 2.0;
+    float64 e = floor::<float64>(x: log2::<float64>(x: v));
+    if (e < -14.0) {
+        float64 m = v / pow::<float64>(x: two, y: -24.0);
+        float64 f = floor::<float64>(x: m);
+        float64 rest = m - f;
+        if (rest > 0.5 || (rest == 0.5 && cast<int64>(f) % 2 == 1)) { f = f + 1.0; }
+        return cast<uint16>(f);
+    }
+    float64 scaled = (v / pow::<float64>(x: two, y: e) - 1.0) * 1024.0;
+    float64 f = floor::<float64>(x: scaled);
+    float64 rest = scaled - f;
+    if (rest > 0.5 || (rest == 0.5 && cast<int64>(f) % 2 == 1)) { f = f + 1.0; }
+    int64 exponent = cast<int64>(e) + 15;
+    int64 mantissa = cast<int64>(f);
+    if (mantissa == 1024) { mantissa = 0; exponent = exponent + 1; }
+    return cast<uint16>(exponent * 1024 + mantissa);
+}
+
+// Blender's AgX table, 57³ texels of four half floats (its value, and 1), red fastest as a `.cube` lists it: the texture
+// a renderer makes once and its output pass samples, tetrahedrally, as OpenColorIO samples Blender's.
+fn DynamicArray<uint16> blenderAgxTable() {
+    DynamicArray<uint16> halves = DynamicArray.empty();
+    float64 last = cast<float64>(BLENDER_AGX_SIZE - 1);
+    for (isize b = 0; b < BLENDER_AGX_SIZE; b = b + 1) {
+        for (isize g = 0; g < BLENDER_AGX_SIZE; g = g + 1) {
+            for (isize r = 0; r < BLENDER_AGX_SIZE; r = r + 1) {
+                Rgb64 v = tableCell(code: Rgb64.of(r: cast<float64>(r) / last, g: cast<float64>(g) / last, b: cast<float64>(b) / last));
+                halves.add(item: halfOf(v: v.r));
+                halves.add(item: halfOf(v: v.g));
+                halves.add(item: halfOf(v: v.b));
+                halves.add(item: 0x3C00);
+            }
+        }
+    }
+    return halves;
+}

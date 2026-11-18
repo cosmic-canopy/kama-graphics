@@ -17,7 +17,7 @@ import {
     std::time::Instant, std::time::monotonicNow,
     gpu::Device, gpu::Queue, gpu::DeviceErrors, gpu::GpuError,
     graphics::Color, graphics::Renderer, graphics::RenderTarget, graphics::Scene, graphics::Mesh,
-    graphics::PerspectiveCamera, graphics::BoxGeometry, graphics::MeshStandardMaterial, graphics::DirectionalLight,
+    graphics::PerspectiveCamera, graphics::ToneMapping, graphics::BoxGeometry, graphics::MeshStandardMaterial, graphics::DirectionalLight,
     graphics::AmbientLight, graphics::PixelRead, graphics::PixelStatus, graphics::dfgTable,
     Verdicts, checkGolden, Lighting, storedAs, nearTo,
 };
@@ -239,6 +239,7 @@ type resource LitRun {
         Shared<PerspectiveCamera> cam = new PerspectiveCamera.make(fovRad: radians(deg: 50.0),
                                                                     aspect: cast<float32>(wide) / cast<float32>(high),
                                                                     near: 0.1, far: 100.0);
+        cam.toneMappingMut() = ToneMapping::None;
         cam.positionMut() = eye;
         cam.lookAt(target: Vec3.zero());
         cam.targetMut() = Optional::Some(value: copy t);

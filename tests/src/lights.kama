@@ -27,7 +27,7 @@ import {
     std::time::Instant, std::time::monotonicNow,
     gpu::Device, gpu::Queue, gpu::DeviceErrors, gpu::GpuError,
     graphics::Color, graphics::Renderer, graphics::RenderInfo, graphics::RendererErrors, graphics::RenderTarget,
-    graphics::Scene, graphics::Group, graphics::Mesh, graphics::PerspectiveCamera, graphics::BoxGeometry,
+    graphics::Scene, graphics::Group, graphics::Mesh, graphics::PerspectiveCamera, graphics::ToneMapping, graphics::BoxGeometry,
     graphics::DirectionalLight, graphics::AmbientLight, graphics::Material, graphics::MaterialGpu,
     graphics::NodeBuilder, graphics::MaterialSettings, graphics::ShaderFunction, graphics::Expr, graphics::ExprKind,
     graphics::FloatNode, graphics::Vec3Node, graphics::Vec4Node, graphics::param, graphics::called, graphics::constant,
@@ -661,6 +661,7 @@ type resource LightsRun {
         Shared<PerspectiveCamera> cam = new PerspectiveCamera.make(fovRad: radians(deg: 50.0),
                                                                     aspect: cast<float32>(SHOWN_WIDE) / cast<float32>(HIGH),
                                                                     near: 0.1, far: 100.0);
+        cam.toneMappingMut() = ToneMapping::None;
         cam.positionMut() = Vec3.of(x: 0.0, y: 0.0, z: 4.0);
         cam.targetMut() = Optional::Some(value: copy t);
         Shared<Scene> s = new Scene.make();
@@ -736,6 +737,7 @@ type resource LightsRun {
             Shared<PerspectiveCamera> cam = new PerspectiveCamera.make(fovRad: radians(deg: 50.0),
                                                                         aspect: cast<float32>(WIDE) / cast<float32>(HIGH),
                                                                         near: 0.1, far: 100.0);
+            cam.toneMappingMut() = ToneMapping::None;
             cam.positionMut() = Vec3.of(x: 0.0, y: 0.0, z: 4.0);
             cam.targetMut() = Optional::Some(value: copy t);
             this.renderer = Optional::Some(value: give r);

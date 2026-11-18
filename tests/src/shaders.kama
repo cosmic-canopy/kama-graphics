@@ -18,7 +18,7 @@ import {
     gpu::Device, gpu::Queue, gpu::ShaderModuleDescriptor, gpu::ShaderModule, gpu::CompilationRequest,
     gpu::CompilationStatus, gpu::CompilationMessage, gpu::DeviceErrors,
     graphics::Color, graphics::Renderer, graphics::RenderInfo, graphics::RenderTarget, graphics::Scene, graphics::Mesh,
-    graphics::PerspectiveCamera, graphics::BoxGeometry, graphics::MeshBasicMaterial, graphics::Material,
+    graphics::PerspectiveCamera, graphics::ToneMapping, graphics::BoxGeometry, graphics::MeshBasicMaterial, graphics::Material,
     graphics::MaterialGpu, graphics::MaterialSettings, graphics::NodeBuilder, graphics::RendererErrors,
     graphics::GraphicsErrorKind, graphics::modelWorldMatrix, graphics::positionLocal, graphics::vec4, graphics::constant,
     graphics::FloatNode, graphics::Vec4Node, graphics::Mat4Node, graphics::cameraViewProjectionMatrix,
@@ -130,6 +130,7 @@ type resource ShaderRun {
         Renderer r = Renderer.withDevice(device: copy this.device, queue: copy this.queue);
         Shared<RenderTarget> t = new RenderTarget.make(width: 32, height: 24);
         Shared<PerspectiveCamera> cam = new PerspectiveCamera.make(fovRad: radians(deg: 50.0), aspect: 32.0 / 24.0, near: 0.1, far: 100.0);
+        cam.toneMappingMut() = ToneMapping::None;
         cam.positionMut() = Vec3.of(x: 0.0, y: 0.0, z: 4.0);
         cam.targetMut() = Optional::Some(value: copy t);
         Shared<Scene> s = new Scene.make();
@@ -179,6 +180,7 @@ type resource ShaderRun {
         r.clearColorMut() = Color.fromHex(hex: 0x202020);
         Shared<RenderTarget> t = new RenderTarget.make(width: 32, height: 24);
         Shared<PerspectiveCamera> cam = new PerspectiveCamera.make(fovRad: radians(deg: 50.0), aspect: 32.0 / 24.0, near: 0.1, far: 100.0);
+        cam.toneMappingMut() = ToneMapping::None;
         cam.targetMut() = Optional::Some(value: copy t);
         Shared<Scene> s = new Scene.make();
         float32 size = inside ? 4.0 : 1.0;
@@ -212,6 +214,7 @@ type resource ShaderRun {
         r.clearColorMut() = Color.fromHex(hex: 0x202020);
         Shared<RenderTarget> t = new RenderTarget.make(width: 32, height: 24);
         Shared<PerspectiveCamera> cam = new PerspectiveCamera.make(fovRad: radians(deg: 50.0), aspect: 32.0 / 24.0, near: 0.1, far: 100.0);
+        cam.toneMappingMut() = ToneMapping::None;
         cam.targetMut() = Optional::Some(value: copy t);
         Shared<Scene> s = new Scene.make();
         Shared<BoxGeometry> walls = new BoxGeometry.make(width: 4.0, height: 4.0, depth: 4.0);

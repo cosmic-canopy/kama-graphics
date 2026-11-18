@@ -16,7 +16,7 @@ import {
     gpu::Device, gpu::Queue, gpu::DeviceErrors,
     image::Image,
     graphics::Color, graphics::Renderer, graphics::RenderTarget, graphics::Scene, graphics::Group, graphics::Mesh,
-    graphics::PerspectiveCamera, graphics::BoxGeometry, graphics::Material, graphics::MaterialGpu,
+    graphics::PerspectiveCamera, graphics::ToneMapping, graphics::BoxGeometry, graphics::Material, graphics::MaterialGpu,
     graphics::MaterialSettings, graphics::NodeBuilder, graphics::Euler, graphics::EulerOrder, graphics::PixelRead,
     graphics::PixelStatus, graphics::Vec3Node, graphics::Vec4Node, graphics::normalWorld, graphics::vec3, graphics::vec4,
     graphics::constant,
@@ -136,6 +136,7 @@ type resource NormalsRun {
         Shared<PerspectiveCamera> cam = new PerspectiveCamera.make(fovRad: radians(deg: 50.0),
                                                                     aspect: cast<float32>(WIDE) / cast<float32>(HIGH),
                                                                     near: 0.1, far: 100.0);
+        cam.toneMappingMut() = ToneMapping::None;
         cam.positionMut() = Vec3.of(x: 0.0, y: 0.0, z: 4.0);
         cam.targetMut() = Optional::Some(value: copy t);
         Shared<Scene> s = new Scene.make();

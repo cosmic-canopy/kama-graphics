@@ -33,7 +33,7 @@ import {
     std::collections::DynamicArray,
     Verdicts, harnessCases, colorCases, partCases, nodeCases, ShaderCase, GpuOpen, GoldenRun, RendererRun, BoxesRun,
     ShaderRun, NormalsRun, standardCases, StandardRun, dfgCases, DfgRun, lightCases, LightsRun, physicalCases, PhysicalRun,
-    LitRun, FrameRun,
+    LitRun, FrameRun, ToneMapRun,
 };
 
 // The software GPUs a leg can name: WARP, natively on Windows and as Firefox's fallback adapter, and SwiftShader, as
@@ -58,7 +58,7 @@ unsafe fn string goldenArgument() {
 
 // The stage that finishes the run: the last GPU case's step moves to it, and so does a leg whose device never opened,
 // named once so that a stage added before it cannot leave either pointing at a step that needs the device.
-comptime int32 DONE = 12;
+comptime int32 DONE = 13;
 
 type resource Check implements App {
     int32 runs = 0;
@@ -68,7 +68,7 @@ type resource Check implements App {
     int32 matched = 0;
     int32 stage = 0;     // 0 the device, 1 the scene, 2 the renderer, 3 the boxes, 4 the shaders, 5 the normals,
                          // 6 the standard material, 7 the DFG table, 8 the lights, 9 the physical model, 10 the lit,
-                         // 11 the frame
+                         // 11 the frame, 12 the tone mapping
                          // goldens, DONE
     Optional<GpuOpen> opening = Optional::None;
     Optional<Device> device = Optional::None;
@@ -85,6 +85,7 @@ type resource Check implements App {
     Optional<PhysicalRun> physicalRun = Optional::None;
     Optional<LitRun> litRun = Optional::None;
     Optional<FrameRun> frameRun = Optional::None;
+    Optional<ToneMapRun> toneRun = Optional::None;
 
     public unsafe ctor make() {
         Verdicts found = Verdicts.make();
@@ -145,6 +146,7 @@ type resource Check implements App {
         if (this.stage == 9) { this.physicalStep(); }
         if (this.stage == 10) { this.litStep(); }
         if (this.stage == 11) { this.frameStep(); }
+        if (this.stage == 12) { this.toneStep(); }
         if (this.stage == DONE) { return this.finish(); }
         return 1;
     }
@@ -328,6 +330,21 @@ type resource Check implements App {
         this.report(found: pending.verdicts());
         pending.verdicts().clear();
         if (!done) { this.frameRun = Optional::Some(value: give pending); return; }
+        this.stage = 12;
+    }
+
+    unsafe fn void toneStep() {
+        Optional<ToneMapRun> taken = replace(place: this.toneRun, with: Optional::None);
+        ToneMapRun pending = match (give taken) {
+            case Some(value: r): give r;
+            case None: ToneMapRun.make(gpu: copy this.gpu, software: this.software, device: this.deviceCopy(), queue: this.queueCopy());
+        };
+        bool done = pending.step();
+        this.report(found: pending.verdicts());
+        pending.verdicts().clear();
+        if (!done) { this.toneRun = Optional::Some(value: give pending); return; }
+        this.declared = this.declared + pending.declared();
+        this.matched = this.matched + pending.matched();
         this.queue = Optional::None;
         this.device = Optional::None;
         println(s: "gpu cases: all run");

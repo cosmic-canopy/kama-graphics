@@ -103,6 +103,7 @@ type resource FrameRun {
         Shared<PerspectiveCamera> cam = new PerspectiveCamera.make(fovRad: radians(deg: 50.0), aspect: 16.0 / 12.0, near: 0.1, far: 100.0);
         cam.targetMut() = Optional::Some(value: copy t);
         cam.exposureMut() = ev;
+        cam.toneMappingMut() = ToneMapping::None;
         Shared<Scene> s = new Scene.make();
         Shared<BoxGeometry> box = new BoxGeometry.make(width: 1.0, height: 1.0, depth: 1.0);
         Shared<Mesh> m = new Mesh.make(geometry: box, material: look);
@@ -190,8 +191,8 @@ type resource FrameRun {
         bool allNamed = ev100Sunlight() == 15.0 && ev100Overcast() == 12.0 && ev100Indoor() == 7.0 && ev100Blender() == 9.7;
         this.found.add(name: "camera: the named exposures are Bevy's: sunlight 15, overcast 12, indoors 7, Blender 9.7",
                        why: allNamed ? "" : "a named exposure differs");
-        bool untouched = cam.toneMapping() == ToneMapping::None;
-        this.found.add(name: "camera: its tone mapping is None", why: untouched ? "" : "it is another");
+        bool blender = cam.toneMapping() == ToneMapping::BlenderAgX;
+        this.found.add(name: "camera: its tone mapping is Blender's AgX", why: blender ? "" : "it is another");
     }
 
     public unsafe fn bool step() {

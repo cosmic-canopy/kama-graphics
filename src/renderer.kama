@@ -46,12 +46,12 @@ import {
     gpu::TexelCopyBufferLayout, gpu::Extent3D,
     image::Image, image::ImageError, image::PixelFormat, image::AlphaMode, image::ColorSpace,
     Color, RenderTarget, Scene, Walk, PerspectiveCamera, Geometry, BufferGeometry, Material, MaterialSettings, NodeBuilder,
-    dfgTable,
+    dfgTable, ToneMapping, outputWgsl,
 };
 export { Renderer, RenderInfo, PixelRead, PixelStatus, GraphicsErrorKind, GraphicsErrorReport, RendererErrors };
 
-// A copied row's bytes: WebGPU aligns them to 256.
-fn uint32 rowBytes(uint32 width) { return (width * 4 + 255) / 256 * 256; }
+// A copied row's bytes, `texel` bytes a texel: WebGPU aligns them to 256.
+fn uint32 rowBytes(uint32 width, uint32 texel) { return (width * texel + 255) / 256 * 256; }
 
 // A refused misuse, printed to stderr as one line, as @kama/gpu prints a device's errors (`@kama/gpu: …`); scene.kama's
 // `add` prints its own the same way. A write that fails is let go: there is nowhere left to report it.
@@ -104,8 +104,8 @@ unsafe fn void drawEach(ref RenderPass pass, const ref DynamicArray<RenderPipeli
 comptime isize KEPT = 64;
 
 // The frame block as WGSL's `Frame` lays it out: the view-projection, a mat4x4f at 0; the ambient lights' sum, a vec3f at
-// 64; the directional lights' count, a u32 at 76; the camera's position in world space, a vec3f at 80, and the struct's
-// end padded to its 16-byte alignment.
+// 64; the directional lights' count, a u32 at 76; the camera's position in world space, a vec3f at 80; and the
+// camera's exposure, an f32 at 92, what the scene's light is scaled by before it is stored.
 comptime uint64 FRAME_BYTES = 96;
 
 // What kind of misuse a renderer refused. `NoTarget`: a camera naming no render target was rendered by a renderer with
@@ -171,6 +171,10 @@ type resource Renderer {
     DynamicArray<bool> flipped;       // ...and whether they draw mirrored meshes, whose front faces wind clockwise
     DynamicArray<RenderPipeline> pipelines;
     DynamicArray<RenderPipeline> prepasses;     // ...and each one's depth-only twin, for the depth prepass
+    BindGroupLayout outputLayout;               // the output pass's one binding: the scene's 16-bit float texture
+    PipelineLayout outputPipelineLayout;
+    DynamicArray<ToneMapping> outputCurves;     // the output pipelines made, by the tone mapping they apply
+    DynamicArray<RenderPipeline> outputs;
     RenderInfo last = RenderInfo.of(calls: 0, triangles: 0, objects: 0, matrices: 0);
     bool printing = true;                       // printErrors
     DynamicArray<GraphicsErrorReport> errors;   // the misuses refused since the last takeErrors, at most KEPT
@@ -234,6 +238,16 @@ type resource Renderer {
         this.flipped = DynamicArray.empty();
         this.pipelines = DynamicArray.empty();
         this.prepasses = DynamicArray.empty();
+        BindGroupLayoutDescriptor o = BindGroupLayoutDescriptor.make();
+        o.entry(binding: 0, visibility: ShaderStage::Fragment, layout: BindingLayout::Texture(layout: TextureBindingLayout.make()));
+        o.label(text: "the output pass's scene");
+        this.outputLayout = device.createBindGroupLayout(descriptor: give o);
+        PipelineLayoutDescriptor outputGroups = PipelineLayoutDescriptor.make();
+        outputGroups.group(layout: copy this.outputLayout);
+        outputGroups.label(text: "the output pass's group");
+        this.outputPipelineLayout = device.createPipelineLayout(descriptor: give outputGroups);
+        this.outputCurves = DynamicArray.empty();
+        this.outputs = DynamicArray.empty();
         this.errors = DynamicArray.empty();
         this.device = give device;
         this.queue = give queue;
@@ -276,6 +290,33 @@ type resource Renderer {
         }
     }
 
+    // The clear colour as a render's scene holds it: linear, its light scaled by the camera's exposure as every material's
+    // is, so the output pass tone maps it with the scene, as three.js r187 tone maps its cleared frame target.
+    fn GpuColor clearingExposed(float32 scale) {
+        float64 s = cast<float64>(scale);
+        return GpuColor.of(r: cast<float64>(this.clearTo.linearR()) * s, g: cast<float64>(this.clearTo.linearG()) * s,
+                           b: cast<float64>(this.clearTo.linearB()) * s, a: cast<float64>(this.alpha));
+    }
+
+    // The output pass's pipeline for `curve`, made the first time.
+    unsafe fn isize outputFor(ToneMapping curve) {
+        for (isize i = 0; i < this.outputCurves.length(); i = i + 1) {
+            if (this.outputCurves[i] == curve) { return i; }
+        }
+        ShaderModuleDescriptor described = ShaderModuleDescriptor.make(wgsl: outputWgsl(curve: curve));
+        described.label(text: "the output pass");
+        ShaderModule shader = this.device.createShaderModule(descriptor: give described);
+        FragmentState fragment = FragmentState.make(module: copy shader, entryPoint: "fs");
+        fragment.target(state: ColorTargetState.make(format: TextureFormat::RGBA8UnormSrgb));
+        RenderPipelineDescriptor pipeline = RenderPipelineDescriptor.make(layout: Layout::Explicit(layout: copy this.outputPipelineLayout),
+                                                                          vertex: VertexState.make(module: give shader, entryPoint: "vs"));
+        pipeline.fragment(state: give fragment);
+        pipeline.label(text: "the output pass");
+        this.outputCurves.add(item: curve);
+        this.outputs.add(item: this.device.createRenderPipeline(descriptor: give pipeline));
+        return this.outputs.length() - 1;
+    }
+
     fn GpuColor clearing() {
         return GpuColor.of(r: cast<float64>(this.clearTo.linearR()), g: cast<float64>(this.clearTo.linearG()),
                            b: cast<float64>(this.clearTo.linearB()), a: cast<float64>(this.alpha));
@@ -306,7 +347,8 @@ type resource Renderer {
         described.label(text: "a material's shader");
         ShaderModule shader = this.device.createShaderModule(descriptor: give described);
         FragmentState fragment = FragmentState.make(module: copy shader, entryPoint: "fs");
-        fragment.target(state: ColorTargetState.make(format: TextureFormat::RGBA8UnormSrgb));
+        // every scene is drawn in linear HDR, into a 16-bit float texture (area 3; part 4)
+        fragment.target(state: ColorTargetState.make(format: TextureFormat::RGBA16Float));
         RenderPipelineDescriptor pipeline = RenderPipelineDescriptor.make(layout: Layout::Explicit(layout: copy this.layout),
                                                                           vertex: meshVertex(shader: copy shader));
         pipeline.fragment(state: give fragment);
@@ -373,6 +415,8 @@ type resource Renderer {
         Shared<RenderTarget> target = match (give named) { case Some(value: t): give t; case None: { panic(msg: "checked above"); } };
         Texture colour = target.textureOn(device: ref this.device);
         Texture depth = target.depthOn(device: ref this.device);
+        Texture sceneTexture = target.sceneOn(device: ref this.device);
+        float32 exposure = camera.exposureScale();
 
         DynamicArray<uint8> frameBytes = DynamicArray.empty();
         Mat4 vp = camera.viewProjection();
@@ -394,7 +438,8 @@ type resource Renderer {
         putFloat(into: ref frameBytes, value: seen.get(c: 3, r: 0));
         putFloat(into: ref frameBytes, value: seen.get(c: 3, r: 1));
         putFloat(into: ref frameBytes, value: seen.get(c: 3, r: 2));
-        putFloat(into: ref frameBytes, value: 0.0);
+        // the camera's exposure, what every material's light is scaled by before it is stored (part 4, question 3)
+        putFloat(into: ref frameBytes, value: exposure);
         this.queue.writeBuffer(buffer: this.frame, offset: 0, data: frameBytes.view());
         Buffer records = scene.recordsOn(device: ref this.device, queue: ref this.queue);
         Buffer lights = scene.lightsOn(device: ref this.device, queue: ref this.queue);
@@ -459,10 +504,11 @@ type resource Renderer {
         drawEach(pass: ref dp, pipelines: this.prepasses, chosen: chosen, looks: looks, positions: positionsOf,
                  normals: normalsOf, indices: indicesOf, formats: formats, counts: counts, slots: drawn);
         give dp.end();
-        // the shaded pass: the colour cleared, the prepass's depth read and never written
+        // the shaded pass, into the scene's 16-bit float texture: cleared to the clear colour, exposed, then each mesh
+        // shaded where the prepass's depth is its own, that depth read and never written
         RenderPassDescriptor pass = RenderPassDescriptor.make();
-        pass.color(attachment: ColorAttachment.clearing(view: colour.createView(descriptor: TextureViewDescriptor.make()),
-                                                        color: this.clearing()));
+        pass.color(attachment: ColorAttachment.clearing(view: sceneTexture.createView(descriptor: TextureViewDescriptor.make()),
+                                                        color: this.clearingExposed(scale: exposure)));
         DepthStencilAttachment tested = DepthStencilAttachment.make(view: depth.createView(descriptor: TextureViewDescriptor.make()));
         tested.depth(access: DepthAccess::ReadOnly);
         pass.depthStencil(attachment: give tested);
@@ -472,9 +518,28 @@ type resource Renderer {
         drawEach(pass: ref rp, pipelines: this.pipelines, chosen: chosen, looks: looks, positions: positionsOf,
                  normals: normalsOf, indices: indicesOf, formats: formats, counts: counts, slots: drawn);
         give rp.end();
+        // the output pass, into an 8-bit target: the scene through the camera's tone mapping. A 16-bit float target holds
+        // the scene itself, so it has none.
+        if (!target.holdsScene()) {
+            isize o = this.outputFor(curve: camera.toneMapping());
+            BindGroupDescriptor sceneRead = BindGroupDescriptor.make(layout: copy this.outputLayout);
+            sceneRead.entry(binding: 0, resource: BindingResource::Texture(view: sceneTexture.createView(descriptor: TextureViewDescriptor.make())));
+            sceneRead.label(text: "the output pass's scene");
+            BindGroup readGroup = this.device.createBindGroup(descriptor: give sceneRead);
+            RenderPassDescriptor outputPass = RenderPassDescriptor.make();
+            outputPass.color(attachment: ColorAttachment.clearing(view: colour.createView(descriptor: TextureViewDescriptor.make()),
+                                                           color: GpuColor.of(r: 0.0, g: 0.0, b: 0.0, a: 0.0)));
+            outputPass.label(text: "the output pass");
+            RenderPass op = encoder.beginRenderPass(descriptor: give outputPass);
+            op.setPipeline(pipeline: this.outputs[o]);
+            op.setBindGroup(index: 0, group: readGroup);
+            op.draw(vertexCount: 3, instanceCount: 1, firstVertex: 0, firstInstance: 0);
+            give op.end();
+        }
         CommandBuffer commands = give encoder.finish();
         this.queue.submit(commands: give commands);
-        // every draw the GPU was asked for, both passes', as three.js's `renderer.info` counts a shadow pass's
+        // every draw of the scene's meshes the GPU was asked for, both passes', as three.js's `renderer.info` counts a
+        // shadow pass's; the frame's own pass, the output, is not the scene's
         int32 calls = cast<int32>(chosen.length()) * 2;
         this.last = RenderInfo.of(calls: calls, triangles: triangles * 2, objects: objects, matrices: made);
     }
@@ -485,7 +550,8 @@ type resource Renderer {
         Texture texture = target.textureOn(device: ref this.device);
         uint32 width = target.width();
         uint32 height = target.height();
-        uint32 row = rowBytes(width: width);
+        bool wide = target.holdsScene();       // 16-bit float: 8 bytes a texel
+        uint32 row = rowBytes(width: width, texel: wide ? 8 : 4);
         uint64 size = cast<uint64>(row) * cast<uint64>(height);
         BufferDescriptor described = BufferDescriptor.make(size: size, usage: BufferUsage::MapRead | BufferUsage::CopyDst);
         described.label(text: "a render target read back");
@@ -495,7 +561,8 @@ type resource Renderer {
         CommandBuffer commands = give encoder.finish();
         this.queue.submit(commands: give commands);
         BufferRead read = buffer.mapRead(offset: 0, size: size);
-        return PixelRead.start(device: copy this.device, buffer: give buffer, read: give read, width: width, height: height, row: row);
+        return PixelRead.start(device: copy this.device, buffer: give buffer, read: give read, width: width, height: height, row: row,
+                               wide: wide);
     }
 }
 
@@ -511,17 +578,19 @@ type resource PixelRead {
     uint32 w;
     uint32 h;
     uint32 row;
+    bool float16;      // a 16-bit float target's texels: the linear scene
     bool handed = false;
 
     friend Renderer::readRenderTargetPixels[start];
 
-    ctor start(Device device, Buffer buffer, BufferRead read, uint32 width, uint32 height, uint32 row) {
+    ctor start(Device device, Buffer buffer, BufferRead read, uint32 width, uint32 height, uint32 row, bool wide) {
         this.device = give device;
         this.buffer = give buffer;
         this.read = give read;
         this.w = width;
         this.h = height;
         this.row = row;
+        this.float16 = wide;
     }
 
     public unsafe fn PixelStatus poll() {
@@ -538,6 +607,23 @@ type resource PixelRead {
         isize width = cast<isize>(this.w);
         isize height = cast<isize>(this.h);
         isize stride = cast<isize>(this.row);
+        if (this.float16) {
+            // the linear scene: four half floats a texel, little-endian, as WebGPU stores them
+            FixedArray<uint16> halves = FixedArray.make(size: width * height * 4);
+            for (isize y = 0; y < height; y = y + 1) {
+                for (isize x = 0; x < width * 4; x = x + 1) {
+                    isize at = y * stride + x * 2;
+                    halves[y * width * 4 + x] = cast<uint16>(mapped[at]) | (cast<uint16>(mapped[at + 1]) << 8);
+                }
+            }
+            Result<Image, ImageError> linear = Image.fromSamples16(width: width, height: height, format: PixelFormat::Rgba16Float,
+                                                                   alpha: AlphaMode::Straight, colorSpace: ColorSpace.linearSrgb(),
+                                                                   samples: give halves);
+            return match (give linear) {
+                case Ok(value: img): PixelStatus::Ready(image: give img);
+                case Err(error: e): PixelStatus::Failed(error: GpuError::Refused(words: "the read's image: " + e.message()));
+            };
+        }
         FixedArray<uint8> samples = FixedArray.make(size: width * height * 4);
         for (isize y = 0; y < height; y = y + 1) {
             for (isize x = 0; x < width * 4; x = x + 1) { samples[y * width * 4 + x] = mapped[y * stride + x]; }

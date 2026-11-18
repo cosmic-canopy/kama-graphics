@@ -67,7 +67,8 @@ a resource the program owns.
 - **The clear colour is a property pair,** `clearColor()` and `clearColorMut()`, black by default. Its alpha is
   `clearAlpha()` and `clearAlphaMut()`, 1 by default (three.js's defaults). The alpha is never sRGB-encoded: 0.4 is 102.
 - **`clear(target:)` fills a target with the clear colour.** On the default target it reads back as written: a target
-  cleared to `#336699` reads `0x33 0x66 0x99`.
+  cleared to `#336699` reads `0x33 0x66 0x99`. A 16-bit float target holds it linear, as it is: no camera, so no
+  exposure.
 - **`render(scene:, camera:)` draws the scene as the camera sees it into the target the camera names** (part 1's
   question 4; part 2):
   - the scene's walk makes the world matrices that changed and writes its meshes' records and its lights' slots (§ The
@@ -76,8 +77,11 @@ a resource the program owns.
     the depth is cleared to 0, since depth is reversed (near is 1, far is 0, GFX-1's question 1), and each mesh keeps its
     nearest depth, the greater. Each material's pipeline has a depth-only twin, its own vertex stage with no fragment
     stage, culling the same faces;
-  - **then the shaded pass clears the colour to the clear colour and shades each mesh where its depth is what the
-    prepass kept,** the depth tested Equal and read only, so each texel is shaded once, as Godot's Forward+. The clip
+  - **then the shaded pass draws the scene in linear HDR, into a 16-bit float texture** (area 3; part 4): cleared to the
+    clear colour, linear and scaled by the camera's exposure as every material's light is (§ The camera), its alpha as
+    set, and each mesh shaded where its depth is what the prepass kept, the depth tested Equal and read only, so each
+    texel is shaded once, as Godot's Forward+. A 16-bit float target is that texture; an 8-bit target has one of its
+    own, made beside its colour. The clip
     position is `@invariant` (§ The compiler), so both passes compute it bit for bit: naga and Tint write it as HLSL's
     `precise` and SPIR-V's `Invariant`, and a prepass and a shaded pass shade exactly the texels one pass does on every
     leg (kyoten's part 4 check 1);
@@ -87,12 +91,16 @@ a resource the program owns.
   - a mirrored mesh, whose world matrix's 3x3 has a negative determinant, is drawn with its winding flipped, as three.js
     r187 flips it (`WebGPUPipelineUtils.js`), so its front faces stay its front. Its pipelines are its material's
     other ones;
+  - **then, into an 8-bit target, the output pass:** one full-screen triangle reading the scene's texture at each texel
+    and writing it through the camera's tone mapping (§ The camera). The target's format clamps each channel to 0 to 1
+    and encodes sRGB as it stores, so the pass writes linear light, its alpha the scene's. A 16-bit float target holds
+    the scene itself, so it has no output pass;
   - sorting draws, and drawing a geometry and material in common as one instanced draw, come with automatic instancing
     (GFX-2).
 - **`info()` says what the last render did,** as three.js's `renderer.info`: `calls` and `triangles`, every draw of the
   scene's meshes the GPU was asked for, both passes' (a mesh is two calls, as three.js counts a shadow pass's draws),
   `objects` (the meshes the scene holds a record for) and `matrices` (the world matrices its walk made: 0 when nothing in
-  the scene changed).
+  the scene changed). The output pass is the frame's, not the scene's, so it is not counted.
 - **A renderer makes three.js r187's DFG table once** (part 3's third part, question 2): `dfgTable()`, 16 x 16 texels of
   two half floats, a surface's specular scale and bias, written as they are into an RG16Float texture and read through a
   linear sampler that clamps to the edge, as r187's. Each frame binds them in group 0 (§ The compiler). The table is
@@ -131,11 +139,17 @@ Decided, GFX-1's part 2, question 4), as `@kama/gpu` reports every misuse of Web
 
 ## Render targets
 
-- **`new RenderTarget.make(width:, height:)` is a target that size, 8-bit sRGB,** which holds what the window would
-  show (part 1's question 5). A 16-bit float target, which holds the linear HDR scene, comes with the HDR frame.
+- **A target's format decides what it holds** (part 1's question 5), `TargetFormat`, named as WebGPU names the texture
+  formats:
+  - **`new RenderTarget.make(width:, height:)` is a target that size, `Rgba8UnormSrgb`,** which holds what the window
+    would show: the scene tone mapped, clamped and sRGB-encoded;
+  - **`new RenderTarget.withFormat(width:, height:, format: TargetFormat::Rgba16Float)`** holds the linear HDR scene,
+    exposed by its camera and unclamped, for a program that processes it further.
+
+  `format()` says which, and `holdsScene()` whether it is the scene itself.
 - **It is shared:** every holder of its `Shared` names the same target, and the last drop frees it.
-- **It is made with no device.** A renderer makes its textures the first time it uses it, on its own device: the colour
-  and a 32-bit float depth. A target used by renderers on two devices has textures on each, as three.js keeps one per
+- **It is made with no device.** A renderer makes its textures the first time it uses it, on its own device: the colour,
+  a 32-bit float depth and, for an 8-bit target, the 16-bit float texture its scene is drawn into. A target used by renderers on two devices has textures on each, as three.js keeps one per
   renderer. A target never cleared reads back as WebGPU makes a texture, every byte 0.
 
 ## The scene graph
@@ -345,7 +359,7 @@ the material's nodes: `vertexPosition(node:)` and `fragmentColor(node:)`, as TSL
 
 - **group 0, what the renderer gives:**
   - `frame`, at binding 0, read by both stages: the view-projection, `ambient` (the ambient lights' sum),
-    `directionalCount` and `cameraPosition`, 96 bytes;
+    `directionalCount`, `cameraPosition` and `exposure`, what the scene's light is scaled by, 96 bytes;
   - `objects`, at binding 1: each mesh's `Object`, its `world` and `normal` matrices;
   - to a material that reads it, the DFG table, `dfgTable` (a `texture_2d<f32>` at binding 2), and its sampler,
     `dfgTable_sampler` (binding 3), which a sample is written with: `textureSample(dfgTable, dfgTable_sampler, uv)`;
@@ -366,7 +380,11 @@ the material's nodes: `vertexPosition(node:)` and `fragmentColor(node:)`, as TSL
 - **the two entry points,** `vs` and `fs`:
   - a material that sets no vertex position has every mesh's: the view-projection, times the world matrix, times the
     vertex;
-  - a material that sets no colour draws white.
+  - a material that sets no colour draws white;
+  - **the fragment stage's output is kept at 0 or above and its light exposed:** `let shaded = max(colour, vec4f(0.0));`
+    as three.js r187's (`vec4( outgoingLight, diffuseColor.a ).max( 0 )`, "force unsigned floats"), which the 16-bit
+    float scene would otherwise keep, then `return vec4f(shaded.rgb * frame.exposure, shaded.a);`. `shaded` is a name
+    the compiler writes, so a setting or a function may not take it.
 
 **A node used more than once in a function or a stage is written once, as a `let`** (`n0`, `n1`, …), so the WGSL reads
 as written by hand. A number, a name, a parameter, an attribute and a varying read in the fragment stage are written where
@@ -414,6 +432,19 @@ WGSL's reserved words beyond its keywords are refused by the GPU's own compile, 
   aspect:, near:)` sees to infinity: its far is +infinity, and its projection the limit.
 - **It names the target it draws into,** `target()`/`targetMut()`, an `Optional<Shared<RenderTarget>>`. It looks down
   its -Z, and its view is its world matrix inverted with its scale taken out, as three.js's.
+- **Its exposure is in EV100,** `exposure()`/`exposureMut()` (kyoten's rendering.md § Decided, part 4's question 3), as
+  Filament, Bevy, Unreal and Unity HDRP set it: the scene's light is scaled by 2^−EV100 / 1.2.
+  - **The default is `ev100For(exposure: 1.0)`, three.js's exposure of 1** (−log2 1.2, about −0.263), so a default
+    light of intensity 1 looks as it does there. `ev100For(exposure:)` turns three.js's `toneMappingExposure` into EV100.
+  - Named values, Bevy's: `ev100Sunlight()` 15, `ev100Overcast()` 12, `ev100Indoor()` 7 and `ev100Blender()` 9.7, Bevy's
+    calibration to Blender's implicit exposure.
+  - **The light is scaled before it is stored** (pre-exposure, as Filament, Bevy and Unreal): every material's output is
+    scaled in its shader (§ The compiler), and so is the clear colour, so sunlight's 100,000 lux at EV100 15 stays well
+    within a half float. It is the camera's, whatever its tone mapping, where three.js's `toneMappingExposure` is applied
+    by the tone mapping alone.
+- **Its tone mapping is its own,** `toneMapping()`/`toneMappingMut()` (the owner's (A), 2026-11-17), so two views of one
+  scene can look different with nothing on the renderer to set and reset. `ToneMapping::None` writes the scene as it is,
+  each channel clamped, as three.js's `NoToneMapping`. A camera drawing into a 16-bit float target ignores it.
 
 ## Reading a target back
 
@@ -421,7 +452,8 @@ WGSL's reserved words beyond its keywords are refused by the GPU's own compile, 
   promises, so the program polls it, as `@kama/gpu`'s requests are polled. `poll()` moves the device on itself, so a
   program never polls the device.
 - **`poll()` says `PixelStatus::Pending`, `Ready(image:)` or `Failed(error:)`.**
-  - The image is the target's size, `Rgba8Unorm`, sRGB, straight alpha, top row first.
+  - The image is the target's size, straight alpha, top row first: `Rgba8Unorm` in sRGB from an 8-bit target, and
+    `Rgba16Float` in linear sRGB from a 16-bit float target, its texels the scene's half floats as they are.
   - A read polled again after its image was handed over says `Failed(GpuError::Taken)`.
   - A read the device could not finish says the device's words.
 - **Dropping a read while it is pending is safe,** and leaves the next read whole.
@@ -592,6 +624,19 @@ It is 266 cases on each leg that names a software GPU, and 258 in Edge, whose le
   step of r187's formulas worked in float64 along the exact ray through that texel (`physical.kama`'s reference, at any
   point, normal and eye). WARP draws the same bytes natively and in Firefox. SwiftShader's frames differ from WARP's in
   4, 32 and 380 texels. No WebGPU error.
+- **Part 4's step 2, the HDR frame, on each leg's GPU** (`tests/src/frame.kama`):
+  - a 16-bit float target read back as a 16 x 12 `Rgba16Float` image in linear sRGB;
+  - at EV100 1, a `#336699` box stored as its linear colour × 2^−1 / 1.2, and the clear colour exposed with it, its
+    alpha as cleared, each within a half float's step of the float64 value;
+  - `max(0)`: a material's output of (−0.5, 0.25, −2) stored as (0, 0.25, 0);
+  - an sRGB red of 4 stored unclamped, as its linear 25.3;
+  - an 8-bit target showing white at EV100 1 as sRGB(2^−1 / 1.2), its clear alpha of 0.4 kept through the output pass
+    as 102;
+  - `clear(target:)` filling a float target with the linear clear colour;
+  - and with no GPU, the camera's default exposure and tone mapping, `ev100For` and the named exposures.
+
+  The lit goldens were written again for it: storing the scene as half floats before the 8-bit encode moves 2 to 44
+  texels of each by one step, never more.
 - **Part 2's golden holds part 3's compiler:** `boxes/<gpu>.png` is matched byte for byte with `MeshBasicMaterial`'s
   nodes, as it was with its WGSL by hand.
 - **Printed from outside the program:** the gate counts each leg's printed lines: one for the render refused by the

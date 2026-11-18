@@ -121,3 +121,10 @@ package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - GFX-1's part 4, step 1: the depth prepass. Every mesh is drawn into depth first by its material's depth-only pipeline,
   then shaded where its depth equals the prepass's, so each texel is shaded once; the clip position is `@invariant`.
   **Changed:** `info()`'s `calls` and `triangles` count both passes' draws, as three.js counts a shadow pass's.
+- GFX-1's part 4, step 2: the HDR frame. The scene is drawn in linear HDR into a 16-bit float texture, every material's
+  output kept at 0 or above and scaled by the camera's exposure, and an 8-bit target is written from it by an output
+  pass. `RenderTarget.withFormat(width:, height:, format:)` and `TargetFormat`; a `Rgba16Float` target holds the linear
+  scene and reads back as an `Rgba16Float` image. `PerspectiveCamera`'s `exposure()`/`exposureMut()` in EV100, its
+  `toneMapping()`/`toneMappingMut()` (`ToneMapping::None` so far), and `ev100For`, `ev100Sunlight`, `ev100Overcast`,
+  `ev100Indoor` and `ev100Blender`. **Changed:** the frame block's last field is the exposure, and `shaded` is a name the
+  compiler writes.

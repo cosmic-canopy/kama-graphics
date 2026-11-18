@@ -294,6 +294,28 @@ natively. The library's own `examples/cube` is the same scene without an engine.
   a box outside it is new, and alone catches a prepass that culls nothing. The 13th, the shaded pass testing GreaterEqual,
   is equivalent: after a full prepass no fragment is nearer than the depth kept, so the two tests take the same
   fragments (Bevy keeps GreaterEqual).
+- **Built, part 4's step 2, the HDR frame** (2026-11-17, [SPEC.md](SPEC.md) § The renderer, § Render targets, § The
+  camera, § Reading a target back and § The compiler):
+  - the scene is drawn in linear HDR into a 16-bit float texture, an 8-bit target's own or a 16-bit float target itself,
+    and an output pass writes an 8-bit target from it through the camera's tone mapping (`None` so far);
+  - exposure on each camera in EV100, its default three.js's exposure of 1, with Bevy's named values; the light scaled
+    before it is stored, in every material's output and in the clear colour;
+  - `max(0)` on every material's output, as three.js r187's;
+  - `TargetFormat` and `RenderTarget.withFormat`, a float target read back as an `Rgba16Float` image.
+
+  **Settled, and reported:**
+  - the scene is pre-exposed, as Filament, Bevy and Unreal: the exposure is the camera's whatever its tone mapping,
+    where three.js's `toneMappingExposure` is applied by its tone mapping alone, and the clear colour is exposed with the
+    scene, as three.js r187 tone maps its cleared frame target;
+  - the named exposures and `ev100For(exposure:)` are functions, as std names its constants (`pi()`);
+  - the output pass is the frame's, so `info()` does not count it.
+
+  Its tests were written beside it and held red by mutation: 13 of 13 caught (kyoten's `.scratch/s34/kg-tools/list2.py`),
+  among them the exposure never written to the frame block, the clear colour not exposed, the output's alpha made
+  opaque, and a float target read as bytes, which panicked the tests reading its halves; the reader now refuses a short
+  image by name. The three lit goldens were written again: half floats move 2 to 44 texels of each by one step, never
+  more, WARP's two legs agreeing. 279 cases natively, in Firefox and in Chrome for Testing, 271 in Edge, each debug and
+  release.
 - **Done:**
   - `examples/cube` draws from one source on both legs;
   - its golden passes on a software GPU on each leg CI has, and perceptually on the reference machines present;

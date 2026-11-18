@@ -219,7 +219,7 @@ type resource ShowLights implements Material {
 
 // What every material is given in group 0, and the lights beside it once it reads them.
 fn string groupZero() {
-    return "struct Frame { viewProjection: mat4x4f, ambient: vec3f, directionalCount: u32, cameraPosition: vec3f };\n"
+    return "struct Frame { viewProjection: mat4x4f, ambient: vec3f, directionalCount: u32, cameraPosition: vec3f, exposure: f32 };\n"
         + "@group(0) @binding(0) var<uniform> frame: Frame;\n"
         + "struct Object { world: mat4x4f, normal: mat3x3f };\n"
         + "@group(0) @binding(1) var<storage, read> objects: array<Object>;\n";
@@ -294,7 +294,7 @@ unsafe fn void lightCases(ref Verdicts found) {
             + "    n1 = n1 + n4;\n"
             + "    n2 = n2 + (n4 * 0.25);\n"
             + "  }\n"
-            + "  return vec4f(((n1 + frame.ambient) + (n2 + vec3f(0.0, 0.0, 0.0))), 1.0);\n}\n";
+            + "  let shaded = max(vec4f(((n1 + frame.ambient) + (n2 + vec3f(0.0, 0.0, 0.0))), 1.0), vec4f(0.0));\n  return vec4f(shaded.rgb * frame.exposure, shaded.a);\n}\n";
         DynamicArray<string> problems = b.problems();
         isize np = problems.length();
         found.add(name: "lit(): a program's own lighting model's direct() is written once, inside one loop over the scene's directional lights, its diffuse and specular parts each summed, what depends on no light a let before the loop, and what depends on the light and is read twice a let inside it",
@@ -325,7 +325,7 @@ unsafe fn void lightCases(ref Verdicts found) {
             + "  v.v0 = ((n2 + frame.ambient) + (n3 + vec3f(0.0, 0.0, 0.0)));\n"
             + "  return v;\n}\n"
             + "@fragment fn fs(v: Varyings) -> @location(0) vec4f {\n"
-            + "  return vec4f(v.v0, 1.0);\n}\n";
+            + "  let shaded = max(vec4f(v.v0, 1.0), vec4f(0.0));\n  return vec4f(shaded.rgb * frame.exposure, shaded.a);\n}\n";
         DynamicArray<string> problems = b.problems();
         isize np = problems.length();
         found.add(name: "lit(): a model lit in the vertex stage, through varying(), is written in the vertex stage's own loop",

@@ -169,7 +169,7 @@ fn bool compilerName(const ref string name) {
     return name == "vs" || name == "fs" || name == "v" || name == "object" || name == "position" || name == "frame"
         || name == "objects" || name == "material" || name == "Frame" || name == "Material" || name == "Varyings"
         || name == "normal" || name == "Object" || name == "dfgTable" || name == "dfgTable_sampler"
-        || name == "DirectionalLight" || name == "directionalLights";
+        || name == "DirectionalLight" || name == "directionalLights" || name == "shaded";
 }
 fn bool isLetName(const ref string name) {
     if (name.length() < 2 || name[0] != 110) { return false; }   // 'n'
@@ -209,11 +209,12 @@ fn string nameProblem(const ref string name, const ref string what) {
 }
 
 // What the renderer gives every material's WGSL in group 0: the frame (the camera's view and projection, the ambient
-// lights' sum, how many directional lights there are, and the camera's position in world space) and the object records, a world matrix and a normal matrix
-// each, indexed by the draw's instance; and, to a material that reads it, the DFG table and its sampler, and the scene's
-// directional lights, each its direction and its colour × intensity.
+// lights' sum, how many directional lights there are, the camera's position in world space, and its exposure, what the
+// scene's light is scaled by) and the object records, a world matrix and a normal matrix each, indexed by the draw's
+// instance; and, to a material that reads it, the DFG table and its sampler, and the scene's directional lights, each
+// its direction and its colour × intensity.
 fn string prelude(bool dfgRead, bool lightsRead) {
-    string written = "struct Frame { viewProjection: mat4x4f, ambient: vec3f, directionalCount: u32, cameraPosition: vec3f };\n"
+    string written = "struct Frame { viewProjection: mat4x4f, ambient: vec3f, directionalCount: u32, cameraPosition: vec3f, exposure: f32 };\n"
         + "@group(0) @binding(0) var<uniform> frame: Frame;\n"
         + "struct Object { world: mat4x4f, normal: mat3x3f };\n"
         + "@group(0) @binding(1) var<storage, read> objects: array<Object>;\n";
@@ -708,8 +709,13 @@ type resource NodeBuilder {
         written = written + "@vertex fn vs(@builtin(instance_index) object: u32, @location(0) position: vec3f, @location(1) normal: vec3f) -> Varyings {\n"
             + "  var v: Varyings;\n" + vertLets + vertLoop + vertRest + "  v.clip = " + vertOut + ";\n" + varyingWrites
             + "  return v;\n}\n";
-        written = written + "@fragment fn fs(v: Varyings) -> @location(0) vec4f {\n" + fragLets + fragLoop + fragRest + "  return "
-            + fragOut + ";\n}\n";
+        // every output kept at 0 or above, as three.js r187's (`vec4( outgoingLight, diffuseColor.a ).max( 0 )`, "force
+        // unsigned floats"), which the 16-bit float scene would otherwise keep; then the light scaled by the camera's
+        // exposure before it is stored, as Filament, Bevy and Unreal pre-expose, so sunlight's 100,000 lux stays within a
+        // half float (kyoten's rendering.md § Decided, part 4)
+        written = written + "@fragment fn fs(v: Varyings) -> @location(0) vec4f {\n" + fragLets + fragLoop + fragRest
+            + "  let shaded = max(" + fragOut + ", vec4f(0.0));\n"
+            + "  return vec4f(shaded.rgb * frame.exposure, shaded.a);\n}\n";
         return written;
     }
 }

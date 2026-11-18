@@ -26,7 +26,7 @@ import {
     graphics::ShaderFunction, graphics::param, graphics::called,
     Verdicts, encoded,
 };
-export { dfgCases, DfgRun, sampledAt };
+export { dfgCases, DfgRun, sampledAt, halfValue };
 
 comptime int64 SETTLE_MS = 10000;
 comptime uint32 SIDE = 64;
@@ -127,7 +127,7 @@ fn string onlyProblem(const ref DynamicArray<string> problems, const ref string 
 
 // The WGSL every material is given in group 0, and the table a material that reads it is given beside it.
 fn string groupZero() {
-    return "struct Frame { viewProjection: mat4x4f, ambient: vec3f, directionalCount: u32, cameraPosition: vec3f };\n"
+    return "struct Frame { viewProjection: mat4x4f, ambient: vec3f, directionalCount: u32, cameraPosition: vec3f, exposure: f32 };\n"
         + "@group(0) @binding(0) var<uniform> frame: Frame;\n"
         + "struct Object { world: mat4x4f, normal: mat3x3f };\n"
         + "@group(0) @binding(1) var<storage, read> objects: array<Object>;\n";
@@ -164,7 +164,7 @@ unsafe fn void dfgCases(ref Verdicts found) {
             + "  return v;\n}\n"
             + "@fragment fn fs(v: Varyings) -> @location(0) vec4f {\n"
             + "  let n0 = DFGLUT(material.roughness, material.dotNV);\n"
-            + "  return vec4f(vec3f(n0.x, n0.y, 0.0), 1.0);\n}\n";
+            + "  let shaded = max(vec4f(vec3f(n0.x, n0.y, 0.0), 1.0), vec4f(0.0));\n  return vec4f(shaded.rgb * frame.exposure, shaded.a);\n}\n";
         DynamicArray<string> problems = b.problems();
         isize np = problems.length();
         found.add(name: "dfg() compiles to three.js r187's DFGLUT, sampling the table group 0 binds at (roughness, dotNV), written once and read through one let",

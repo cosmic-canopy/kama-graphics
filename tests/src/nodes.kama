@@ -17,7 +17,7 @@ export { nodeCases, ShaderCase, nodeShaders };
 
 // What the renderer gives every material in group 0.
 fn string prelude() {
-    return "struct Frame { viewProjection: mat4x4f, ambient: vec3f, directionalCount: u32, cameraPosition: vec3f };\n"
+    return "struct Frame { viewProjection: mat4x4f, ambient: vec3f, directionalCount: u32, cameraPosition: vec3f, exposure: f32 };\n"
         + "@group(0) @binding(0) var<uniform> frame: Frame;\n"
         + "struct Object { world: mat4x4f, normal: mat3x3f };\n"
         + "@group(0) @binding(1) var<storage, read> objects: array<Object>;\n";
@@ -256,7 +256,7 @@ unsafe fn void compileCases(ref Verdicts found, ref DynamicArray<ShaderCase> sha
         m.shade(builder: ref b);
         string got = b.wgsl();
         string want = prelude() + "struct Material {\n  color: vec3f,\n};\n@group(1) @binding(0) var<uniform> material: Material;\n"
-            + standardVertex() + fragment(body: "  return vec4f(material.color, 1.0);\n");
+            + standardVertex() + fragment(body: "  let shaded = max(vec4f(material.color, 1.0), vec4f(0.0));\n  return vec4f(shaded.rgb * frame.exposure, shaded.a);\n");
         found.add(name: "MeshBasicMaterial: its nodes compile to its colour, opaque, on every mesh's vertex stage",
                   why: sameText(got: got, want: want));
         DynamicArray<string> problems = b.problems();
@@ -279,7 +279,7 @@ unsafe fn void compileCases(ref Verdicts found, ref DynamicArray<ShaderCase> sha
     {
         NodeBuilder b = NodeBuilder.make(settings: MaterialSettings.make());
         string got = b.wgsl();
-        string want = prelude() + standardVertex() + fragment(body: "  return vec4f(vec3f(1.0, 1.0, 1.0), 1.0);\n");
+        string want = prelude() + standardVertex() + fragment(body: "  let shaded = max(vec4f(vec3f(1.0, 1.0, 1.0), 1.0), vec4f(0.0));\n  return vec4f(shaded.rgb * frame.exposure, shaded.a);\n");
         found.add(name: "NodeBuilder: a material that sets no node draws white, with no settings block",
                   why: sameText(got: got, want: want));
         shaders.add(item: ShaderCase.make(name: "white", wgsl: give got));
@@ -301,7 +301,7 @@ unsafe fn void compileCases(ref Verdicts found, ref DynamicArray<ShaderCase> sha
             + "fn twice(alpha: f32, dotNH: f32) -> f32 {\n"
             + "  return (D_GGX(alpha, dotNH) + D_GGX(alpha, (dotNH * 0.5)));\n}\n"
             + standardVertex()
-            + fragment(body: "  let n0 = (material.r * material.r);\n  return vec4f((material.c * (D_GGX(n0, 0.9) + twice(n0, material.r))), n0);\n");
+            + fragment(body: "  let n0 = (material.r * material.r);\n  let shaded = max(vec4f((material.c * (D_GGX(n0, 0.9) + twice(n0, material.r))), n0), vec4f(0.0));\n  return vec4f(shaded.rgb * frame.exposure, shaded.a);\n");
         found.add(name: "NodeBuilder: a typed function is written once, its callees first, a let for a node used twice",
                   why: sameText(got: got, want: want));
         int32 lets = b.letCount();
@@ -326,7 +326,7 @@ unsafe fn void compileCases(ref Verdicts found, ref DynamicArray<ShaderCase> sha
         string got = b.wgsl();
         string want = prelude() + rcdStruct()
             + "fn tint(colour: vec3f, k: f32) -> vec3f {\n  return (colour * k);\n}\n"
-            + standardVertex() + fragment(body: "  return vec4f(tint(material.c, material.r), material.r);\n");
+            + standardVertex() + fragment(body: "  let shaded = max(vec4f(tint(material.c, material.r), material.r), vec4f(0.0));\n  return vec4f(shaded.rgb * frame.exposure, shaded.a);\n");
         found.add(name: "NodeBuilder: a typed function of a vector and a float, answering a vector, its parameters typed by their arguments",
                   why: sameText(got: got, want: want));
         shaders.add(item: ShaderCase.make(name: "vector function", wgsl: give got));
@@ -345,7 +345,7 @@ unsafe fn void compileCases(ref Verdicts found, ref DynamicArray<ShaderCase> sha
             + "  v.v0 = (objects[object].normal * normal);\n"
             + "  v.v1 = (objects[object].world * vec4f(position, 1.0)).xyz;\n"
             + "  return v;\n}\n"
-            + fragment(body: "  return vec4f(((normalize(v.v0) + v.v1) + normalize(v.v0)), 1.0);\n");
+            + fragment(body: "  let shaded = max(vec4f(((normalize(v.v0) + v.v1) + normalize(v.v0)), 1.0), vec4f(0.0));\n  return vec4f(shaded.rgb * frame.exposure, shaded.a);\n");
         found.add(name: "NodeBuilder: normalWorld() is the normal matrix times the vertex's normal through a varying, normalized; positionWorld() the world position; two reads of one value share a varying",
                   why: sameText(got: got, want: want));
         shaders.add(item: ShaderCase.make(name: "normals", wgsl: give got));
@@ -357,7 +357,7 @@ unsafe fn void compileCases(ref Verdicts found, ref DynamicArray<ShaderCase> sha
         Vec3Node product = varying(value: positionLocal() * normalLocal());
         string body = bodyOf(b: ref b, colour: sum + product, alpha: constant(value: 1.0));
         found.add(name: "NodeBuilder: two varyings written alike but for their operator are two",
-                  why: sameText(got: body, want: "  return vec4f((v.v0 + v.v1), 1.0);\n"));
+                  why: sameText(got: body, want: "  let shaded = max(vec4f((v.v0 + v.v1), 1.0), vec4f(0.0));\n  return vec4f(shaded.rgb * frame.exposure, shaded.a);\n"));
     }
     // a node used once has no let, though it is a call
     {
@@ -366,7 +366,7 @@ unsafe fn void compileCases(ref Verdicts found, ref DynamicArray<ShaderCase> sha
         Vec3Node c = b.uniformVec3(name: "c");
         string body = bodyOf(b: ref b, colour: c, alpha: sqrt(x: r) * r);
         found.add(name: "NodeBuilder: a node used once is written where it is used",
-                  why: sameText(got: body, want: "  return vec4f(material.c, (sqrt(material.r) * material.r));\n"));
+                  why: sameText(got: body, want: "  let shaded = max(vec4f(material.c, (sqrt(material.r) * material.r)), vec4f(0.0));\n  return vec4f(shaded.rgb * frame.exposure, shaded.a);\n"));
     }
     // varyings: the vertex position read in the fragment stage, and a varying() of a vertex-stage value
     {
@@ -385,7 +385,7 @@ unsafe fn void compileCases(ref Verdicts found, ref DynamicArray<ShaderCase> sha
             + "  v.v0 = position;\n"
             + "  v.v1 = (objects[object].world * vec4f(position, 1.0)).xyz;\n"
             + "  return v;\n}\n"
-            + fragment(body: "  let n0 = saturate(dot(normalize(v.v0), normalize(v.v1)));\n  return vec4f(mix(v.v0, v.v1, n0), n0);\n");
+            + fragment(body: "  let n0 = saturate(dot(normalize(v.v0), normalize(v.v1)));\n  let shaded = max(vec4f(mix(v.v0, v.v1, n0), n0), vec4f(0.0));\n  return vec4f(shaded.rgb * frame.exposure, shaded.a);\n");
         found.add(name: "NodeBuilder: a vertex attribute read in the fragment stage, and a varying(), each pass through a varying",
                   why: sameText(got: got, want: want));
         shaders.add(item: ShaderCase.make(name: "varyings", wgsl: give got));
@@ -406,7 +406,7 @@ unsafe fn void compileCases(ref Verdicts found, ref DynamicArray<ShaderCase> sha
             + "  v.clip = (frame.viewProjection * n0);\n"
             + "  v.v0 = n0.xyz;\n"
             + "  return v;\n}\n"
-            + fragment(body: "  return vec4f(v.v0, 1.0);\n");
+            + fragment(body: "  let shaded = max(vec4f(v.v0, 1.0), vec4f(0.0));\n  return vec4f(shaded.rgb * frame.exposure, shaded.a);\n");
         found.add(name: "NodeBuilder: a vertex position of the material's own, and its world position a let both use",
                   why: sameText(got: got, want: want));
         shaders.add(item: ShaderCase.make(name: "vertex position", wgsl: give got));
@@ -420,8 +420,8 @@ unsafe fn void compileCases(ref Verdicts found, ref DynamicArray<ShaderCase> sha
         FloatNode f = sqrt(x: r) + exp2(x: r) - pow(x: r, power: constant(value: 2.0)) * min(a: r, b: constant(value: 0.5)) / max(a: r, b: constant(value: 0.25));
         FloatNode g = (0.5 + r) * (2.0 - r) / (3.0 * r) - 4.0 / r + (r + 1.0) * (r - 1.0) / (r * 2.0) - r / 2.0 + (-r);
         string got = bodyOf(b: ref b, colour: c, alpha: f + g);
-        string want = "  return vec4f(material.c, (((sqrt(material.r) + exp2(material.r)) - ((pow(material.r, 2.0) * min(material.r, 0.5)) / max(material.r, 0.25)))"
-            + " + (((((((0.5 + material.r) * (2.0 - material.r)) / (3.0 * material.r)) - (4.0 / material.r)) + (((material.r + 1.0) * (material.r - 1.0)) / (material.r * 2.0))) - (material.r / 2.0)) + (-material.r))));\n";
+        string want = "  let shaded = max(vec4f(material.c, (((sqrt(material.r) + exp2(material.r)) - ((pow(material.r, 2.0) * min(material.r, 0.5)) / max(material.r, 0.25)))"
+            + " + (((((((0.5 + material.r) * (2.0 - material.r)) / (3.0 * material.r)) - (4.0 / material.r)) + (((material.r + 1.0) * (material.r - 1.0)) / (material.r * 2.0))) - (material.r / 2.0)) + (-material.r)))), vec4f(0.0));\n  return vec4f(shaded.rgb * frame.exposure, shaded.a);\n";
         found.add(name: "typed nodes: a float's operators, a number on either side, unary minus and the float built-ins",
                   why: sameText(got: got, want: want));
         shaders.add(item: ShaderCase.make(name: "float operators", wgsl: b.wgsl()));
@@ -434,8 +434,8 @@ unsafe fn void compileCases(ref Verdicts found, ref DynamicArray<ShaderCase> sha
             + vec3(x: c2.x(), y: c2.y(), z: c2.z()) + saturate(x: d2) + max(a: c2, b: d2) + min(a: c2, b: d2) + mix(from: c2, to: d2, by: r2);
         FloatNode w = dot(a: c2, b: d2);
         string got2 = bodyOf(b: ref b2, colour: v, alpha: w);
-        string want2 = "  return vec4f((((((((((material.c + material.d) - (((((material.c * material.d) / material.d) * material.r) / material.r) * 2.0)) + (2.0 * (-material.c))) + (material.r * normalize(material.c)))"
-            + " + vec3f(material.c.x, material.c.y, material.c.z)) + saturate(material.d)) + max(material.c, material.d)) + min(material.c, material.d)) + mix(material.c, material.d, material.r)), dot(material.c, material.d));\n";
+        string want2 = "  let shaded = max(vec4f((((((((((material.c + material.d) - (((((material.c * material.d) / material.d) * material.r) / material.r) * 2.0)) + (2.0 * (-material.c))) + (material.r * normalize(material.c)))"
+            + " + vec3f(material.c.x, material.c.y, material.c.z)) + saturate(material.d)) + max(material.c, material.d)) + min(material.c, material.d)) + mix(material.c, material.d, material.r)), dot(material.c, material.d)), vec4f(0.0));\n  return vec4f(shaded.rgb * frame.exposure, shaded.a);\n";
         found.add(name: "typed nodes: a vector's operators with vectors, floats and numbers, its parts, and the vector built-ins",
                   why: sameText(got: got2, want: want2));
         shaders.add(item: ShaderCase.make(name: "vector operators", wgsl: b2.wgsl()));
@@ -445,7 +445,7 @@ unsafe fn void compileCases(ref Verdicts found, ref DynamicArray<ShaderCase> sha
         Vec4Node four = vec4(xyz: c3, w: constant(value: 1.0));
         Vec4Node sum = four + four * four;
         string got3 = bodyOf(b: ref b3, colour: sum.xyz(), alpha: sum.w());
-        string want3 = "  let n0 = vec4f(material.c, 1.0);\n  let n1 = (n0 + (n0 * n0));\n  return vec4f(n1.xyz, n1.w);\n";
+        string want3 = "  let n0 = vec4f(material.c, 1.0);\n  let n1 = (n0 + (n0 * n0));\n  let shaded = max(vec4f(n1.xyz, n1.w), vec4f(0.0));\n  return vec4f(shaded.rgb * frame.exposure, shaded.a);\n";
         found.add(name: "typed nodes: a vec4's operators and parts, a let for each node used twice",
                   why: sameText(got: got3, want: want3));
         shaders.add(item: ShaderCase.make(name: "vec4 operators", wgsl: b3.wgsl()));

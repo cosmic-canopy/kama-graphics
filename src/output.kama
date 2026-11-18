@@ -1,0 +1,29 @@
+// The output pass (kyoten's rendering.md § Decided, area 3, and GFX-1's part 4, the frame): a render draws the scene
+// into a 16-bit float texture, linear and exposed by its camera, and this pass writes an 8-bit sRGB target from it
+// through the camera's tone mapping. The target's format encodes sRGB as it stores, so the pass writes linear light.
+//
+// It is one full-screen triangle, drawn with no vertex buffer, each texel read with `textureLoad` at its own place, since
+// the scene and the target are the same size.
+
+export { ToneMapping, outputWgsl };
+
+// How a camera's linear, exposed scene becomes what an 8-bit target shows (part 4's question 2, and the owner's (A),
+// each camera's). `None` writes it as it is, the target clamping each channel to 0 to 1, as three.js's `NoToneMapping`.
+type enum ToneMapping { None }
+
+// The output pass's WGSL for `curve`.
+fn string outputWgsl(ToneMapping curve) {
+    string mapped = match (curve) {
+        case None: "  return vec4f(scene.rgb, scene.a);\n";
+    };
+    return "@group(0) @binding(0) var sceneTexture: texture_2d<f32>;\n"
+        + "@vertex fn vs(@builtin(vertex_index) corner: u32) -> @builtin(position) vec4f {\n"
+        + "  let x = f32((corner << 1u) & 2u);\n"
+        + "  let y = f32(corner & 2u);\n"
+        + "  return vec4f(x * 2.0 - 1.0, 1.0 - y * 2.0, 0.0, 1.0);\n"
+        + "}\n"
+        + "@fragment fn fs(@builtin(position) at: vec4f) -> @location(0) vec4f {\n"
+        + "  let scene = textureLoad(sceneTexture, vec2i(at.xy), 0);\n"
+        + mapped
+        + "}\n";
+}

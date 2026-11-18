@@ -33,10 +33,12 @@ import {
     std::collections::DynamicArray,
     std::io::stderr, std::io::StdErr,
     std::math::Vec3, std::math::Vec4, std::math::Quat, std::math::Mat3, std::math::Mat4, std::math::sqrt, std::math::tan,
+    std::math::pow, std::math::log2,
     gpu::Device, gpu::Queue, gpu::Buffer, gpu::BufferDescriptor, gpu::BufferUsage,
-    Euler, EulerOrder, Geometry, Material, RenderTarget, Renderer, Color,
+    Euler, EulerOrder, Geometry, Material, RenderTarget, Renderer, Color, ToneMapping,
 };
-export { Object3D, NodePart, Walk, Scene, Group, Mesh, PerspectiveCamera, DirectionalLight, AmbientLight };
+export { Object3D, NodePart, Walk, Scene, Group, Mesh, PerspectiveCamera, DirectionalLight, AmbientLight,
+         ev100Sunlight, ev100Overcast, ev100Indoor, ev100Blender, ev100For };
 
 // An object's record: its world matrix, WGSL's mat4x4f, then its normal matrix, a mat3x3f, whose three columns take 16
 // bytes each (the owner's (A), kyoten's rendering.md § Decided, GFX-1's part 3, its second part's question 1).
@@ -923,10 +925,27 @@ type resource Mesh implements Object3D {
     public const fn Mat4 matrixWorld() { return this.part.matrixWorld(); }
 }
 
+// A camera's exposure in EV100 (kyoten's rendering.md § Decided, GFX-1's part 4, question 3), as Filament, Bevy, Unreal
+// and Unity HDRP set it: a scene's linear light is scaled by 2^−EV100 / 1.2 before it is stored and tone mapped. Named
+// values, Bevy's: sunlight 15, an overcast day 12, indoors 7, and 9.7, Bevy's calibration to Blender's implicit exposure.
+fn float32 ev100Sunlight() { return 15.0; }
+fn float32 ev100Overcast() { return 12.0; }
+fn float32 ev100Indoor() { return 7.0; }
+fn float32 ev100Blender() { return 9.7; }
+// The EV100 that scales the scene by `exposure`, as three.js's `toneMappingExposure` does: −log2(1.2 × exposure). A
+// camera's default is three.js's exposure of 1, about −0.263, so a default light of intensity 1 looks as it does there.
+fn float32 ev100For(float32 exposure) {
+    float64 scaled = cast<float64>(exposure) * 1.2;
+    return cast<float32>(-log2(x: scaled));
+}
+
 // A camera with perspective, as three.js's `PerspectiveCamera`, its field of view in radians (area 2, item 4), and
 // reversed depth always (GFX-1's question 1): near maps to 1 and far to 0, as three.js r187's `makePerspective` with
 // `reversedDepth`. A far of +infinity is the projection's limit (`withInfiniteFar`). It names the target it draws
 // into, and with none the renderer's window (part 1's question 4). It looks down its -Z.
+//
+// Each camera has its own exposure and tone mapping (part 4, questions 3 and the owner's (A) on tone mapping), so two
+// views of one scene can look different with nothing on the renderer to set and reset between them.
 type resource PerspectiveCamera implements Object3D {
     NodePart part;
     float32 fovValue;
@@ -934,8 +953,10 @@ type resource PerspectiveCamera implements Object3D {
     float32 nearValue;
     float32 farValue;
     Optional<Shared<RenderTarget>> into = Optional::None;
+    float32 ev = ev100For(exposure: 1.0);
+    ToneMapping curve = ToneMapping::None;
 
-    friend Renderer::render[placeAlone, viewProjection];
+    friend Renderer::render[placeAlone, viewProjection, exposureScale];
 
     // three.js's four: the vertical field of view in radians, width over height, and the near and far planes.
     public unsafe ctor make(float32 fovRad, float32 aspect, float32 near, float32 far) {
@@ -966,6 +987,20 @@ type resource PerspectiveCamera implements Object3D {
     public fn ref float32 farMut() { return this.farValue; }
     public unsafe const fn Optional<Shared<RenderTarget>> target() { return copy this.into; }
     public fn ref Optional<Shared<RenderTarget>> targetMut() { return this.into; }
+    // The exposure, in EV100: `ev100For(exposure: 1.0)` by default.
+    public const fn float32 exposure() { return this.ev; }
+    public fn ref float32 exposureMut() { return this.ev; }
+    // How the scene is brought to an 8-bit target: `ToneMapping::None` for now. A camera drawing into a 16-bit float
+    // target ignores it, since that target holds the linear scene.
+    public const fn ToneMapping toneMapping() { return this.curve; }
+    public fn ref ToneMapping toneMappingMut() { return this.curve; }
+
+    // What the scene's light is scaled by: 2^−EV100 / 1.2, worked in float64.
+    const fn float32 exposureScale() {
+        float64 two = 2.0;
+        float64 stops = cast<float64>(this.ev);
+        return cast<float32>(pow(x: two, y: -stops) / 1.2);
+    }
 
     // The projection, remade from the camera's settings whenever it is asked for, so there is no
     // `updateProjectionMatrix()`.

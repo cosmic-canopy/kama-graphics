@@ -1,0 +1,296 @@
+// GFX-1's part 4, the frame, on the GPU (kyoten's rendering.md § Decided, area 3 and part 4's questions): a render draws
+// the scene in linear HDR into a 16-bit float texture, exposed by its camera, and writes an 8-bit target from it through
+// the camera's tone mapping. A step a tick on the device the check opened:
+// - **a 16-bit float target** holds the linear scene itself, read back as an `Rgba16Float` image in linear sRGB, each
+//   texel within a half float's step of what the scene's light is, worked here in float64, unclamped above 1;
+// - **the camera's exposure** in EV100 scales every material's light, and the clear colour's, before they are stored
+//   (pre-exposure, as Filament, Bevy and Unreal), by 2^−EV100 / 1.2;
+// - **`max(0)`** keeps a material's output at 0 or above, as three.js r187's, which the float target would otherwise keep;
+// - **an 8-bit target** shows the scene exposed, clamped and sRGB-encoded, with no tone mapping (`ToneMapping::None`);
+// - `clear(target:)` fills a float target with the linear clear colour, as it is (no camera, so no exposure).
+
+import {
+    std::collections::DynamicArray,
+    std::math::Vec3, std::math::radians, std::math::pow, std::math::abs, std::math::floor, std::math::log2,
+    std::time::Instant, std::time::monotonicNow,
+    image::Image, image::PixelFormat, image::Transfer, image::Primaries,
+    gpu::Device, gpu::Queue, gpu::GpuError,
+    graphics::Color, graphics::Renderer, graphics::RenderTarget, graphics::TargetFormat, graphics::Scene, graphics::Mesh,
+    graphics::PerspectiveCamera, graphics::BoxGeometry, graphics::MeshBasicMaterial, graphics::Material,
+    graphics::MaterialGpu, graphics::MaterialSettings, graphics::NodeBuilder, graphics::PixelRead, graphics::PixelStatus,
+    graphics::ToneMapping, graphics::vec4, graphics::vec3, graphics::constant,
+    graphics::ev100For, graphics::ev100Sunlight, graphics::ev100Overcast, graphics::ev100Indoor, graphics::ev100Blender,
+    Verdicts, halfValue,
+};
+export { FrameRun };
+
+comptime int64 FRAME_MS = 10000;
+comptime uint32 WIDE = 16;
+comptime uint32 HIGH = 12;
+
+// A program's own material whose output is negative in red and blue: (-0.5, 0.25, -2, 1).
+type resource Negative implements Material {
+    MaterialGpu cache;
+    public ctor make() { this.cache = MaterialGpu.make(); }
+    public fn ref MaterialGpu gpuMut() { return this.cache; }
+    public const fn uint32 version() { return 0; }
+    public const fn uint32 graphVersion() { return 0; }
+    public const fn void settings(ref MaterialSettings into) { }
+    public fn void shade(ref NodeBuilder builder) {
+        builder.fragmentColor(node: vec4(xyz: vec3(x: constant(value: -0.5), y: constant(value: 0.25), z: constant(value: -2.0)),
+                                         w: constant(value: 1.0)));
+    }
+}
+
+// What the scene's light is scaled by at `ev`: 2^−EV100 / 1.2, in float64.
+fn float64 scaleAt(float32 ev) {
+    float64 two = 2.0;
+    float64 stops = cast<float64>(ev);
+    return pow(x: two, y: -stops) / 1.2;
+}
+
+// A half float's step at `v`: the gap between two half floats there, so a value worked in float32 and stored as a half
+// is within one of the float64 value.
+fn float64 halfStep(float64 v) {
+    float64 a = abs(x: v);
+    float64 two = 2.0;
+    if (a < pow(x: two, y: -14.0)) { return pow(x: two, y: -24.0); }
+    return pow(x: two, y: floor(x: log2(x: a)) - 10.0);
+}
+
+// "" when the half float `got` is within a step of `want`.
+fn string halfNear(uint16 got, float64 want, const ref string what) {
+    float64 value = halfValue(h: got);
+    if (abs(x: value - want) <= halfStep(v: want)) { return ""; }
+    return what + " is ${value}, not ${want}";
+}
+
+// sRGB's curve, to 8 bits, of a linear value clamped to 0 to 1: what an 8-bit sRGB target stores.
+fn int32 srgb8(float64 linear) {
+    float64 c = linear < 0.0 ? 0.0 : linear > 1.0 ? 1.0 : linear;
+    float64 e = c <= 0.0031308 ? 12.92 * c : 1.055 * pow(x: c, y: 1.0 / 2.4) - 0.055;
+    return cast<int32>(floor(x: e * 255.0 + 0.5));
+}
+
+fn int32 apart(int32 a, int32 b) { return a > b ? a - b : b - a; }
+
+type resource FrameRun {
+    int32 stage = 0;
+    Instant began = monotonicNow();
+    Verdicts found;
+    Device device;
+    Queue queue;
+    Optional<Renderer> renderer = Optional::None;
+    Optional<PixelRead> reading = Optional::None;
+    Optional<Image> got = Optional::None;
+    bool failed = false;
+
+    public ctor make(Device device, Queue queue) {
+        this.found = Verdicts.make();
+        this.device = give device;
+        this.queue = give queue;
+    }
+
+    public fn ref Verdicts verdicts() { return this.found; }
+
+    // A WIDE x HIGH target of `format`, seen by a camera at the origin looking down -z at EV100 `ev`, a 1 metre box 2
+    // metres ahead in `look` filling its centre, the corners the clear colour: rendered, and its read started.
+    unsafe fn void renderBox(TargetFormat format, float32 ev, Shared<Material> look, Color clearTo, float32 clearAlpha) {
+        Renderer r = Renderer.withDevice(device: copy this.device, queue: copy this.queue);
+        r.clearColorMut() = clearTo;
+        r.clearAlphaMut() = clearAlpha;
+        Shared<RenderTarget> t = new RenderTarget.withFormat(width: WIDE, height: HIGH, format: format);
+        Shared<PerspectiveCamera> cam = new PerspectiveCamera.make(fovRad: radians(deg: 50.0), aspect: 16.0 / 12.0, near: 0.1, far: 100.0);
+        cam.targetMut() = Optional::Some(value: copy t);
+        cam.exposureMut() = ev;
+        Shared<Scene> s = new Scene.make();
+        Shared<BoxGeometry> box = new BoxGeometry.make(width: 1.0, height: 1.0, depth: 1.0);
+        Shared<Mesh> m = new Mesh.make(geometry: box, material: look);
+        m.positionMut() = Vec3.of(x: 0.0, y: 0.0, z: -2.0);
+        s.add(object: m);
+        r.render(scene: copy s, camera: copy cam);
+        this.reading = Optional::Some(value: r.readRenderTargetPixels(target: copy t));
+        this.renderer = Optional::Some(value: give r);
+        this.began = monotonicNow();
+    }
+
+    // A 16-bit float target cleared by `clear(target:)` alone, its read started.
+    unsafe fn void clearFloat(Color clearTo) {
+        Renderer r = Renderer.withDevice(device: copy this.device, queue: copy this.queue);
+        r.clearColorMut() = clearTo;
+        r.clearAlphaMut() = 0.25;
+        Shared<RenderTarget> t = new RenderTarget.withFormat(width: WIDE, height: HIGH, format: TargetFormat::Rgba16Float);
+        r.clear(target: copy t);
+        this.reading = Optional::Some(value: r.readRenderTargetPixels(target: copy t));
+        this.renderer = Optional::Some(value: give r);
+        this.began = monotonicNow();
+    }
+
+    // Whether the read has answered: its image kept in `got`, or `failed` set. False while it is pending.
+    unsafe fn bool answered() {
+        PixelStatus s = match (this.reading) {
+            case Some(value: r): r.poll();
+            case None: PixelStatus::Failed(error: GpuError::Taken);
+        };
+        bool pending = match (s) { case Pending: true; case _: false; };
+        if (pending && this.began.elapsed().asMillis() < FRAME_MS) { return false; }
+        this.reading = Optional::None;
+        this.failed = true;
+        this.got = Optional::None;
+        match (give s) {
+            case Ready(image: img): { this.failed = false; this.got = Optional::Some(value: give img); }
+            case _: { }
+        };
+        return true;
+    }
+
+    // The read image's half floats at texel (x, y), channel c. An image with no such half (an 8-bit one) gives the
+    // largest finite half, 65504, which no case wants, so the case fails by its name rather than the run ending.
+    fn uint16 half(isize x, isize y, isize c) {
+        isize at = (y * cast<isize>(WIDE) + x) * 4 + c;
+        return match (this.got) {
+            case Some(value: img): at < img.samples16().length() ? img.samples16()[at] : 0x7BFF;
+            case None: 0x7BFF;
+        };
+    }
+    // ...and its bytes, the same way: 0 where it has none.
+    fn uint8 byte(isize x, isize y, isize c) {
+        isize at = (y * cast<isize>(WIDE) + x) * 4 + c;
+        return match (this.got) {
+            case Some(value: img): at < img.samples8().length() ? img.samples8()[at] : 0;
+            case None: 0;
+        };
+    }
+
+    // "" when the read image is a 16 x 12 Rgba16Float image in linear sRGB.
+    fn string shapeOf() {
+        string why = "no image";
+        match (this.got) {
+            case Some(value: img): {
+                bool linear = img.colorSpace().transfer == Transfer::Linear && img.colorSpace().primaries == Primaries::Bt709;
+                bool halves = img.format() == PixelFormat::Rgba16Float;
+                why = halves && linear && img.width() == 16 && img.height() == 12 ? "" : "not a 16 x 12 Rgba16Float image in linear sRGB";
+            }
+            case None: { }
+        };
+        return why;
+    }
+
+    // The camera's defaults and the named exposures: no GPU.
+    fn void defaults() {
+        Shared<PerspectiveCamera> cam = new PerspectiveCamera.make(fovRad: 1.0, aspect: 1.0, near: 0.1, far: 10.0);
+        float32 ev = cam.exposure();
+        float32 unit = ev100For(exposure: 1.0);
+        float32 want = -0.26303440;
+        string why = abs(x: ev - want) < 0.000001 && ev == unit ? "" : "it is ${ev}; ev100For(exposure: 1.0) is ${unit}";
+        this.found.add(name: "camera: its exposure is ev100For(exposure: 1.0), three.js's exposure of 1, EV100 −log2(1.2)", why: give why);
+        float32 brighter = ev100For(exposure: 0.5);
+        this.found.add(name: "camera: ev100For(exposure: 0.5) is −log2(0.6), a stop brighter",
+                       why: abs(x: brighter - 0.73696560) < 0.000001 ? "" : "it is ${brighter}");
+        bool allNamed = ev100Sunlight() == 15.0 && ev100Overcast() == 12.0 && ev100Indoor() == 7.0 && ev100Blender() == 9.7;
+        this.found.add(name: "camera: the named exposures are Bevy's: sunlight 15, overcast 12, indoors 7, Blender 9.7",
+                       why: allNamed ? "" : "a named exposure differs");
+        bool untouched = cam.toneMapping() == ToneMapping::None;
+        this.found.add(name: "camera: its tone mapping is None", why: untouched ? "" : "it is another");
+    }
+
+    public unsafe fn bool step() {
+        if (this.stage == 0) {
+            this.defaults();
+            // #336699 at EV100 1 on a #808080 clear of alpha 0.5, into a float target
+            Shared<MeshBasicMaterial> look = new MeshBasicMaterial.make();
+            look.colorMut() = Color.fromHex(hex: 0x336699);
+            this.renderBox(format: TargetFormat::Rgba16Float, ev: 1.0, look: look, clearTo: Color.fromHex(hex: 0x808080), clearAlpha: 0.5);
+            this.stage = 1;
+            return false;
+        }
+        if (this.stage == 1) {
+            if (!this.answered()) { return false; }
+            string shape = this.failed ? "the read failed" : this.shapeOf();
+            this.found.add(name: "a 16-bit float target reads back as a 16 x 12 Rgba16Float image, linear sRGB", why: copy shape);
+            float64 scale = scaleAt(ev: 1.0);
+            Color box = Color.fromHex(hex: 0x336699);
+            Color clear = Color.fromHex(hex: 0x808080);
+            string centre = this.failed ? "the read failed"
+                : halfNear(got: this.half(x: 8, y: 6, c: 0), want: cast<float64>(box.linearR()) * scale, what: "red")
+                + halfNear(got: this.half(x: 8, y: 6, c: 1), want: cast<float64>(box.linearG()) * scale, what: "green")
+                + halfNear(got: this.half(x: 8, y: 6, c: 2), want: cast<float64>(box.linearB()) * scale, what: "blue")
+                + halfNear(got: this.half(x: 8, y: 6, c: 3), want: 1.0, what: "alpha");
+            this.found.add(name: "exposure: at EV100 1 a #336699 box is stored as its linear colour × 2^−1 / 1.2 in a float target",
+                           why: give centre);
+            string corner = this.failed ? "the read failed"
+                : halfNear(got: this.half(x: 0, y: 0, c: 0), want: cast<float64>(clear.linearR()) * scale, what: "red")
+                + halfNear(got: this.half(x: 0, y: 0, c: 1), want: cast<float64>(clear.linearG()) * scale, what: "green")
+                + halfNear(got: this.half(x: 0, y: 0, c: 2), want: cast<float64>(clear.linearB()) * scale, what: "blue")
+                + halfNear(got: this.half(x: 0, y: 0, c: 3), want: 0.5, what: "alpha");
+            this.found.add(name: "exposure: the clear colour is exposed with the scene, its alpha as cleared", why: give corner);
+            Shared<Negative> negative = new Negative.make();
+            this.renderBox(format: TargetFormat::Rgba16Float, ev: ev100For(exposure: 1.0), look: negative,
+                           clearTo: Color.fromHex(hex: 0x000000), clearAlpha: 1.0);
+            this.stage = 2;
+            return false;
+        }
+        if (this.stage == 2) {
+            if (!this.answered()) { return false; }
+            string kept = this.failed ? "the read failed"
+                : halfNear(got: this.half(x: 8, y: 6, c: 0), want: 0.0, what: "red")
+                + halfNear(got: this.half(x: 8, y: 6, c: 1), want: 0.25, what: "green")
+                + halfNear(got: this.half(x: 8, y: 6, c: 2), want: 0.0, what: "blue");
+            this.found.add(name: "max(0): a material's output of (-0.5, 0.25, -2) is stored as (0, 0.25, 0), as three.js r187's",
+                           why: give kept);
+            // a colour beyond white: sRGB 4, 1, 0.5
+            Shared<MeshBasicMaterial> bright = new MeshBasicMaterial.make();
+            bright.colorMut() = Color.make(r: 4.0, g: 1.0, b: 0.5);
+            this.renderBox(format: TargetFormat::Rgba16Float, ev: ev100For(exposure: 1.0), look: bright,
+                           clearTo: Color.fromHex(hex: 0x000000), clearAlpha: 1.0);
+            this.stage = 3;
+            return false;
+        }
+        if (this.stage == 3) {
+            if (!this.answered()) { return false; }
+            Color bright = Color.make(r: 4.0, g: 1.0, b: 0.5);
+            float64 scale = scaleAt(ev: ev100For(exposure: 1.0));
+            string held = this.failed ? "the read failed"
+                : halfNear(got: this.half(x: 8, y: 6, c: 0), want: cast<float64>(bright.linearR()) * scale, what: "red")
+                + halfNear(got: this.half(x: 8, y: 6, c: 1), want: cast<float64>(bright.linearG()) * scale, what: "green");
+            this.found.add(name: "a float target holds the scene unclamped: an sRGB red of 4 is stored as its linear 25.3", why: give held);
+            // white at EV100 1 into an 8-bit target: exposed, clamped and sRGB-encoded
+            Shared<MeshBasicMaterial> white = new MeshBasicMaterial.make();
+            white.colorMut() = Color.fromHex(hex: 0xffffff);
+            this.renderBox(format: TargetFormat::Rgba8UnormSrgb, ev: 1.0, look: white, clearTo: Color.fromHex(hex: 0x000000),
+                           clearAlpha: 0.4);
+            this.stage = 4;
+            return false;
+        }
+        if (this.stage == 4) {
+            if (!this.answered()) { return false; }
+            int32 want = srgb8(linear: scaleAt(ev: 1.0));
+            string shown = "the read failed";
+            string alpha = "the read failed";
+            if (!this.failed) {
+                int32 r = cast<int32>(this.byte(x: 8, y: 6, c: 0));
+                shown = apart(a: r, b: want) <= 1 ? "" : "red is ${r}, not ${want}";
+                int32 a = cast<int32>(this.byte(x: 0, y: 0, c: 3));
+                alpha = a == 102 ? "" : "the corner's alpha is ${a}, not 102";
+            }
+            this.found.add(name: "an 8-bit target shows white at EV100 1 as sRGB(2^−1 / 1.2), with no tone mapping", why: give shown);
+            this.found.add(name: "an 8-bit target keeps the scene's alpha through the output pass: a clear alpha of 0.4 is 102",
+                           why: give alpha);
+            this.clearFloat(clearTo: Color.fromHex(hex: 0x336699));
+            this.stage = 5;
+            return false;
+        }
+        if (this.stage == 5) {
+            if (!this.answered()) { return false; }
+            Color c = Color.fromHex(hex: 0x336699);
+            string cleared = this.failed ? "the read failed"
+                : halfNear(got: this.half(x: 3, y: 3, c: 0), want: cast<float64>(c.linearR()), what: "red")
+                + halfNear(got: this.half(x: 3, y: 3, c: 2), want: cast<float64>(c.linearB()), what: "blue")
+                + halfNear(got: this.half(x: 3, y: 3, c: 3), want: 0.25, what: "alpha");
+            this.found.add(name: "clear(target:) fills a float target with the linear clear colour, as it is", why: give cleared);
+            this.renderer = Optional::None;
+            this.stage = 6;
+        }
+        return true;
+    }
+}

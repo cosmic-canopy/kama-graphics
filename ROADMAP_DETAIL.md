@@ -386,7 +386,48 @@ natively. The library's own `examples/cube` is the same scene without an engine.
   `.scratch/s36/kg/list1.py`), among them a luma weight, each guard, and the older tests left on the default, which
   fails their goldens. The one expected to be equivalent, the target's record of its count not kept once its textures
   are made again, is caught too: a method set back then keeps the other count's textures.
-- **Next, part 5:** pipelines compiled off the frame, and the quality presets.
+- **Decided on 2026-11-18, part 5's three questions** (kyoten's `docs/design/rendering.md` § Decided, `6dc5e44`), each
+  (A) as revised, after the owner asked for the ubershader and pre-compiling as approaches too:
+  1. pipelines every way, chosen by the program: `renderer.compile(scene:, camera:)`, a polled request, compiles ahead;
+     a draw whose pipeline is not ready takes the renderer's way, which a material may override: `General` (the
+     material's general form, the same pixels, slower, Godot's), `StandIn` (a material the program names, Unreal's
+     default material), `Skip` (Bevy's, Unreal's default) or `Wait` (three.js r187's). The default is `General`, then
+     `Skip`;
+  2. a quality preset is a value the game owns (`Quality`, one field per technique), the library's low to ultra only
+     starting points, `applyQuality(quality:)` writing every technique and reporting what it chose;
+  3. kyoten's rendering question 11 (shaders built ahead) is scope: part 5 builds compiling at load and keeps the
+     rest open, decided at its row.
+
+  Its steps: 1, pipelines compiled off the frame, with `General` (skipping until a general form exists), `Skip` and
+  `Wait`, and `compile`; 2, the general form, for the one option there is, the cull flip; 3, `StandIn` and the
+  per-material override; 4, `Quality`, `applyQuality` and the device's features.
+- **Built, part 5's step 1, pipelines compiled off the frame** (2026-11-18, [SPEC.md](SPEC.md) § The renderer, § Misuse
+  and § Tests):
+  - every pipeline is a slot asked for with `@kama/gpu`'s `createRenderPipelineAsync` and polled by each render, which
+    never uses one it asked for itself;
+  - `WhileCompiling` (`@nonExhaustive`): `General`, the default, skipping until step 2; `Skip`; `Wait`;
+    `whileCompiling()` and `whileCompilingMut()`. The frame's passes go the same way: while the tone-mapped resolve
+    compiles the GPU resolves, and while the output pass compiles it is left out;
+  - `compile(scene:, camera:)`, a `CompileRequest` polled to `CompileStatus::Pending` or `Ready`;
+  - `info()`'s `misses`, `skipped` and `waited`;
+  - a material whose pipeline the device refuses draws nothing, the meshes beside it draw, and it is reported once as
+    `Material` in the device's words; `GraphicsErrorKind::Pipeline` for a refused pipeline of the renderer's own.
+
+  **Settled while building, and reported:** the tests written before part 5 compile during the render (`waiting` and
+  `gpuResolved`), so one render draws everything as they were written to read; a mesh's two refusals are one report;
+  a refusal a compile request finds is reported by `takeErrors()` or the next render; the refused pipeline's words
+  are each leg's own (wgpu-native names `max_inter_stage_shader_variables`, Dawn each location past 16, Firefox only
+  wgpu's first line); `Pipeline` reports a fault no case can provoke. Found while building: a refused pipeline under
+  the synchronous call invalidated the whole frame, so neither box drew; off the frame it skips its own mesh alone.
+
+  Red first: on the API's stub (every render compiling at once), 9 of the 22 new cases failed: the first render drew
+  everything, `info()` counted nothing, and the refused material's frame drew nothing at all. 322 cases natively, in
+  Firefox and in Chrome for Testing, 309 in Edge, each debug and release. 27 of 28 mutations caught (kyoten's
+  `.scratch/s36/kg5/list1.py`). The one left, a refused resolve counted as a miss, needs a fault no case can provoke.
+  One, a render's own refusals left unreported, went uncaught while every case read `takeErrors()`, which sweeps them
+  anyway; a program that prints and never reads it would never see one, so the last case's renderer prints, and the
+  gate counts the line.
+- **Next, part 5's step 2:** the general form, for the cull flip.
 - **Done:**
   - `examples/cube` draws from one source on both legs;
   - its golden passes on a software GPU on each leg CI has, and perceptually on the reference machines present;

@@ -143,7 +143,7 @@ type resource BoxesRun {
 
     // Render `scene` with the test's camera into its target, and start reading it back.
     unsafe fn RenderInfo renderAndRead(Shared<Scene> scene) {
-        RenderInfo said = RenderInfo.of(calls: -1, triangles: -1, objects: -1, matrices: -1);
+        RenderInfo said = RenderInfo.of(calls: -1, triangles: -1, objects: -1, matrices: -1, misses: -1, skipped: -1, waited: -1);
         match (this.renderer) {
             case Some(value: r): {
                 match (this.camera) {
@@ -165,7 +165,7 @@ type resource BoxesRun {
 
     // Render `scene` with no read: what the render said.
     unsafe fn RenderInfo renderOnly(Shared<Scene> scene) {
-        RenderInfo said = RenderInfo.of(calls: -1, triangles: -1, objects: -1, matrices: -1);
+        RenderInfo said = RenderInfo.of(calls: -1, triangles: -1, objects: -1, matrices: -1, misses: -1, skipped: -1, waited: -1);
         match (this.renderer) {
             case Some(value: r): {
                 match (this.camera) {

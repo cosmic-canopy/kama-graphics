@@ -19,6 +19,11 @@
 // resolve's own pass, or, at one sample, by drawing it; then the output pass writes an 8-bit target from it through the
 // camera's tone mapping. `info()` says what the last render did, as three.js's `renderer.info`.
 //
+// Every pipeline is compiled off the frame (kyoten's rendering.md § Decided, GFX-1's part 5, question 1): a slot asked for
+// with @kama/gpu's `createRenderPipelineAsync`, which each render polls and never uses in the render that asked for it.
+// What a draw does meanwhile is the program's (`WhileCompiling`), and `compile(scene:, camera:)` asks for a scene's
+// pipelines ahead, a request polled as @kama/gpu's are.
+//
 // The scene's lights reach every material as data in the frame's group (kyoten's rendering.md § Decided, GFX-1's part
 // 3, the lights' question 1): the frame block carries the ambient lights' sum and how many directional lights there
 // are, and binding 4 the directional lights themselves, so adding, removing, moving or dimming a light compiles nothing.
@@ -43,7 +48,8 @@ import {
     gpu::BindGroupLayout, gpu::BindGroupLayoutDescriptor, gpu::BindingLayout, gpu::BufferBindingLayout,
     gpu::BufferBindingType, gpu::BindGroup, gpu::BindGroupDescriptor, gpu::BindingResource,
     gpu::PipelineLayout, gpu::PipelineLayoutDescriptor, gpu::Layout,
-    gpu::RenderPipeline, gpu::RenderPipelineDescriptor, gpu::VertexState, gpu::VertexBufferLayout, gpu::VertexFormat,
+    gpu::RenderPipeline, gpu::RenderPipelineDescriptor, gpu::PipelineRequest, gpu::PipelineStatus, gpu::PipelineError,
+    gpu::CompilationInfo, gpu::CompilationMessage, gpu::VertexState, gpu::VertexBufferLayout, gpu::VertexFormat,
     gpu::FragmentState, gpu::ColorTargetState, gpu::CullMode, gpu::FrontFace, gpu::DepthStencilState, gpu::CompareFunction,
     gpu::TextureDescriptor, gpu::TextureUsage, gpu::TextureBindingLayout, gpu::SamplerBindingLayout, gpu::Sampler,
     gpu::SamplerDescriptor, gpu::AddressMode, gpu::FilterMode, gpu::MipmapFilterMode, gpu::TexelCopyTextureInfo,
@@ -52,7 +58,10 @@ import {
     Color, RenderTarget, Scene, Walk, PerspectiveCamera, Geometry, BufferGeometry, Material, MaterialSettings, NodeBuilder,
     dfgTable, ToneMapping, outputWgsl, readsTable, blenderAgxTable, blenderAgxSize, Antialiasing, samplesOf, resolveWgsl,
 };
-export { Renderer, RenderInfo, PixelRead, PixelStatus, GraphicsErrorKind, GraphicsErrorReport, RendererErrors };
+export {
+    Renderer, RenderInfo, PixelRead, PixelStatus, GraphicsErrorKind, GraphicsErrorReport, RendererErrors, WhileCompiling,
+    CompileRequest, CompileStatus,
+};
 
 // A copied row's bytes, `texel` bytes a texel: WebGPU aligns them to 256.
 fn uint32 rowBytes(uint32 width, uint32 texel) { return (width * texel + 255) / 256 * 256; }
@@ -86,8 +95,43 @@ fn VertexState meshVertex(ShaderModule shader) {
     return vertex;
 }
 
-// One pass's draws, the depth prepass's or the shaded pass's: each mesh `render` gathered, with its pipeline in
-// `pipelines`, its material's group, its geometry's buffers, and its record by its instance index.
+// The shaded pass's pipeline for a material's `shader`, for a mirrored mesh or not, at `count` samples a texel: front faces
+// culled as three.js's FrontSide, and shaded where the prepass left this fragment's own depth, the nearest, so each
+// texel is shaded once: Equal, as Godot's Forward+ (kyoten's rendering.md § Decided, part 4), which `@invariant` on the
+// clip position makes exact.
+fn RenderPipelineDescriptor shadedDescriptor(PipelineLayout layout, ShaderModule shader, bool mirrored, uint32 count) {
+    FragmentState fragment = FragmentState.make(module: copy shader, entryPoint: "fs");
+    // every scene is drawn in linear HDR, into a 16-bit float texture (area 3; part 4)
+    fragment.target(state: ColorTargetState.make(format: TextureFormat::RGBA16Float));
+    RenderPipelineDescriptor pipeline = RenderPipelineDescriptor.make(layout: Layout::Explicit(layout: give layout),
+                                                                      vertex: meshVertex(shader: give shader));
+    pipeline.fragment(state: give fragment);
+    pipeline.primitiveMut().cullMode = CullMode::Back;   // front faces wind counter-clockwise,
+    if (mirrored) { pipeline.primitiveMut().frontFace = FrontFace::CW; }   // and clockwise on a mirrored mesh
+    pipeline.depthStencil(state: DepthStencilState.make(format: TextureFormat::Depth32Float, depthWriteEnabled: false,
+                                                        depthCompare: CompareFunction::Equal));
+    pipeline.multisampleMut().count = count;
+    pipeline.label(text: "a mesh");
+    return pipeline;
+}
+
+// ...and the depth prepass's: the same vertex stage and culling, no fragment stage, the nearest depth kept (reversed:
+// the greater).
+fn RenderPipelineDescriptor depthDescriptor(PipelineLayout layout, ShaderModule shader, bool mirrored, uint32 count) {
+    RenderPipelineDescriptor depthOnly = RenderPipelineDescriptor.make(layout: Layout::Explicit(layout: give layout),
+                                                                       vertex: meshVertex(shader: give shader));
+    depthOnly.primitiveMut().cullMode = CullMode::Back;
+    if (mirrored) { depthOnly.primitiveMut().frontFace = FrontFace::CW; }
+    depthOnly.depthStencil(state: DepthStencilState.make(format: TextureFormat::Depth32Float, depthWriteEnabled: true,
+                                                         depthCompare: CompareFunction::Greater));
+    depthOnly.multisampleMut().count = count;
+    depthOnly.label(text: "a mesh's depth");
+    return depthOnly;
+}
+
+// One pass's draws, the depth prepass's or the shaded pass's: each mesh `render` gathered, with its pipeline, which
+// `chosen` names so a run of draws with one pipeline binds it once, its material's group, its geometry's buffers, and its
+// record by its instance index.
 unsafe fn void drawEach(ref RenderPass pass, const ref DynamicArray<RenderPipeline> pipelines, const ref DynamicArray<isize> chosen,
                         const ref DynamicArray<BindGroup> looks, const ref DynamicArray<Buffer> positions,
                         const ref DynamicArray<Buffer> normals, const ref DynamicArray<Buffer> indices,
@@ -95,7 +139,7 @@ unsafe fn void drawEach(ref RenderPass pass, const ref DynamicArray<RenderPipeli
                         const ref DynamicArray<uint32> slots) {
     isize bound = -1;
     for (isize i = 0; i < chosen.length(); i = i + 1) {
-        if (chosen[i] != bound) { pass.setPipeline(pipeline: pipelines[chosen[i]]); bound = chosen[i]; }
+        if (chosen[i] != bound) { pass.setPipeline(pipeline: pipelines[i]); bound = chosen[i]; }
         pass.setBindGroup(index: 1, group: looks[i]);
         pass.setVertexBuffer(slot: 0, binding: BufferBinding.whole(buffer: copy positions[i]));
         pass.setVertexBuffer(slot: 1, binding: BufferBinding.whole(buffer: copy normals[i]));
@@ -113,11 +157,14 @@ comptime isize KEPT = 64;
 comptime uint64 FRAME_BYTES = 96;
 
 // What kind of misuse a renderer refused. `NoTarget`: a camera naming no render target was rendered by a renderer with
-// no window to draw into. `Material`: a material's nodes were refused by its compile (node_builder.kama), so no mesh
-// draws with it. `Light`: a light that can light nothing, such as a directional light at its own target, reported when
-// the light is written so. A later misuse joins the list, so a program's `match` on it has a `case _:`.
+// no window to draw into. `Material`: a material's nodes were refused by its compile (node_builder.kama), or the device
+// refused its pipeline, such as one passing more values between its stages than the device takes, so no mesh draws with
+// it. `Light`: a light that can light nothing, such as a directional light at its own target, reported when the light is
+// written so. `Pipeline`: the device refused a pipeline of the renderer's own, a fault below the program: the output
+// pass's, which is then left out, or the tone-mapped resolve's, when the GPU resolves instead. A later misuse joins the
+// list, so a program's `match` on it has a `case _:`.
 @nonExhaustive
-type enum GraphicsErrorKind { NoTarget, Material, Light }
+type enum GraphicsErrorKind { NoTarget, Material, Light, Pipeline }
 
 // One misuse a renderer refused, in its words, whole, as @kama/gpu's `GpuErrorReport`.
 type resource GraphicsErrorReport {
@@ -151,13 +198,135 @@ type resource RendererErrors {
 }
 
 // What the last render did, as three.js's `renderer.info`: its draw calls and triangles, the meshes its scene holds a
-// record for, and the world matrices its walk made (none, when nothing in the scene changed).
+// record for, and the world matrices its walk made (none, when nothing in the scene changed). Then what its pipelines
+// compiling cost it (part 5): `misses`, what it drew other than as asked, each mesh skipped while its pipelines compile
+// and each frame pass not run as asked (the GPU resolving while the tone-mapped resolve compiles, the output pass left
+// out), 0 when the render is the one asked for, which a loading screen or a test waits for; `skipped`, the meshes
+// skipped; and `waited`, the pipelines it compiled itself, each a hitch, under `WhileCompiling::Wait`. A refused
+// material is no miss, since it never draws.
 @generate(of)
 type value RenderInfo {
     public int32 calls;
     public int32 triangles;
     public int32 objects;
     public int32 matrices;
+    public int32 misses;
+    public int32 skipped;
+    public int32 waited;
+}
+
+// What a draw does while its pipelines compile (kyoten's rendering.md § Decided, GFX-1's part 5, question 1, the owner's
+// (A) of 2026-11-18), every pipeline being compiled off the frame unless a program asks otherwise:
+// - `General`, the default: the material's general form, the same pixels drawn more slowly, once it is compiled; where
+//   none is ready the draw is skipped. No material has a general form until part 5's step 2, so for now it skips;
+// - `Skip`: nothing until the draw's own pipelines are ready, as Bevy and Unreal's default;
+// - `Wait`: the pipelines compiled during the render that needs them, as three.js r187's, a hitch the program chose, for a
+//   tool, a test or a cutscene. On the web the page does not freeze, but the browser's GPU process waits at the submit.
+// The frame's own passes go the same way: while the tone-mapped resolve compiles, the GPU resolves (the ladder's next
+// rung), and while the output pass compiles it is left out, the target left as it was. `StandIn` joins at step 3, and a
+// later way joins the list, so a program's `match` on it has a `case _:`.
+@nonExhaustive
+type enum WhileCompiling { General, Skip, Wait }
+
+// A refused pipeline's words: the device's, then its stages' first error each, where they say more.
+fn string refusalWords(const ref PipelineError error) {
+    string words = error.message();
+    string vertex = firstError(info: error.vertexMessages());
+    string fragment = firstError(info: error.fragmentMessages());
+    if (!vertex.isEmpty()) { words = words + "; the vertex stage: " + vertex; }
+    if (!fragment.isEmpty() && fragment != vertex) { words = words + "; the fragment stage: " + fragment; }
+    return words;
+}
+fn string firstError(const ref CompilationInfo info) {
+    foreach (const ref CompilationMessage m in info.messages().iterConst()) {
+        bool error = match (m.kind()) { case Error: true; case _: false; };
+        if (error) { return m.message(); }
+    }
+    return "";
+}
+
+// One pipeline a renderer makes, shared with any compile request waiting on it: made, asked for and compiling, or
+// refused, its refusal's words kept until the renderer reports them, once.
+type resource PipelineSlot {
+    Optional<RenderPipeline> made = Optional::None;
+    Optional<PipelineRequest> asked = Optional::None;
+    bool refused = false;
+    bool told = false;
+    string why = "";
+    string what;             // the words a refusal starts with: what was refused, and what follows from it
+    GraphicsErrorKind sort;  // ...and the kind it is reported as
+
+    friend Renderer[make, ready, refusedNow, wanted, ask, makeNow, settle, untold, kind, pipeline];
+    friend CompileRequest[settle];
+
+    ctor make(string what, GraphicsErrorKind kind) {
+        this.what = give what;
+        this.sort = kind;
+    }
+
+    const fn bool ready() { return this.made.isSome(); }
+    const fn bool refusedNow() { return this.refused; }
+    // Neither made, asked for nor refused: still to be asked for.
+    const fn bool wanted() { return this.made.isNone() && this.asked.isNone() && !this.refused; }
+    const fn GraphicsErrorKind kind() { return this.sort; }
+    const fn RenderPipeline pipeline() {
+        return match (this.made) { case Some(value: p): copy p; case None: { panic(msg: "a pipeline drawn with is made first"); } };
+    }
+
+    // Asked for off the frame (`@kama/gpu`'s `createRenderPipelineAsync`): on the web the browser compiles it, natively
+    // @kama/gpu's own threads do.
+    unsafe fn void ask(ref Device device, RenderPipelineDescriptor descriptor) {
+        this.asked = Optional::Some(value: device.createRenderPipelineAsync(descriptor: give descriptor));
+    }
+    // Made during the render (`WhileCompiling::Wait`), a request still compiling let go.
+    unsafe fn void makeNow(ref Device device, RenderPipelineDescriptor descriptor) {
+        this.asked = Optional::None;
+        this.made = Optional::Some(value: device.createRenderPipeline(descriptor: give descriptor));
+    }
+    // Its request polled: made when it answered with a pipeline, refused when it failed. Whether it has answered.
+    unsafe fn bool settle() {
+        if (this.made.isSome() || this.refused) { return true; }
+        if (this.asked.isNone()) { return false; }
+        PipelineStatus s = match (this.asked) { case Some(value: q): q.poll(); case None: PipelineStatus::Pending; };
+        bool pending = match (s) { case Pending: true; case _: false; };
+        if (pending) { return false; }
+        match (give s) {
+            case Ready(pipeline: p): { this.made = Optional::Some(value: give p); }
+            case Failed(error: e): { this.refused = true; this.why = this.what + refusalWords(error: e); }
+            case Pending: { }
+        };
+        this.asked = Optional::None;
+        return true;
+    }
+    // Its refusal's words, the first time they are asked for; "" when it has none untold.
+    fn string untold() {
+        if (!this.refused || this.told) { return ""; }
+        this.told = true;
+        return copy this.why;
+    }
+}
+
+// What a compile request says when polled: `Pending` while any pipeline it asked for compiles, then `Ready` once each has
+// answered, made or refused. A refusal is the renderer's to report, by its next render or `takeErrors()`.
+type enum CompileStatus { Pending, Ready }
+
+// The pipelines a scene needs, asked for off the frame by `renderer.compile(scene:, camera:)`, polled until each has
+// answered, as @kama/gpu's requests are. Dropping it while it is pending is safe: the renderer keeps what it asked for.
+type resource CompileRequest {
+    DynamicArray<Shared<PipelineSlot>> slots;
+
+    friend Renderer::compile[make];
+
+    ctor make(DynamicArray<Shared<PipelineSlot>> slots) { this.slots = give slots; }
+
+    public unsafe fn CompileStatus poll() {
+        bool all = true;
+        for (isize i = 0; i < this.slots.length(); i = i + 1) {
+            Shared<PipelineSlot> slot = copy this.slots[i];
+            if (!slot.settle()) { all = false; }
+        }
+        return all ? CompileStatus::Ready : CompileStatus::Pending;
+    }
 }
 
 type resource Renderer {
@@ -171,27 +340,30 @@ type resource Renderer {
     Buffer frame;                     // the frame's uniform: the view-projection, the ambient light, the lights' count
     TextureView dfgView;              // three.js r187's DFG table, 16 x 16 RG16F, made once (src/dfg.kama)
     Sampler dfgSampling;              // linear, clamped to the edge, as r187's
-    DynamicArray<string> sources;     // the pipelines made, by the WGSL they run
+    DynamicArray<string> sources;     // the meshes' pipelines, by the WGSL they run
     DynamicArray<bool> flipped;       // ...and whether they draw mirrored meshes, whose front faces wind clockwise
     DynamicArray<uint32> drawnAt;     // ...and the samples a texel they draw at, so a method changed back compiles nothing
-    DynamicArray<RenderPipeline> pipelines;
-    DynamicArray<RenderPipeline> prepasses;     // ...and each one's depth-only twin, for the depth prepass
+    DynamicArray<Shared<PipelineSlot>> pipelines;
+    DynamicArray<Shared<PipelineSlot>> prepasses;   // ...and each one's depth-only twin, for the depth prepass
     BindGroupLayout outputLayout;               // the output pass's one binding: the scene's 16-bit float texture
     PipelineLayout outputPipelineLayout;
     BindGroupLayout tableLayout;                // ...and with Blender's AgX table beside it
     PipelineLayout tablePipelineLayout;
     Optional<TextureView> agxTableView = Optional::None;   // Blender's AgX table, made the first time a camera uses it
-    DynamicArray<ToneMapping> outputCurves;     // the output pipelines made, by the tone mapping they apply
-    DynamicArray<RenderPipeline> outputs;
-    RenderInfo last = RenderInfo.of(calls: 0, triangles: 0, objects: 0, matrices: 0);
+    DynamicArray<ToneMapping> outputCurves;     // the output pass's pipelines, by the tone mapping they apply
+    DynamicArray<Shared<PipelineSlot>> outputs;
+    RenderInfo last = RenderInfo.of(calls: 0, triangles: 0, objects: 0, matrices: 0, misses: 0, skipped: 0, waited: 0);
     BindGroupLayout resolveLayout;              // the tone-mapped resolve's one binding: the multisampled scene
     PipelineLayout resolvePipelineLayout;
-    Optional<RenderPipeline> resolving = Optional::None;   // the tone-mapped resolve's pipeline, made the first time
+    Shared<PipelineSlot> resolving;             // the tone-mapped resolve's pipeline, asked for the first time a render takes it
     // How a render anti-aliases (antialiasing.kama; kyoten's rendering.md § Decided, part 4's question 1 and the owner's
     // (A) of 2026-11-18): 4x MSAA by default, the one count above 1 WebGPU guarantees on every device, resolved by the
     // tone-mapped resolve, the ladder's best rung. Its samples a texel are what the pipelines and a target's
     // multisampled textures are made at.
     Antialiasing method = Antialiasing::Msaa4ToneMapped;
+    // What a draw does while its pipelines compile (`WhileCompiling`; kyoten's rendering.md § Decided, GFX-1's part 5,
+    // question 1): the material's general form by default, a draw never waiting.
+    WhileCompiling way = WhileCompiling::General;
     bool printing = true;                       // printErrors
     DynamicArray<GraphicsErrorReport> errors;   // the misuses refused since the last takeErrors, at most KEPT
     int64 overflow = 0;                         // those past KEPT, counted
@@ -289,6 +461,9 @@ type resource Renderer {
         this.resolvePipelineLayout = device.createPipelineLayout(descriptor: give resolveGroups);
         this.outputCurves = DynamicArray.empty();
         this.outputs = DynamicArray.empty();
+        Shared<PipelineSlot> resolve = new PipelineSlot.make(what: "the tone-mapped resolve's pipeline was refused by the device, so the GPU resolves instead: ",
+                                                             kind: GraphicsErrorKind::Pipeline);
+        this.resolving = give resolve;
         this.errors = DynamicArray.empty();
         this.device = give device;
         this.queue = give queue;
@@ -307,6 +482,76 @@ type resource Renderer {
     public const fn Antialiasing antialiasing() { return this.method; }
     public fn ref Antialiasing antialiasingMut() { return this.method; }
 
+    // What a draw does while its pipelines compile (`WhileCompiling`): `General` by default. A property pair, as
+    // `clearColor`; a change takes effect at the next render.
+    public const fn WhileCompiling whileCompiling() { return this.way; }
+    public fn ref WhileCompiling whileCompilingMut() { return this.way; }
+
+    // Ask for every pipeline `scene` needs as `camera` sees it, off the frame (kyoten's rendering.md § Decided, GFX-1's
+    // part 5, question 1), as three.js's `compileAsync` and Unreal's precaching: each mesh's two at the anti-aliasing
+    // method's samples a texel, the tone-mapped resolve's when the method takes it, and the output pass's for the camera's
+    // tone mapping when its target is 8-bit. The scene is placed as a render places it. Poll the request until it is
+    // `Ready`: a render then draws everything with no miss, while nothing new joins the scene and the method and the
+    // camera's tone mapping stay as they were. A loading screen polls it, and so does a test before it renders.
+    public unsafe fn CompileRequest compile(Shared<Scene> scene, Shared<PerspectiveCamera> camera) {
+        Walk walk = scene.walkAll();
+        DynamicArray<string> found = walk.refusals();
+        for (isize i = 0; i < found.length(); i = i + 1) { this.refuse(kind: GraphicsErrorKind::Light, message: copy found[i]); }
+        uint32 perTexel = samplesOf(method: this.method);
+        DynamicArray<Shared<PipelineSlot>> asked = DynamicArray.empty();
+        DynamicArray<isize> slots = scene.drawSlots();
+        for (isize i = 0; i < slots.length(); i = i + 1) {
+            isize slot = slots[i];
+            Shared<Material> material = scene.materialAt(slot: slot);
+            uint32 graph = material.graphVersion();
+            if (!material.gpuMut().compiledAt(graph: graph)) { this.compileNodes(material: copy material); }
+            DynamicArray<string> refused = material.gpuMut().refused();
+            if (refused.length() > 0) { continue; }
+            string source = material.gpuMut().source();
+            isize e = this.pipelineFor(source: source, mirrored: scene.mirroredAt(slot: slot), count: perTexel);
+            int32 madeNone = this.provide(i: e, now: false);
+            asked.add(item: copy this.pipelines[e]);
+            asked.add(item: copy this.prepasses[e]);
+        }
+        if (this.method == Antialiasing::Msaa4ToneMapped) {
+            int32 resolveMadeNone = this.provideResolve(now: false);
+            asked.add(item: copy this.resolving);
+        }
+        Optional<Shared<RenderTarget>> named = camera.target();
+        match (give named) {
+            case Some(value: t): {
+                if (!t.holdsScene()) {
+                    ToneMapping curve = camera.toneMapping();
+                    isize o = this.outputFor(curve: curve);
+                    int32 outputMadeNone = this.provideOutput(o: o, curve: curve, now: false);
+                    asked.add(item: copy this.outputs[o]);
+                }
+            }
+            case None: { }
+        };
+        return CompileRequest.make(slots: give asked);
+    }
+
+    // Each pipeline's refusal found since the last, reported once: a mesh's two as one, since both fail on its material.
+    // A render reports what it found as it ends, and `takeErrors()` what a compile request found.
+    unsafe fn void reportRefusals() {
+        for (isize i = 0; i < this.pipelines.length(); i = i + 1) {
+            Shared<PipelineSlot> shaded = copy this.pipelines[i];
+            Shared<PipelineSlot> depth = copy this.prepasses[i];
+            string first = shaded.untold();
+            string second = depth.untold();
+            if (!first.isEmpty()) { this.refuse(kind: shaded.kind(), message: copy first); }
+            else if (!second.isEmpty()) { this.refuse(kind: depth.kind(), message: copy second); }
+        }
+        for (isize i = 0; i < this.outputs.length(); i = i + 1) {
+            Shared<PipelineSlot> slot = copy this.outputs[i];
+            string words = slot.untold();
+            if (!words.isEmpty()) { this.refuse(kind: slot.kind(), message: copy words); }
+        }
+        string resolveWords = this.resolving.untold();
+        if (!resolveWords.isEmpty()) { this.refuse(kind: this.resolving.kind(), message: copy resolveWords); }
+    }
+
     // What the last render did.
     public const fn RenderInfo info() { return this.last; }
 
@@ -317,7 +562,8 @@ type resource Renderer {
     public fn ref bool printErrorsMut() { return this.printing; }
 
     // The misuses refused since the last call, the oldest first, with how many past the 64 kept were counted.
-    public fn RendererErrors takeErrors() {
+    public unsafe fn RendererErrors takeErrors() {
+        this.reportRefusals();
         DynamicArray<GraphicsErrorReport> fresh = DynamicArray.empty();
         DynamicArray<GraphicsErrorReport> taken = replace(place: this.errors, with: give fresh);
         int64 counted = this.overflow;
@@ -344,11 +590,19 @@ type resource Renderer {
                            b: cast<float64>(this.clearTo.linearB()) * s, a: cast<float64>(this.alpha));
     }
 
-    // The output pass's pipeline for `curve`, made the first time.
+    // The output pass's pipeline for `curve`: its slot, added the first time, none asked for yet.
     unsafe fn isize outputFor(ToneMapping curve) {
         for (isize i = 0; i < this.outputCurves.length(); i = i + 1) {
             if (this.outputCurves[i] == curve) { return i; }
         }
+        Shared<PipelineSlot> slot = new PipelineSlot.make(what: "the output pass's pipeline was refused by the device, so the output pass is left out: ",
+                                                          kind: GraphicsErrorKind::Pipeline);
+        this.outputCurves.add(item: curve);
+        this.outputs.add(item: give slot);
+        return this.outputs.length() - 1;
+    }
+
+    unsafe fn RenderPipelineDescriptor outputDescriptor(ToneMapping curve) {
         ShaderModuleDescriptor described = ShaderModuleDescriptor.make(wgsl: outputWgsl(curve: curve));
         described.label(text: "the output pass");
         ShaderModule shader = this.device.createShaderModule(descriptor: give described);
@@ -359,9 +613,24 @@ type resource Renderer {
                                                                           vertex: VertexState.make(module: give shader, entryPoint: "vs"));
         pipeline.fragment(state: give fragment);
         pipeline.label(text: "the output pass");
-        this.outputCurves.add(item: curve);
-        this.outputs.add(item: this.device.createRenderPipeline(descriptor: give pipeline));
-        return this.outputs.length() - 1;
+        return pipeline;
+    }
+
+    // Slot `o`'s output pass for `curve`, settled: asked for off the frame if it is still wanted, or, `now`, made during
+    // this render. How many pipelines it made now.
+    unsafe fn int32 provideOutput(isize o, ToneMapping curve, bool now) {
+        Shared<PipelineSlot> slot = copy this.outputs[o];
+        if (slot.settle() && (slot.ready() || slot.refusedNow())) { return 0; }
+        if (now) {
+            RenderPipelineDescriptor d = this.outputDescriptor(curve: curve);
+            slot.makeNow(device: ref this.device, descriptor: give d);
+            return 1;
+        }
+        if (slot.wanted()) {
+            RenderPipelineDescriptor d = this.outputDescriptor(curve: curve);
+            slot.ask(device: ref this.device, descriptor: give d);
+        }
+        return 0;
     }
 
     // Blender's AgX table, made the first time a camera uses it (agx.kama): 57³ texels of four half floats, a 3D texture
@@ -391,22 +660,35 @@ type resource Renderer {
         return match (this.agxTableView) { case Some(value: v): copy v; case None: { panic(msg: "made above"); } };
     }
 
-    // The tone-mapped resolve's pipeline, made the first time a render takes the method (antialiasing.kama): it writes
-    // the scene's 16-bit float texture at one sample a texel.
-    unsafe fn RenderPipeline resolver() {
-        if (this.resolving.isNone()) {
-            ShaderModuleDescriptor described = ShaderModuleDescriptor.make(wgsl: resolveWgsl());
-            described.label(text: "the tone-mapped resolve");
-            ShaderModule shader = this.device.createShaderModule(descriptor: give described);
-            FragmentState fragment = FragmentState.make(module: copy shader, entryPoint: "fs");
-            fragment.target(state: ColorTargetState.make(format: TextureFormat::RGBA16Float));
-            RenderPipelineDescriptor pipeline = RenderPipelineDescriptor.make(layout: Layout::Explicit(layout: copy this.resolvePipelineLayout),
-                                                                              vertex: VertexState.make(module: give shader, entryPoint: "vs"));
-            pipeline.fragment(state: give fragment);
-            pipeline.label(text: "the tone-mapped resolve");
-            this.resolving = Optional::Some(value: this.device.createRenderPipeline(descriptor: give pipeline));
+    // The tone-mapped resolve's pipeline (antialiasing.kama): it writes the scene's 16-bit float texture at one sample a
+    // texel.
+    unsafe fn RenderPipelineDescriptor resolveDescriptor() {
+        ShaderModuleDescriptor described = ShaderModuleDescriptor.make(wgsl: resolveWgsl());
+        described.label(text: "the tone-mapped resolve");
+        ShaderModule shader = this.device.createShaderModule(descriptor: give described);
+        FragmentState fragment = FragmentState.make(module: copy shader, entryPoint: "fs");
+        fragment.target(state: ColorTargetState.make(format: TextureFormat::RGBA16Float));
+        RenderPipelineDescriptor pipeline = RenderPipelineDescriptor.make(layout: Layout::Explicit(layout: copy this.resolvePipelineLayout),
+                                                                          vertex: VertexState.make(module: give shader, entryPoint: "vs"));
+        pipeline.fragment(state: give fragment);
+        pipeline.label(text: "the tone-mapped resolve");
+        return pipeline;
+    }
+
+    // ...settled: asked for off the frame if it is still wanted, or, `now`, made during this render. How many pipelines
+    // it made now.
+    unsafe fn int32 provideResolve(bool now) {
+        if (this.resolving.settle() && (this.resolving.ready() || this.resolving.refusedNow())) { return 0; }
+        if (now) {
+            RenderPipelineDescriptor d = this.resolveDescriptor();
+            this.resolving.makeNow(device: ref this.device, descriptor: give d);
+            return 1;
         }
-        return match (this.resolving) { case Some(value: p): copy p; case None: { panic(msg: "made above"); } };
+        if (this.resolving.wanted()) {
+            RenderPipelineDescriptor d = this.resolveDescriptor();
+            this.resolving.ask(device: ref this.device, descriptor: give d);
+        }
+        return 0;
     }
 
     fn GpuColor clearing() {
@@ -429,50 +711,57 @@ type resource Renderer {
         this.queue.submit(commands: give commands);
     }
 
-    // The pipelines that run `source`, a material's WGSL, for a mirrored mesh or not, at `count` samples a texel, made the
-    // first time: the shaded one, and its depth-only twin for the depth prepass, each culling the same faces.
+    // The pipelines that run `source`, a material's WGSL, for a mirrored mesh or not, at `count` samples a texel: their
+    // entry, added the first time with a slot for the shaded one and one for its depth-only twin, none asked for yet.
     unsafe fn isize pipelineFor(const ref string source, bool mirrored, uint32 count) {
         for (isize i = 0; i < this.sources.length(); i = i + 1) {
             if (this.sources[i] == source && this.flipped[i] == mirrored && this.drawnAt[i] == count) { return i; }
         }
-        ShaderModuleDescriptor described = ShaderModuleDescriptor.make(wgsl: copy source);
-        described.label(text: "a material's shader");
-        ShaderModule shader = this.device.createShaderModule(descriptor: give described);
-        FragmentState fragment = FragmentState.make(module: copy shader, entryPoint: "fs");
-        // every scene is drawn in linear HDR, into a 16-bit float texture (area 3; part 4)
-        fragment.target(state: ColorTargetState.make(format: TextureFormat::RGBA16Float));
-        RenderPipelineDescriptor pipeline = RenderPipelineDescriptor.make(layout: Layout::Explicit(layout: copy this.layout),
-                                                                          vertex: meshVertex(shader: copy shader));
-        pipeline.fragment(state: give fragment);
-        pipeline.primitiveMut().cullMode = CullMode::Back;   // three.js's FrontSide: front faces wind counter-clockwise,
-        if (mirrored) { pipeline.primitiveMut().frontFace = FrontFace::CW; }   // and clockwise on a mirrored mesh
-        // shaded where the prepass left this fragment's own depth, the nearest, so each texel is shaded once: Equal, as
-        // Godot's Forward+ (kyoten's rendering.md § Decided, part 4), which `@invariant` on the clip position makes exact
-        pipeline.depthStencil(state: DepthStencilState.make(format: TextureFormat::Depth32Float, depthWriteEnabled: false,
-                                                            depthCompare: CompareFunction::Equal));
-        pipeline.multisampleMut().count = count;
-        pipeline.label(text: "a mesh");
-        // the depth prepass: the same vertex stage and culling, no fragment stage, the nearest depth kept (reversed: the
-        // greater)
-        RenderPipelineDescriptor depthOnly = RenderPipelineDescriptor.make(layout: Layout::Explicit(layout: copy this.layout),
-                                                                           vertex: meshVertex(shader: give shader));
-        depthOnly.primitiveMut().cullMode = CullMode::Back;
-        if (mirrored) { depthOnly.primitiveMut().frontFace = FrontFace::CW; }
-        depthOnly.depthStencil(state: DepthStencilState.make(format: TextureFormat::Depth32Float, depthWriteEnabled: true,
-                                                             depthCompare: CompareFunction::Greater));
-        depthOnly.multisampleMut().count = count;
-        depthOnly.label(text: "a mesh's depth");
+        Shared<PipelineSlot> shaded = new PipelineSlot.make(what: "a material's pipeline was refused by the device, so nothing draws with it: ",
+                                                            kind: GraphicsErrorKind::Material);
+        Shared<PipelineSlot> depth = new PipelineSlot.make(what: "a material's depth-only pipeline was refused by the device, so nothing draws with it: ",
+                                                           kind: GraphicsErrorKind::Material);
         this.sources.add(item: copy source);
         this.flipped.add(item: mirrored);
         this.drawnAt.add(item: count);
-        this.pipelines.add(item: this.device.createRenderPipeline(descriptor: give pipeline));
-        this.prepasses.add(item: this.device.createRenderPipeline(descriptor: give depthOnly));
+        this.pipelines.add(item: give shaded);
+        this.prepasses.add(item: give depth);
         return this.pipelines.length() - 1;
+    }
+
+    // Entry `i`'s two pipelines settled: each asked for off the frame if it is still wanted, or, `now`, made during this
+    // render, one shader module serving both. Neither, once either is refused. How many pipelines it made now.
+    unsafe fn int32 provide(isize i, bool now) {
+        Shared<PipelineSlot> shaded = copy this.pipelines[i];
+        Shared<PipelineSlot> depth = copy this.prepasses[i];
+        bool shadedAnswered = shaded.settle();
+        bool depthAnswered = depth.settle();
+        if (shaded.refusedNow() || depth.refusedNow()) { return 0; }
+        bool shadedNeeded = now ? !shaded.ready() : shaded.wanted();
+        bool depthNeeded = now ? !depth.ready() : depth.wanted();
+        if (!shadedNeeded && !depthNeeded) { return 0; }
+        ShaderModuleDescriptor described = ShaderModuleDescriptor.make(wgsl: copy this.sources[i]);
+        described.label(text: "a material's shader");
+        ShaderModule shader = this.device.createShaderModule(descriptor: give described);
+        int32 made = 0;
+        if (shadedNeeded) {
+            RenderPipelineDescriptor d = shadedDescriptor(layout: copy this.layout, shader: copy shader, mirrored: this.flipped[i],
+                                                          count: this.drawnAt[i]);
+            if (now) { shaded.makeNow(device: ref this.device, descriptor: give d); made = made + 1; }
+            else { shaded.ask(device: ref this.device, descriptor: give d); }
+        }
+        if (depthNeeded) {
+            RenderPipelineDescriptor d = depthDescriptor(layout: copy this.layout, shader: copy shader, mirrored: this.flipped[i],
+                                                         count: this.drawnAt[i]);
+            if (now) { depth.makeNow(device: ref this.device, descriptor: give d); made = made + 1; }
+            else { depth.ask(device: ref this.device, descriptor: give d); }
+        }
+        return made;
     }
 
     // Compile `material`'s nodes to WGSL, once for each graph it names (`graphVersion()`): what its compile refuses is
     // reported, and no mesh draws with it.
-    unsafe fn void compile(Shared<Material> material) {
+    unsafe fn void compileNodes(Shared<Material> material) {
         uint32 graph = material.graphVersion();
         MaterialSettings declared = MaterialSettings.make();
         material.settings(into: ref declared);
@@ -502,7 +791,7 @@ type resource Renderer {
         Optional<Shared<RenderTarget>> named = camera.target();
         if (named.isNone()) {
             // no target, and no window to draw into until part 6 gives the renderer one
-            this.last = RenderInfo.of(calls: 0, triangles: 0, objects: objects, matrices: made);
+            this.last = RenderInfo.of(calls: 0, triangles: 0, objects: objects, matrices: made, misses: 0, skipped: 0, waited: 0);
             this.refuse(kind: GraphicsErrorKind::NoTarget,
                         message: "render drew nothing: the camera names no render target, and this renderer has no window to draw into (name a target with the camera's targetMut())");
             return;
@@ -512,6 +801,34 @@ type resource Renderer {
         uint32 perTexel = samplesOf(method: this.method);
         bool byGpu = this.method == Antialiasing::Msaa4;
         bool toneMappedResolve = this.method == Antialiasing::Msaa4ToneMapped;
+        // the pipelines a draw needs and has not, asked for off the frame, or made now under `Wait`: what this render
+        // made itself, and what it drew other than as asked (`info()`)
+        bool now = this.way == WhileCompiling::Wait;
+        int32 waited = 0;
+        int32 misses = 0;
+        int32 skipped = 0;
+        // the frame's own passes: while the tone-mapped resolve compiles the GPU resolves, the ladder's next rung, and
+        // while the output pass compiles it is left out, the target left as it was. Neither is a miss once refused.
+        if (toneMappedResolve) {
+            waited = waited + this.provideResolve(now: now);
+            if (!this.resolving.ready()) {
+                if (!this.resolving.refusedNow()) { misses = misses + 1; }
+                toneMappedResolve = false;
+                byGpu = true;
+            }
+        }
+        bool output = !target.holdsScene();
+        ToneMapping curve = camera.toneMapping();
+        isize o = -1;
+        if (output) {
+            o = this.outputFor(curve: curve);
+            waited = waited + this.provideOutput(o: o, curve: curve, now: now);
+            Shared<PipelineSlot> outputSlot = copy this.outputs[o];
+            if (!outputSlot.ready()) {
+                if (!outputSlot.refusedNow()) { misses = misses + 1; }
+                output = false;
+            }
+        }
         Texture colour = target.textureOn(device: ref this.device, count: perTexel);
         Texture depth = target.depthOn(device: ref this.device, count: perTexel);
         Texture sceneTexture = target.sceneOn(device: ref this.device, count: perTexel);
@@ -552,9 +869,11 @@ type resource Renderer {
         bound.label(text: "the frame, the object records, the DFG table and the lights");
         BindGroup frameGroup = this.device.createBindGroup(descriptor: give bound);
 
-        // Each mesh's draw, gathered once: its material compiled and its pipelines made the first time, its settings and
-        // buffers written when they changed. The depth prepass and the shaded pass then draw the same list.
+        // Each mesh's draw, gathered once: its material compiled the first time, its pipelines ready or asked for, its
+        // settings and buffers written when they changed. The depth prepass and the shaded pass then draw the same list.
         DynamicArray<isize> chosen = DynamicArray.empty();
+        DynamicArray<RenderPipeline> shadedWith = DynamicArray.empty();
+        DynamicArray<RenderPipeline> depthWith = DynamicArray.empty();
         DynamicArray<BindGroup> looks = DynamicArray.empty();
         DynamicArray<Buffer> positionsOf = DynamicArray.empty();
         DynamicArray<Buffer> normalsOf = DynamicArray.empty();
@@ -569,11 +888,22 @@ type resource Renderer {
             Shared<Material> material = scene.materialAt(slot: slot);
             Shared<Geometry> geometry = scene.geometryAt(slot: slot);
             uint32 graph = material.graphVersion();
-            if (!material.gpuMut().compiledAt(graph: graph)) { this.compile(material: copy material); }
+            if (!material.gpuMut().compiledAt(graph: graph)) { this.compileNodes(material: copy material); }
             DynamicArray<string> refused = material.gpuMut().refused();
             if (refused.length() > 0) { continue; }
             string source = material.gpuMut().source();
-            chosen.add(item: this.pipelineFor(source: source, mirrored: scene.mirroredAt(slot: slot), count: perTexel));
+            isize e = this.pipelineFor(source: source, mirrored: scene.mirroredAt(slot: slot), count: perTexel);
+            waited = waited + this.provide(i: e, now: now);
+            Shared<PipelineSlot> shadedSlot = copy this.pipelines[e];
+            Shared<PipelineSlot> depthSlot = copy this.prepasses[e];
+            if (!shadedSlot.ready() || !depthSlot.ready()) {
+                // compiling, so skipped: no general form yet (part 5, step 2); or refused, and never drawn
+                if (!shadedSlot.refusedNow() && !depthSlot.refusedNow()) { skipped = skipped + 1; }
+                continue;
+            }
+            chosen.add(item: e);
+            shadedWith.add(item: shadedSlot.pipeline());
+            depthWith.add(item: depthSlot.pipeline());
             DynamicArray<uint8> settings = DynamicArray.empty();
             if (material.gpuMut().staleOn(device: this.device, version: material.version())) {
                 MaterialSettings declared = MaterialSettings.make();
@@ -601,7 +931,7 @@ type resource Renderer {
         depthPass.label(text: "a scene's depth");
         RenderPass dp = encoder.beginRenderPass(descriptor: give depthPass);
         dp.setBindGroup(index: 0, group: frameGroup);
-        drawEach(pass: ref dp, pipelines: this.prepasses, chosen: chosen, looks: looks, positions: positionsOf,
+        drawEach(pass: ref dp, pipelines: depthWith, chosen: chosen, looks: looks, positions: positionsOf,
                  normals: normalsOf, indices: indicesOf, formats: formats, counts: counts, slots: drawn);
         give dp.end();
         // the shaded pass, into the multisampled scene: cleared to the clear colour, exposed, then each mesh shaded where
@@ -621,7 +951,7 @@ type resource Renderer {
         pass.label(text: "a scene");
         RenderPass rp = encoder.beginRenderPass(descriptor: give pass);
         rp.setBindGroup(index: 0, group: frameGroup);
-        drawEach(pass: ref rp, pipelines: this.pipelines, chosen: chosen, looks: looks, positions: positionsOf,
+        drawEach(pass: ref rp, pipelines: shadedWith, chosen: chosen, looks: looks, positions: positionsOf,
                  normals: normalsOf, indices: indicesOf, formats: formats, counts: counts, slots: drawn);
         give rp.end();
         // the tone-mapped resolve (part 4's question 1, the ladder's best rung): one full-screen triangle writing the
@@ -638,16 +968,14 @@ type resource Renderer {
                                                             color: GpuColor.of(r: 0.0, g: 0.0, b: 0.0, a: 0.0)));
             resolvePass.label(text: "the tone-mapped resolve");
             RenderPass tp = encoder.beginRenderPass(descriptor: give resolvePass);
-            tp.setPipeline(pipeline: this.resolver());
+            tp.setPipeline(pipeline: this.resolving.pipeline());
             tp.setBindGroup(index: 0, group: resolveGroup);
             tp.draw(vertexCount: 3, instanceCount: 1, firstVertex: 0, firstInstance: 0);
             give tp.end();
         }
         // the output pass, into an 8-bit target: the scene through the camera's tone mapping. A 16-bit float target holds
         // the scene itself, so it has none.
-        if (!target.holdsScene()) {
-            ToneMapping curve = camera.toneMapping();
-            isize o = this.outputFor(curve: curve);
+        if (output) {
             bool table = readsTable(curve: curve);
             BindGroupDescriptor sceneRead = BindGroupDescriptor.make(layout: table ? copy this.tableLayout : copy this.outputLayout);
             sceneRead.entry(binding: 0, resource: BindingResource::Texture(view: sceneTexture.createView(descriptor: TextureViewDescriptor.make())));
@@ -659,7 +987,8 @@ type resource Renderer {
                                                            color: GpuColor.of(r: 0.0, g: 0.0, b: 0.0, a: 0.0)));
             outputPass.label(text: "the output pass");
             RenderPass op = encoder.beginRenderPass(descriptor: give outputPass);
-            op.setPipeline(pipeline: this.outputs[o]);
+            Shared<PipelineSlot> outputSlot = copy this.outputs[o];
+            op.setPipeline(pipeline: outputSlot.pipeline());
             op.setBindGroup(index: 0, group: readGroup);
             op.draw(vertexCount: 3, instanceCount: 1, firstVertex: 0, firstInstance: 0);
             give op.end();
@@ -669,7 +998,9 @@ type resource Renderer {
         // every draw of the scene's meshes the GPU was asked for, both passes', as three.js's `renderer.info` counts a
         // shadow pass's; the frame's own pass, the output, is not the scene's
         int32 calls = cast<int32>(chosen.length()) * 2;
-        this.last = RenderInfo.of(calls: calls, triangles: triangles * 2, objects: objects, matrices: made);
+        this.last = RenderInfo.of(calls: calls, triangles: triangles * 2, objects: objects, matrices: made,
+                                  misses: misses + skipped, skipped: skipped, waited: waited);
+        this.reportRefusals();
     }
 
     // Start reading the target back, as three.js's `readRenderTargetPixelsAsync`: poll the read until it hands back its

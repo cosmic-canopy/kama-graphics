@@ -109,7 +109,7 @@ a resource the program owns.
     The resolve pass is the frame's, as the output pass is, so `info()` does not count it. Every method is core WebGPU,
     so none falls back yet; later methods join the list, each naming the GPU features it needs, the next one down taken
     and reported when one is missing: 8x natively where the adapter has it, TAA, SMAA and FXAA. Quality presets set the
-    method (part 5). The clip position is `@invariant` (§ The compiler), so both passes compute it bit for bit: naga and
+    method (part 5's step 4). The clip position is `@invariant` (§ The compiler), so both passes compute it bit for bit: naga and
     Tint write it as HLSL's `precise` and SPIR-V's `Invariant`, and a prepass and a shaded pass shade exactly the texels
     one pass does on every leg (kyoten's part 4 check 1);
   - each mesh is one draw in each pass, of its geometry's triangles, with back faces not drawn (three.js's `FrontSide`),
@@ -125,10 +125,38 @@ a resource the program owns.
     the scene itself, so it has no output pass;
   - sorting draws, and drawing a geometry and material in common as one instanced draw, come with automatic instancing
     (GFX-2).
+- **Every pipeline is compiled off the frame** (kyoten's rendering.md § Decided, GFX-1's part 5, question 1, the
+  owner's (A) of 2026-11-18): asked for with `@kama/gpu`'s `createRenderPipelineAsync`, which the browser compiles on
+  the web and `@kama/gpu`'s own threads natively, and polled by each render. A render never uses a pipeline it asked for
+  itself, so what it draws does not hang on a race. What a draw does while its pipelines compile is the program's,
+  `whileCompiling()` and `whileCompilingMut()`, a property pair, a `WhileCompiling`, which is `@nonExhaustive`:
+  - **`WhileCompiling::General`, the default:** the material's general form, the same pixels drawn more slowly, once it
+    is compiled; where none is ready the draw is skipped. No material has a general form until part 5's step 2, so for
+    now it skips;
+  - **`WhileCompiling::Skip`:** nothing until the mesh's own pipelines are ready, as Bevy and Unreal's default;
+  - **`WhileCompiling::Wait`:** the pipelines compiled during the render that needs them, as three.js r187's, a hitch
+    the program chose, for a tool, a test or a cutscene. On the web the page does not freeze, but the browser's GPU
+    process waits at the submit.
+
+  The frame's own passes go the same way: while the tone-mapped resolve compiles, the GPU resolves, the ladder's next
+  rung, and while the output pass compiles it is left out, the target left as it was. A refused pipeline of the
+  renderer's own is handled alike, and reported (§ Misuse).
+- **`compile(scene:, camera:)` asks for every pipeline a scene needs, off the frame,** as three.js's `compileAsync` and
+  Unreal's precaching: each mesh's two at the anti-aliasing method's samples a texel, the tone-mapped resolve's when the
+  method takes it, and the output pass's for the camera's tone mapping when its target is 8-bit. It places the scene as
+  a render does. It hands back a `CompileRequest`, polled to a `CompileStatus`: `Pending` while any pipeline it asked
+  for compiles, `Ready` once each has answered, made or refused. A render then draws everything with no miss, while
+  nothing new joins the scene and the method and the camera's tone mapping stay as they were. A loading screen polls
+  it, and so does a test before it renders. Dropping it while it is pending is safe: the renderer keeps what it asked
+  for.
 - **`info()` says what the last render did,** as three.js's `renderer.info`: `calls` and `triangles`, every draw of the
   scene's meshes the GPU was asked for, both passes' (a mesh is two calls, as three.js counts a shadow pass's draws),
   `objects` (the meshes the scene holds a record for) and `matrices` (the world matrices its walk made: 0 when nothing in
-  the scene changed). The output pass is the frame's, not the scene's, so it is not counted.
+  the scene changed). The output pass is the frame's, not the scene's, so it is not counted. Then what its pipelines
+  compiling cost it: `misses`, what it drew other than as asked, each mesh skipped and each frame pass not run as asked,
+  0 when the render is the one asked for, which a loading screen or a test waits for; `skipped`, the meshes skipped;
+  and `waited`, the pipelines it compiled itself under `Wait`, each a hitch. A refused material is no miss, since it
+  never draws, so a program waiting for none is never held by one.
 - **A renderer makes three.js r187's DFG table once** (part 3's third part, question 2): `dfgTable()`, 16 x 16 texels of
   two half floats, a surface's specular scale and bias, written as they are into an RG16Float texture and read through a
   linear sampler that clamps to the edge, as r187's. Each frame binds them in group 0 (§ The compiler). The table is
@@ -161,6 +189,13 @@ Decided, GFX-1's part 2, question 4), as `@kama/gpu` reports every misuse of Web
 - **A material whose compile is refused draws nothing** (§ The compiler): every mesh using it is skipped, and the renderer
   records the error once, of kind `GraphicsErrorKind::Material`, in the compile's words. It never compiles the material
   again, so it is reported once, however many frames draw.
+- **A material whose pipeline the device refuses draws nothing,** such as one passing more values from its vertex
+  stage to its fragment stage than the device's `maxInterStageShaderVariables`: every mesh drawing its WGSL is skipped,
+  the meshes beside it draw, and the renderer records the error once, of kind `GraphicsErrorKind::Material`, its words
+  the device's, whole, then its stages' first error each where they say more. A mesh's two pipelines fail together, so
+  they are one report. It is recorded by the render that finds it, or by `takeErrors()` when a compile request found it
+  first. A pipeline of the renderer's own that the device refuses, the output pass's or the tone-mapped resolve's, is a
+  fault below the program, recorded as `GraphicsErrorKind::Pipeline`.
 - **A directional light at its own target lights nothing** (§ The scene graph): it has no direction, so its direction
   is the zero vector, never a NaN, and the renderer records the error, of kind `GraphicsErrorKind::Light`, when the light
   is written so. That is once each time it changes, never each frame.
@@ -510,7 +545,7 @@ WGSL's reserved words beyond its keywords are refused by the GPU's own compile, 
 - then `tests/`, one program, built debug and release and run natively, and built for the web and run under `kama run`
   in Edge, Firefox and the pinned Chrome for Testing, each started as `tools/browsers.mjs` says.
 
-It is 288 cases on each leg that names a software GPU, and 278 in Edge, whose leg names none. Natively on Windows the
+It is 322 cases on each leg that names a software GPU, and 309 in Edge, whose leg names none. Natively on Windows the
 legs run with `@kama/gpu`'s `dxcompiler.dll` on the PATH (`tools/legs.sh`), so Direct3D 12 compiles with DXC, as
 Firefox's WebGPU does.
 
@@ -716,8 +751,25 @@ Firefox's WebGPU does.
   one and the dark, through Blender's AgX, one renderer drawing all three. **Every test written before step 5 makes its
   renderer with `gpuResolved` (`tests/src/coverage.kama`), the GPU's resolve,** so its goldens and colour checks keep
   their bytes, as step 3 set the earlier tests' tone mapping to `None`.
+- **Part 5's step 1, pipelines compiled off the frame, on each leg's GPU** (`tests/src/compiling.kama`): each case on a
+  renderer of its own, a red unlit box drawn into a 16 x 12 8-bit target with no tone mapping. By default a new scene's
+  first render draws nothing, 3 misses (the box, the tone-mapped resolve, the output) and the box skipped, and a target
+  cleared to `#336699` still shows it, since the output pass is left out; drawn again each tick, a render with no miss
+  comes and shows the box. `Skip` is the same first render. `Wait` draws the box at once, counting the 4 pipelines it
+  compiled, and the next render compiles none. `compile(scene:, camera:)` comes to `Ready`, stays so, and the render
+  after it draws everything with no miss. A material passing 40 values between its stages, beside a box that draws:
+  its request answers, `takeErrors()` reports it once before any render, as `Material`, in the device's words, which
+  say its stages' interface was refused (wgpu-native names the limit, Dawn each location past it, and Firefox gives
+  only wgpu's first line), the other box draws, and it is no miss; drawn with no compile by a renderer that prints and
+  never reads `takeErrors()`, the render that finds the refusal prints it, once (below). A scene compiled at `Msaa4` and
+  drawn at `Msaa4ToneMapped` is resolved by the GPU that render,
+  one miss, and none once the resolve answers; set back to `Msaa4`, it draws at once.
+  **Every test written before part 5 makes its renderer with `waiting` or `gpuResolved` (`tests/src/coverage.kama`),
+  which compile during the render, `WhileCompiling::Wait`,** so one render draws everything, as they were written to
+  read.
 - **Part 2's golden holds part 3's compiler:** `boxes/<gpu>.png` is matched byte for byte with `MeshBasicMaterial`'s
   nodes, as it was with its WGSL by hand.
 - **Printed from outside the program:** the gate counts each leg's printed lines: one for the render refused by the
   renderer that prints, five for the refused adds, one for the refused material, one for the directional light at its
-  own target, and none from the renderer told not to print.
+  own target, one for the material's pipeline the device refuses, found by a render, and none from the renderer told not
+  to print.

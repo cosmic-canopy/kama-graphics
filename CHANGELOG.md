@@ -146,3 +146,10 @@ package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   takes effect at the next render. The goldens `anti-aliasing-msaa4-tone-mapped`, `anti-aliasing-msaa4` and
   `anti-aliasing-none`. **Changed:** a renderer's edges are the tone-mapped resolve's by default; set `Msaa4` for step
   4's.
+- GFX-1's part 5, step 1: pipelines compiled off the frame, by `@kama/gpu`'s `createRenderPipelineAsync`.
+  `WhileCompiling` (`@nonExhaustive`): `General`, the default, which skips a draw until its material has a general form
+  (step 2); `Skip`; and `Wait`, compiling during the render. `whileCompiling()` and `whileCompilingMut()`.
+  `compile(scene:, camera:)`, a `CompileRequest` polled to `CompileStatus`. `RenderInfo`'s `misses`, `skipped` and
+  `waited`. `GraphicsErrorKind::Pipeline`. **Changed:** a new scene's first render draws nothing until its pipelines
+  answer; poll `compile` first, or set `Wait` for step 4's behaviour. A material whose pipeline the device refuses is
+  skipped alone, reported as `Material`, where its frame drew nothing before.

@@ -29,7 +29,7 @@ import {
     graphics::PerspectiveCamera, graphics::BoxGeometry, graphics::Material, graphics::MaterialGpu,
     graphics::MaterialSettings, graphics::NodeBuilder, graphics::PixelRead, graphics::PixelStatus, graphics::ToneMapping,
     graphics::Antialiasing, graphics::vec4, graphics::constant, graphics::Vec3Node,
-    Verdicts, halfValue, checkGolden,
+    Verdicts, halfValue, checkGolden, waiting,
 };
 export { AntialiasRun };
 
@@ -430,7 +430,7 @@ type resource AntialiasRun {
 
     public unsafe fn bool step() {
         if (this.stage == 0) {
-            Renderer made = Renderer.withDevice(device: copy this.device, queue: copy this.queue);
+            Renderer made = waiting(device: copy this.device, queue: copy this.queue);
             bool standard = made.antialiasing() == Antialiasing::Msaa4ToneMapped;
             this.found.add(name: "anti-aliasing: a renderer's method is Msaa4ToneMapped by default", why: standard ? "" : "it is another");
             this.renderer = Optional::Some(value: give made);

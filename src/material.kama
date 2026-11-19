@@ -42,7 +42,8 @@ type resource MaterialGpu {
     DynamicArray<string> refusals;
 
     friend Renderer::render[groupOn, staleOn, compiledAt, source, refused];
-    friend Renderer::compile[store];
+    friend Renderer::compileNodes[store];
+    friend Renderer::compile[compiledAt, source, refused];
 
     public unsafe ctor make() {
         this.devices = DynamicArray.empty();

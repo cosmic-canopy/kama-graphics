@@ -150,7 +150,12 @@ too. Its steps (SPEC § The renderer and § The camera): the depth prepass; the 
 tone mapping, Blender's AgX by default through a table the renderer makes, and r187's AgX, each with its golden;
 natively on Windows the legs compile with `@kama/gpu`'s DXC, as Firefox does (2026-11-18); 4x MSAA resolved by the GPU;
 and the anti-aliasing method on the renderer, one list of whole methods as the owner decided (2026-11-18), the
-tone-mapped resolve the default. Next, part 5: pipelines compiled off the frame, and the quality presets.
+tone-mapped resolve the default.
+
+**Part 5 is under way** (2026-11-18): its three questions were decided as revised (ROADMAP_DETAIL § GFX-1): every way a
+draw takes while its pipeline compiles, the program's choice, the material's general form by default; presets the game
+owns; shaders built ahead left to kyoten's question 11. Step 1 is built (SPEC § The renderer): pipelines compiled off
+the frame, `General`, `Skip` and `Wait`, and `compile(scene:, camera:)`. Next, step 2: the general form.
 GFX-1 is built depth-first, and every example is a test: a headless readback and a golden image, on web and native. A
 feature a program does not use drops out at link time. [SPEC.md](SPEC.md) is what is built so far, and grows with each
 part.

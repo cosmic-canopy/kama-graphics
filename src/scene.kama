@@ -406,6 +406,7 @@ type resource Walk {
     friend DirectionalLight[pushLight, refuse];
     friend AmbientLight[pushLight];
     friend Renderer::render[matrices, refusals];
+    friend Renderer::compile[refusals];
 
     ctor make(Shared<CoreTable> table, Shared<LightTable> lights) {
         this.table = give table;
@@ -779,6 +780,7 @@ type resource Scene implements Object3D {
 
     friend Renderer::render[walkAll, recordsOn, drawSlots, geometryAt, materialAt, mirroredAt, objects, lightsOn,
                             directionalCount, ambientLight];
+    friend Renderer::compile[walkAll, drawSlots, materialAt, mirroredAt];
 
     public unsafe ctor make() {
         this.part = NodePart.make();

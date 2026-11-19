@@ -7,18 +7,30 @@
 // (`Antialiasing::Msaa4`): their goldens and colour checks were written at it, so they keep their bytes. The default, the
 // tone-mapped resolve, is held by tests/src/antialias.kama (kyoten's rendering.md § Decided, 2026-11-18), as step 3 set
 // the earlier tests' tone mapping to `None` and held the curves in their own cases.
+//
+// Every test written before part 5 makes its renderer with `waiting`, or `gpuResolved`, which waits too: each pipeline is
+// compiled during the render that needs it (`WhileCompiling::Wait`), so one render draws everything, as those tests were
+// written to read. The default, a draw skipped while its pipeline compiles, and `compile(scene:, camera:)` are held by
+// tests/src/compiling.kama (kyoten's rendering.md § Decided, GFX-1's part 5, 2026-11-18).
 
 import {
     std::collections::DynamicArray,
     std::math::pow, std::math::floor,
     gpu::Device, gpu::Queue,
-    graphics::Renderer, graphics::Antialiasing,
+    graphics::Renderer, graphics::Antialiasing, graphics::WhileCompiling,
 };
-export { fromSamples, gpuResolved };
+export { fromSamples, gpuResolved, waiting };
 
-// A renderer on `device` resolving its 4x MSAA by the GPU, `Antialiasing::Msaa4`.
-unsafe fn Renderer gpuResolved(Device device, Queue queue) {
+// A renderer on `device` compiling each pipeline during the render that needs it, `WhileCompiling::Wait`.
+unsafe fn Renderer waiting(Device device, Queue queue) {
     Renderer r = Renderer.withDevice(device: give device, queue: give queue);
+    r.whileCompilingMut() = WhileCompiling::Wait;
+    return r;
+}
+
+// ...and resolving its 4x MSAA by the GPU, `Antialiasing::Msaa4`.
+unsafe fn Renderer gpuResolved(Device device, Queue queue) {
+    Renderer r = waiting(device: give device, queue: give queue);
     r.antialiasingMut() = Antialiasing::Msaa4;
     return r;
 }

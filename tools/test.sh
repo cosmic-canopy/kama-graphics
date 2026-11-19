@@ -57,14 +57,16 @@ goldensHeld() {
 # 70 and must print none, the tree refuses five adds (tests/src/boxes.kama and parts.kama), a renderer refuses one
 # material, rendered twice (tests/src/shaders.kama), one directional light at its own target, drawn twice
 # (tests/src/lights.kama), and one material's pipeline the device refuses, found by a render of the renderer that prints
-# and never reads takeErrors() (tests/src/compiling.kama). Each refusal printed once, on every leg.
+# and never reads takeErrors() (tests/src/compiling.kama). Each refusal printed once, on every leg. A mesh's two
+# pipelines, shaded and depth-only, are refused as one, in the words of whichever is found first, since natively each
+# answers on its own: either counts, once.
 refusalsPrinted() {
     local log="$1" leg="$2" renders adds materials lights pipelines
     renders="$(grep -c '@kama/graphics: render drew nothing' "$log" || true)"
     adds="$(grep -c '@kama/graphics: add refused' "$log" || true)"
     materials="$(grep -c '@kama/graphics: a material was refused' "$log" || true)"
     lights="$(grep -c '@kama/graphics: a directional light sits at its own target' "$log" || true)"
-    pipelines="$(grep -c "@kama/graphics: a material's pipeline was refused by the device" "$log" || true)"
+    pipelines="$(grep -cE "@kama/graphics: a material's (depth-only )?pipeline was refused by the device" "$log" || true)"
     if [ "$renders" = 1 ] && [ "$adds" = 5 ] && [ "$materials" = 1 ] && [ "$lights" = 1 ] && [ "$pipelines" = 1 ]; then
         echo "ok   each refused misuse was printed once, and none by the renderer told not to print ($leg)"
     else

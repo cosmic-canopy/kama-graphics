@@ -27,7 +27,13 @@
 //   polled each tick with no render, which polls the requests, reports it once;
 // - **a refusal a render finds itself:** the two boxes drawn with no compile, each tick until no miss, by a renderer that
 //   prints and never reads `takeErrors()`, as such a program keeps it: the render that finds the refusal prints it,
-//   once, which only the run's output shows, so tools/test.sh counts the line.
+//   once, which only the run's output shows, so tools/test.sh counts the line;
+// - **a mesh's two refused pipelines are one report:** twelve meshes, each a refused material of its own, drawn each tick
+//   with `takeErrors()` read after each render until a compile request over the scene is `Ready`, are twelve reports.
+//   Each pipeline answers on its own, natively on @kama/gpu's threads, so a mesh's shaded and depth-only refusals can
+//   fall in two polls, which reported both: one native run in fifteen printed the depth-only line alone, on the
+//   thirty-ninth session. Held still by a probe that keeps one twin's answer for its next poll (kyoten's
+//   `.scratch/s39/kg/probe5.py`, `probe6.py`): 24 reports before the fix, 12 after.
 
 import {
     std::collections::DynamicArray,
@@ -66,6 +72,23 @@ type resource Overflowing implements Material {
 }
 
 // What `info()` said, held to the counts a case wants: "" when it says them.
+// A material passing 40 + `extra` values between its stages, so each `extra` is WGSL, and pipelines, of its own, and
+// the device refuses each.
+type resource OverflowingBy implements Material {
+    MaterialGpu cache;
+    int32 extra;
+    public ctor make(int32 extra) { this.cache = MaterialGpu.make(); this.extra = extra; }
+    public fn ref MaterialGpu gpuMut() { return this.cache; }
+    public const fn uint32 version() { return 0; }
+    public const fn uint32 graphVersion() { return 0; }
+    public const fn void settings(ref MaterialSettings into) { into.addFloat(name: "k", value: 1.0); }
+    public fn void shade(ref NodeBuilder builder) {
+        FloatNode sum = builder.uniformFloat(name: "k");
+        for (int32 i = 1; i <= 40 + this.extra; i = i + 1) { sum = sum + varying(value: constant(value: cast<float32>(i))); }
+        builder.fragmentColor(node: vec4(xyz: vec3(x: sum, y: sum, z: sum), w: constant(value: 1.0)));
+    }
+}
+
 fn string infoIs(RenderInfo got, int32 misses, int32 skipped, int32 waited, int32 calls) {
     if (got.misses == misses && got.skipped == skipped && got.waited == waited && got.calls == calls) { return ""; }
     int32 m = got.misses;
@@ -89,6 +112,7 @@ type resource CompilingRun {
     Optional<PixelRead> reading = Optional::None;
     Optional<Image> got = Optional::None;
     bool failed = false;
+    int32 reported = 0;      // the refusals takeErrors() has reported, over a stage's renders
 
     public ctor make(Device device, Queue queue) {
         this.found = Verdicts.make();
@@ -460,9 +484,50 @@ type resource CompilingRun {
             bool isMaterial = n == 1 && match (e.reports()[0].kind()) { case Material: true; case _: false; };
             this.found.add(name: "compiling, a pipeline the device refuses, asked for by one render: takeErrors() polled alone, with no render after it, reports it once, as Material",
                            why: isMaterial ? "" : "it reports ${n}");
-            this.renderer = Optional::None;
+            // a mesh's two pipelines, shaded and depth-only, are refused as one, whichever answers first: twelve meshes,
+            // each a refused material of its own, drawn each tick with takeErrors() polled after each render, so that
+            // natively, where @kama/gpu's threads answer each pipeline apart, a pair's two answers fall in two polls
+            this.fresh(way: WhileCompiling::Skip);
+            this.stageRefused();
+            this.reported = 0;
+            match (this.renderer) {
+                case Some(value: r): { this.compiling = Optional::Some(value: r.compile(scene: this.theScene(), camera: this.theCamera())); }
+                case None: { }
+            };
+            this.began = monotonicNow();
             this.stage = 14;
+            return false;
+        }
+        if (this.stage == 14) {
+            RenderInfo again = this.renderNow();
+            RendererErrors e = match (this.renderer) { case Some(value: r): r.takeErrors(); case None: { panic(msg: "made first"); } };
+            this.reported = this.reported + cast<int32>(e.reports().length());
+            CompileStatus s = match (this.compiling) { case Some(value: q): q.poll(); case None: CompileStatus::Pending; };
+            bool settled = match (s) { case Ready: true; case _: false; };
+            if ((!settled || again.misses != 0) && this.began.elapsed().asMillis() < PATIENCE_MS) { return false; }
+            RendererErrors last = match (this.renderer) { case Some(value: r): r.takeErrors(); case None: { panic(msg: "made first"); } };
+            this.reported = this.reported + cast<int32>(last.reports().length());
+            int32 n = this.reported;
+            this.found.add(name: "compiling: a mesh's two pipelines the device refuses are reported once, whichever answers first, so twelve refused materials drawn each tick with takeErrors() read after each render are twelve reports",
+                           why: n == 12 && settled ? "" : settled ? "they are ${n} reports" : "the compile never came to Ready");
+            this.compiling = Optional::None;
+            this.renderer = Optional::None;
+            this.stage = 15;
         }
         return true;
+    }
+
+    // A scene of twelve boxes in a grid ahead of the camera, each a refused material of its own (`OverflowingBy`).
+    unsafe fn void stageRefused() {
+        this.stageScene(two: false);
+        Shared<Scene> s = new Scene.make();
+        for (int32 i = 0; i < 12; i = i + 1) {
+            Shared<BoxGeometry> box = new BoxGeometry.make(width: 0.2, height: 0.2, depth: 0.2);
+            Shared<OverflowingBy> refused = new OverflowingBy.make(extra: i);
+            Shared<Mesh> m = new Mesh.make(geometry: box, material: refused);
+            m.positionMut() = Vec3.of(x: cast<float32>(i % 4) * 0.4 - 0.6, y: cast<float32>(i / 4) * 0.4 - 0.4, z: -3.0);
+            s.add(object: m);
+        }
+        this.scene = Optional::Some(value: give s);
     }
 }

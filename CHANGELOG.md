@@ -173,3 +173,8 @@ package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `RenderInfo.standIn`, each such draw also a miss. A stand-in the compiler or the device refuses is reported once,
   and its draws are skipped. **Changed:** `WhileCompiling` is `General`, `StandIn`, `Skip`, `Wait`; `RenderInfo.of`
   takes `standIn:`.
+- **Fixed:** a mesh whose material the device refuses is one report, as the SPEC says, however its two pipelines
+  answer. Natively each answers on `@kama/gpu`'s threads on its own, and where the depth-only one was found a poll
+  before the shaded one, both were reported, the first in the depth-only pipeline's words; a program reading
+  `takeErrors()` saw the material twice. The first found is reported and its twin never, for a general form's two as
+  well.

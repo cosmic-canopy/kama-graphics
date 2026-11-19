@@ -298,7 +298,7 @@ type resource PipelineSlot {
     string what;             // the words a refusal starts with: what was refused, and what follows from it
     GraphicsErrorKind sort;  // ...and the kind it is reported as
 
-    friend Renderer[make, ready, refusedNow, wanted, ask, makeNow, settle, untold, kind, pipeline];
+    friend Renderer[make, ready, refusedNow, wanted, ask, makeNow, settle, untold, silence, kind, pipeline];
     friend CompileRequest[settle];
 
     ctor make(string what, GraphicsErrorKind kind) {
@@ -346,6 +346,8 @@ type resource PipelineSlot {
         this.told = true;
         return copy this.why;
     }
+    // Its refusal, now or whenever it comes, never told: its twin's was, for the one mesh both serve.
+    fn void silence() { this.told = true; }
 }
 
 // What a compile request says when polled: `Pending` while any pipeline it asked for compiles, then `Ready` once each has
@@ -645,16 +647,29 @@ type resource Renderer {
         bool resolveAnswered = this.resolving.settle();
     }
 
-    // Each pipeline's refusal found since the last, reported once: a mesh's two as one, since both fail on its material.
-    // A render reports what it found as it ends, and `takeErrors()` what a compile request found.
+    // A pair's refusal, the shaded pipeline's and the depth-only one's, reported once, as the first of the two found, and
+    // the other never: each answers on its own, natively on @kama/gpu's threads, so one may be found a poll before the
+    // other, and both fail on the one material.
+    unsafe fn void refusePair(Shared<PipelineSlot> shaded, Shared<PipelineSlot> depth) {
+        string first = shaded.untold();
+        if (!first.isEmpty()) {
+            depth.silence();
+            this.refuse(kind: shaded.kind(), message: copy first);
+            return;
+        }
+        string second = depth.untold();
+        if (!second.isEmpty()) {
+            shaded.silence();
+            this.refuse(kind: depth.kind(), message: copy second);
+        }
+    }
+
+    // Each pipeline's refusal found since the last, reported once: a mesh's two as one, since both fail on its material,
+    // whether they are found at one poll or two (`refusePair`). A render reports what it found as it ends, and
+    // `takeErrors()` what a compile request found.
     unsafe fn void reportRefusals() {
         for (isize i = 0; i < this.pipelines.length(); i = i + 1) {
-            Shared<PipelineSlot> shaded = copy this.pipelines[i];
-            Shared<PipelineSlot> depth = copy this.prepasses[i];
-            string first = shaded.untold();
-            string second = depth.untold();
-            if (!first.isEmpty()) { this.refuse(kind: shaded.kind(), message: copy first); }
-            else if (!second.isEmpty()) { this.refuse(kind: depth.kind(), message: copy second); }
+            this.refusePair(shaded: copy this.pipelines[i], depth: copy this.prepasses[i]);
         }
         // a general form's refusal, once its material's own pipelines are made, so a material the device refuses outright,
         // its general form too, is reported once, as its own pipeline's refusal
@@ -663,22 +678,12 @@ type resource Renderer {
             Shared<PipelineSlot> depthOwn = copy this.prepasses[i];
             if (!shadedOwn.ready() || !depthOwn.ready()) { continue; }
             isize g = this.generalOf[i];
-            Shared<PipelineSlot> shadedGeneral = copy this.generalShaded[g];
-            Shared<PipelineSlot> depthGeneral = copy this.generalDepth[g];
-            string shadedWords = shadedGeneral.untold();
-            string depthWords = depthGeneral.untold();
-            if (!shadedWords.isEmpty()) { this.refuse(kind: shadedGeneral.kind(), message: copy shadedWords); }
-            else if (!depthWords.isEmpty()) { this.refuse(kind: depthGeneral.kind(), message: copy depthWords); }
+            this.refusePair(shaded: copy this.generalShaded[g], depth: copy this.generalDepth[g]);
         }
         // a stand-in's general form, which its draws take alone, its own pipelines never asked for
         for (isize g = 0; g < this.generalShaded.length(); g = g + 1) {
             if (!this.generalStandIn[g]) { continue; }
-            Shared<PipelineSlot> shadedGeneral = copy this.generalShaded[g];
-            Shared<PipelineSlot> depthGeneral = copy this.generalDepth[g];
-            string shadedWords = shadedGeneral.untold();
-            string depthWords = depthGeneral.untold();
-            if (!shadedWords.isEmpty()) { this.refuse(kind: shadedGeneral.kind(), message: copy shadedWords); }
-            else if (!depthWords.isEmpty()) { this.refuse(kind: depthGeneral.kind(), message: copy depthWords); }
+            this.refusePair(shaded: copy this.generalShaded[g], depth: copy this.generalDepth[g]);
         }
         for (isize i = 0; i < this.outputs.length(); i = i + 1) {
             Shared<PipelineSlot> slot = copy this.outputs[i];

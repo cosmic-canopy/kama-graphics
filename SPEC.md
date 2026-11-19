@@ -212,7 +212,10 @@ Decided, GFX-1's part 2, question 4), as `@kama/gpu` reports every misuse of Web
   stage to its fragment stage than the device's `maxInterStageShaderVariables`: every mesh drawing its WGSL is skipped,
   the meshes beside it draw, and the renderer records the error once, of kind `GraphicsErrorKind::Material`, its words
   the device's, whole, then its stages' first error each where they say more. A mesh's two pipelines fail together, so
-  they are one report. It is recorded by the render that finds it, or by `takeErrors()` when a compile request found it
+  they are one report, in the words of whichever is found first ("a material's pipeline was refused by the device" or
+  "a material's depth-only pipeline…"): each answers on its own, natively on `@kama/gpu`'s threads, so one may be found
+  a poll before the other, and the other is then never reported. The same holds for a general form's two. It is
+  recorded by the render that finds it, or by `takeErrors()` when a compile request found it
   first. A pipeline of the renderer's own that the device refuses, the output pass's or the tone-mapped resolve's, is a
   fault below the program, recorded as `GraphicsErrorKind::Pipeline`.
 - **A material whose general form alone the device refuses draws by its own pipelines,** and while they compile its
@@ -599,7 +602,7 @@ WGSL's reserved words beyond its keywords are refused by the GPU's own compile, 
 - then `tests/`, one program, built debug and release and run natively, and built for the web and run under `kama run`
   in Edge, Firefox and the pinned Chrome for Testing, each started as `tools/browsers.mjs` says.
 
-It is 362 cases on each leg that names a software GPU, and 349 in Edge, whose leg names none. Natively on Windows the
+It is 400 cases on each leg that names a software GPU, and 387 in Edge, whose leg names none. Natively on Windows the
 legs run with `@kama/gpu`'s `dxcompiler.dll` on the PATH (`tools/legs.sh`), so Direct3D 12 compiles with DXC, as
 Firefox's WebGPU does.
 
@@ -821,7 +824,11 @@ Firefox's WebGPU does.
   pipeline it asked for itself:** twelve boxes, by turns of two materials, so another material's shader module is made
   between two draws that share a pipeline, are all skipped by a new scene's first render, under `Skip` and, with no
   general form drawn, under `General`. Before the fix, natively, five of them were drawn, on every run. A refusal one
-  render found is reported by `takeErrors()` polled alone, with no render after it.
+  render found is reported by `takeErrors()` polled alone, with no render after it. **A mesh's two refused pipelines
+  are one report:** twelve meshes, each a refused material of its own, drawn each tick with `takeErrors()` read after
+  each render until a compile request over the scene is `Ready`, are twelve reports. Natively the two answer apart now
+  and then (one native run in fifteen printed the depth-only line alone); held still by a probe that keeps one twin's
+  answer for its next poll, the code before the fix made 24.
   **Every test written before part 5 makes its renderer with `waiting` or `gpuResolved` (`tests/src/coverage.kama`),
   which compile during the render, `WhileCompiling::Wait`,** so one render draws everything, as they were written to
   read.
@@ -865,5 +872,5 @@ Firefox's WebGPU does.
   nodes, as it was with its WGSL by hand.
 - **Printed from outside the program:** the gate counts each leg's printed lines: one for the render refused by the
   renderer that prints, five for the refused adds, one for the refused material, one for the directional light at its
-  own target, one for the material's pipeline the device refuses, found by a render, and none from the renderer told not
-  to print.
+  own target, one for the material's pipeline the device refuses, found by a render, in either twin's words, and none
+  from the renderer told not to print.

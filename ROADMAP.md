@@ -11,7 +11,7 @@ decided design are [AGENTS.graphics.md](AGENTS.graphics.md), and the history is 
 > **`GFX-<n>` is a permanent id, not a position.** It is assigned once, from the counter below, which the same edit
 > bumps; it is never reused or renumbered, and a shipped row's id retires with it.
 
-**Next id: GFX-19**
+**Next id: GFX-20**
 
 **The order is by example** (the design pass, 2026-11-11, "and may change"). Each slice is what one of the library's
 examples needs, built depth-first on the web and natively, and every example is a test. The state of the art follows as
@@ -38,6 +38,7 @@ programs ask, each technique a ladder of methods, best first.
 
 | id | item | why |
 |---|---|---|
+| GFX-19 | **8x MSAA natively**, where the adapter takes it: the first method a device may lack, so it brings `applyQuality`'s step-down; on `@kama/gpu`'s GPU-17 | [detail](ROADMAP_DETAIL.md#msaa8) |
 | GFX-8 | **Global illumination** up its ladder: probes, screen space, software traced, then hardware ray traced on the native ray-tracing leg | [detail](ROADMAP_DETAIL.md#gi) |
 | GFX-9 | **Reflections**: probes, screen space, hardware ray traced, and planar mirrors | [detail](ROADMAP_DETAIL.md#reflections) |
 | GFX-10 | **Virtual shadow maps**, natively on 64-bit atomics | [detail](ROADMAP_DETAIL.md#vsm) |

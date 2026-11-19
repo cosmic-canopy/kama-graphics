@@ -614,6 +614,23 @@ the XR package, and `@kama/gpu`'s Android surface (GPU-11). The owner may move i
   - shapes, extrusions and vector paths.
 - **Done:** a million points and their labels draw at the display's rate on the laptop's browsers.
 
+<a id="msaa8"></a>
+## GFX-19: 8x MSAA natively
+
+The anti-aliasing ladder's rung above 4x MSAA (FEATURES.md's anti-aliasing row), natively where the adapter takes 8
+samples for the formats the renderer draws to: the scene's 16-bit float colour and its depth. WebGPU's core takes 1 and
+4 alone, so the web never has it. It is the first method a device may lack, so it brings what part 5's step 4 left for
+it (kyoten's `docs/design/rendering.md` § Decided, GFX-1's part 5, step 4's question 3, the owner, 2026-11-19):
+- `applyQuality(quality:)` taking the next method down where the device lacks 8x, and handing back the `Quality` in
+  effect; `supportsAntialiasing(method:)` answering from the device;
+- a technique set directly stepping down the same way at the next render, `antialiasing()` saying what was asked and
+  `quality()` what is in effect;
+- its goldens where a leg takes 8 samples, and the step-down held on the web, a real device that never does.
+
+It starts in `@kama/gpu`'s GPU-17, the per-format query wgpu-native's C API lacks, with GPU-10's way of asking a
+device for a native feature. Which presets take it is the row's. Whichever method a device may lack is built first,
+this or another, brings the step-down.
+
 <a id="gi"></a>
 ## GFX-8: global illumination
 

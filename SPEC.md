@@ -107,9 +107,9 @@ a resource the program owns.
     A change takes effect at the next render: its pipelines are made at the method's count, and kept per count, so a
     method set back compiles nothing; a target's multisampled scene and depth are made again at it (§ Render targets).
     The resolve pass is the frame's, as the output pass is, so `info()` does not count it. Every method is core WebGPU,
-    so none falls back yet; later methods join the list, each naming the GPU features it needs, the next one down taken
-    and reported when one is missing: 8x natively where the adapter has it, TAA, SMAA and FXAA. Quality presets set the
-    method (part 5's step 4). The clip position is `@invariant` (§ The compiler), so both passes compute it bit for bit: naga and
+    so none falls back yet; later methods join the list, each naming the GPU features it needs: 8x natively where the
+    adapter has it, TAA, SMAA and FXAA. A quality sets the method with every other technique, and steps down where the
+    device lacks one (below). The clip position is `@invariant` (§ The compiler), so both passes compute it bit for bit: naga and
     Tint write it as HLSL's `precise` and SPIR-V's `Invariant`, and a prepass and a shaded pass shade exactly the texels
     one pass does on every leg (kyoten's part 4 check 1);
   - each mesh is one draw in each pass, of its geometry's triangles, with back faces not drawn (three.js's `FrontSide`),
@@ -125,6 +125,27 @@ a resource the program owns.
     the scene itself, so it has no output pass;
   - sorting draws, and drawing a geometry and material in common as one instanced draw, come with automatic instancing
     (GFX-2).
+- **A quality sets every technique at once** (kyoten's rendering.md § Decided, GFX-1's part 5, question 2, and step 4's
+  three questions, the owner's (A) of 2026-11-19). `Quality` is a `type value` with one public field per technique, its
+  whole setting: today one, `antialiasing`. Two qualities are equal when every setting is (`@generate(Equatable)`).
+  - `Quality.of(antialiasing:)` builds one from nothing. It gains a parameter with each technique, so a program building
+    one that way states every technique.
+  - `Quality.make(preset:)` is one of the library's four, `QualityPreset::Low`, `Medium`, `High` or `Ultra`, which is
+    `@nonExhaustive`: `Low` takes `Antialiasing::Msaa4`, the rest `Msaa4ToneMapped`, and none turns anti-aliasing off.
+    Their contents are provisional until measured (`@kama/gpu`'s timestamp queries; a tiled GPU at GFX-5). They are
+    starting points: a game changes any field of one, or builds its own, and names as many as it likes.
+  - **`renderer.applyQuality(quality:)` writes every technique and hands back the quality in effect,** which a program
+    compares with what it asked for. A change takes effect at the next render, as each technique's own pair's does.
+    Nothing is printed: a weaker device stepping down is no misuse.
+  - **`renderer.quality()` is the quality in effect,** made from the settings at each call, so a technique set directly,
+    as by `antialiasingMut()`, reads back there too. Each technique's own getter says what was set: the two are the
+    same until a method a device may lack exists.
+  - **`renderer.supportsAntialiasing(method:)` says whether the device can draw with a method,** by the rule
+    `applyQuality` steps down by. Each technique gets a query of its own as it arrives, named for it, since kama has no
+    overloading. Every method today is core WebGPU, so it answers true for each, and nothing steps down yet. The first
+    method a device may lack, 8x MSAA natively (GFX-19, on `@kama/gpu`'s GPU-17), brings the step-down: `applyQuality`
+    then takes the next method down where the device lacks one, the quality it hands back shows it, and the query says
+    why. The raw features stay `@kama/gpu`'s `device.features()`.
 - **Every pipeline is compiled off the frame** (kyoten's rendering.md § Decided, GFX-1's part 5, question 1, the
   owner's (A) of 2026-11-18): asked for with `@kama/gpu`'s `createRenderPipelineAsync`, which the browser compiles on
   the web and `@kama/gpu`'s own threads natively. Every request is polled once, at the start of each render, of
@@ -602,7 +623,7 @@ WGSL's reserved words beyond its keywords are refused by the GPU's own compile, 
 - then `tests/`, one program, built debug and release and run natively, and built for the web and run under `kama run`
   in Edge, Firefox and the pinned Chrome for Testing, each started as `tools/browsers.mjs` says.
 
-It is 400 cases on each leg that names a software GPU, and 387 in Edge, whose leg names none. Natively on Windows the
+It is 414 cases on each leg that names a software GPU, and 401 in Edge, whose leg names none. Natively on Windows the
 legs run with `@kama/gpu`'s `dxcompiler.dll` on the PATH (`tools/legs.sh`), so Direct3D 12 compiles with DXC, as
 Firefox's WebGPU does.
 
@@ -803,7 +824,9 @@ Firefox's WebGPU does.
   the first (WARP measured 1.1 steps); the GPU's average under `Msaa4`, within a step; only the clear's and the box's
   under `None`; the tone-mapped resolve again once set back. Then the tone-mapped resolve into an 8-bit target, clamped
   and sRGB-encoded after it; a box whose shader squares 10^30, stored as infinity, resolved as one at 65504 and never
-  NaN; and a clear colour of linear (−1, −0.5, −0.25), given back as it was. The goldens
+  NaN; and a clear colour of linear (−1, −0.5, −0.25), given back as it was. The method is set back to the tone-mapped
+  resolve by `applyQuality` with the library's `High` (part 5's step 4), so the next render is held to draw by what was
+  applied. The goldens
   `anti-aliasing-msaa4-tone-mapped`, `anti-aliasing-msaa4` and `anti-aliasing-none` draw a bright box's edges over a dim
   one and the dark, through Blender's AgX, one renderer drawing all three. **Every test written before step 5 makes its
   renderer with `gpuResolved` (`tests/src/coverage.kama`), the GPU's resolve,** so its goldens and colour checks keep
@@ -868,6 +891,22 @@ Firefox's WebGPU does.
     it never draws, and a scene compiled under `StandIn` draws with no miss. A stand-in passing 16 values, whose general form the device refuses, is reported once, by a compile or by
     a render's ask, and a stand-in its compile refuses once, in its compile's words; the draws that would take either
     are skipped.
+- **Part 5's step 4, a renderer's quality** (`tests/src/quality.kama`). Every comparison goes through `Quality`'s `!=`,
+  as a program's own would.
+  - **With no GPU:** the library's `Low` takes `Msaa4`, and `Medium`, `High` and `Ultra` take `Msaa4ToneMapped`.
+  - **On each leg's GPU,** on one renderer:
+    - a new renderer's quality is the default's;
+    - `applyQuality` of each of the library's four, over a method set to `None` directly so each changes it, writes the
+      method and hands it back, and `quality()` reads it. Each case states the method it wants, so a preset that is
+      wrong cannot pass it;
+    - a game's own preset, the library's `Low` with anti-aliasing turned off, is applied as it is, over the tone-mapped
+      resolve;
+    - `quality()` reads a method set directly by `antialiasingMut()`;
+    - `supportsAntialiasing` answers true for each method.
+
+  That the next render draws by what was applied is held by an image, part 4's step 5's switch back to the tone-mapped
+  resolve (above). Whether `applyQuality` hands back the quality in effect, rather than the quality it was handed,
+  cannot be told apart until a method can step down: GFX-19's cases hold that.
 - **Part 2's golden holds part 3's compiler:** `boxes/<gpu>.png` is matched byte for byte with `MeshBasicMaterial`'s
   nodes, as it was with its WGSL by hand.
 - **Printed from outside the program:** the gate counts each leg's printed lines: one for the render refused by the

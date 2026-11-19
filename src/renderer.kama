@@ -58,6 +58,7 @@ import {
     Color, RenderTarget, Scene, Walk, PerspectiveCamera, Geometry, BufferGeometry, Material, MaterialSettings, NodeBuilder,
     MeshStandardMaterial,
     dfgTable, ToneMapping, outputWgsl, readsTable, blenderAgxTable, blenderAgxSize, Antialiasing, samplesOf, resolveWgsl,
+    Quality,
 };
 export {
     Renderer, RenderInfo, PixelRead, PixelStatus, GraphicsErrorKind, GraphicsErrorReport, RendererErrors, WhileCompiling,
@@ -410,7 +411,8 @@ type resource Renderer {
     // How a render anti-aliases (antialiasing.kama; kyoten's rendering.md § Decided, part 4's question 1 and the owner's
     // (A) of 2026-11-18): 4x MSAA by default, the one count above 1 WebGPU guarantees on every device, resolved by the
     // tone-mapped resolve, the ladder's best rung. Its samples a texel are what the pipelines and a target's
-    // multisampled textures are made at.
+    // multisampled textures are made at. Set by `antialiasingMut()` or by `applyQuality` (quality.kama), which will take
+    // the next method down where the device lacks one once a method a device may lack exists (GFX-19).
     Antialiasing method = Antialiasing::Msaa4ToneMapped;
     // What a draw does while its pipelines compile (`WhileCompiling`; kyoten's rendering.md § Decided, GFX-1's part 5,
     // question 1): the material's general form by default, a draw never waiting.
@@ -544,6 +546,30 @@ type resource Renderer {
     // property pair, as `clearColor`; a change takes effect at the next render.
     public const fn Antialiasing antialiasing() { return this.method; }
     public fn ref Antialiasing antialiasingMut() { return this.method; }
+
+    // The quality in effect (quality.kama): every technique's setting as the next render draws it, made from the settings
+    // at each call, so a technique set directly, as by `antialiasingMut()`, reads back here too. Each technique's own
+    // getter says what was set, the same today; they can differ only once a method a device may lack exists (8x MSAA
+    // natively, GFX-19), where a method set directly that the device lacks reads back from its getter as set, and here
+    // as drawn.
+    public const fn Quality quality() { return Quality.of(antialiasing: this.method); }
+
+    // Every technique set from `quality` at once (quality.kama), and the quality in effect handed back, which a program
+    // compares with what it asked for. A change takes effect at the next render, as each technique's own pair's does.
+    // Where the device lacks a method, the next one down is taken, and the technique's `supports…` query says why the
+    // two differ: that comes with the first method a device may lack (GFX-19), since every method on each ladder today
+    // is core WebGPU. Nothing is printed, since a weaker device stepping down is no misuse.
+    public fn Quality applyQuality(Quality quality) {
+        this.method = quality.antialiasing;
+        return this.quality();
+    }
+
+    // Whether this renderer's device can draw with `method` (antialiasing.kama), by the rule `applyQuality` steps down by:
+    // true for every method today, each core WebGPU on every device. A method a device may lack answers from the device,
+    // the first being 8x MSAA natively (GFX-19). The raw features stay `@kama/gpu`'s `device.features()`.
+    public const fn bool supportsAntialiasing(Antialiasing method) {
+        return match (method) { case Msaa4ToneMapped: true; case Msaa4: true; case None: true; };
+    }
 
     // What a draw does while its pipelines compile (`WhileCompiling`): `General` by default. A property pair, as
     // `clearColor`; a change takes effect at the next render.

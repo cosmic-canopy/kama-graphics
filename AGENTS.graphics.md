@@ -152,14 +152,17 @@ natively on Windows the legs compile with `@kama/gpu`'s DXC, as Firefox does (20
 and the anti-aliasing method on the renderer, one list of whole methods as the owner decided (2026-11-18), the
 tone-mapped resolve the default.
 
-**Part 5 is under way** (2026-11-18): its three questions were decided as revised (ROADMAP_DETAIL § GFX-1): every way a
-draw takes while its pipeline compiles, the program's choice, the material's general form by default; presets the game
-owns; shaders built ahead left to kyoten's question 11. Step 1 is built (SPEC § The renderer): pipelines compiled off
-the frame, `General`, `Skip` and `Wait`, and `compile(scene:, camera:)`. Step 2 is built (SPEC § The renderer and § The
-compiler): a material's general form, culling in the shader, which `General` draws while a mesh's own pipelines
-compile. Step 3 is built (SPEC § The renderer and § The scene graph): `StandIn`, the renderer's stand-in, the
-library's lit grey unless a program names its own, drawn by its general form, and a mesh's own way over the
-renderer's. Next, step 4: `Quality`, `applyQuality` and the device's features.
+**Part 5 is built** (2026-11-18 to 2026-11-19): its three questions were decided as revised (ROADMAP_DETAIL § GFX-1):
+every way a draw takes while its pipeline compiles, the program's choice, the material's general form by default;
+presets the game owns; shaders built ahead left to kyoten's question 11. Step 1 (SPEC § The renderer): pipelines
+compiled off the frame, `General`, `Skip` and `Wait`, and `compile(scene:, camera:)`. Step 2 (SPEC § The renderer and §
+The compiler): a material's general form, culling in the shader, which `General` draws while a mesh's own pipelines
+compile. Step 3 (SPEC § The renderer and § The scene graph): `StandIn`, the renderer's stand-in, the library's lit grey
+unless a program names its own, drawn by its general form, and a mesh's own way over the renderer's. Step 4 (SPEC §
+The renderer): `Quality`, a value the game owns with the library's four presets as starting points, `applyQuality`
+handing back the quality in effect, `quality()`, and `supportsAntialiasing(method:)`; the step-down comes with the
+first method a device may lack (GFX-19). Next, part 6: `examples/cube` in a window on both legs, FLIP, the 150 KB
+measurement, FEATURES.md's rows and the SPEC.
 GFX-1 is built depth-first, and every example is a test: a headless readback and a golden image, on web and native. A
 feature a program does not use drops out at link time. [SPEC.md](SPEC.md) is what is built so far, and grows with each
 part.

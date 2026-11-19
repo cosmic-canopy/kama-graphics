@@ -3,9 +3,11 @@
 // presets set it. Every value is a method the renderer can draw with, so none is a misuse. A change takes effect at the
 // next render, which makes its pipelines and a target's textures at the method's sample count.
 //
-// Later methods join the list as rungs of the same ladder, each naming the GPU features it needs, the next one down
-// taken and reported when one is missing: 8x natively where the adapter has it (WebGPU's core allows 1 and 4 samples
-// alone), TAA, SMAA and FXAA.
+// Later methods join the list as rungs of the same ladder, each naming the GPU features it needs: 8x natively where the
+// adapter has it (WebGPU's core allows 1 and 4 samples alone), TAA, SMAA and FXAA. Every method here is core WebGPU, so
+// every device draws each, and the renderer's `supportsAntialiasing(method:)` is true for all. The first method a device
+// may lack, 8x natively (GFX-19), brings the step-down: `applyQuality` (quality.kama) then takes the next method down
+// where the device lacks one and hands back the quality in effect, and the query says why it differs.
 
 export { Antialiasing, samplesOf, resolveWgsl };
 

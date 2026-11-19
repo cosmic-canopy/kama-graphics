@@ -1,0 +1,41 @@
+// A renderer's quality (kyoten's rendering.md § Decided, GFX-1's part 5, question 2, and step 4's three questions, the
+// owner's (A) of 2026-11-19): every technique's setting in one value the game owns. The library's four presets are only
+// starting points, `Quality.make(preset:)`; a game changes any field of one, or builds its own from nothing with
+// `Quality.of`, names as many as it likes ("Steam Deck", "Quest 3"), and hands one to `renderer.applyQuality(quality:)`,
+// which writes every technique and hands back the quality in effect.
+//
+// A technique joins as a field when it is built, its whole setting: the method now, and later its parameters, such as a
+// shadow map's size. Today there is one, anti-aliasing.
+
+import { Antialiasing };
+export { Quality, QualityPreset };
+
+// The library's four starting points, from a weak device to a strong one. Their contents are provisional until measured
+// (timestamp queries, `@kama/gpu`'s GPU-6; a tiled GPU at GFX-5): `Low` takes the GPU's resolve, `Antialiasing::Msaa4`,
+// and the rest the tone-mapped one, `Antialiasing::Msaa4ToneMapped`. No preset turns anti-aliasing off.
+@nonExhaustive
+type enum QualityPreset { Low, Medium, High, Ultra }
+
+// One setting a technique. Two qualities are equal when every technique's setting is, so a program compares what it asked
+// for with what `applyQuality` handed back: `if (got != asked)`, and the renderer's `supports…` queries say why a
+// technique differs.
+@generate(Equatable)
+type value Quality {
+    // How the frame is anti-aliased (antialiasing.kama).
+    public Antialiasing antialiasing;
+
+    // A quality built from nothing: each technique's setting as given. It gains a parameter with each technique, so a
+    // program building one this way states every technique.
+    public ctor of(Antialiasing antialiasing) { this.antialiasing = antialiasing; }
+
+    // One of the library's four, `preset`.
+    public ctor make(QualityPreset preset) {
+        Antialiasing method = match (preset) {
+            case Low: Antialiasing::Msaa4;
+            case Medium: Antialiasing::Msaa4ToneMapped;
+            case High: Antialiasing::Msaa4ToneMapped;
+            case Ultra: Antialiasing::Msaa4ToneMapped;
+        };
+        this.antialiasing = method;
+    }
+}

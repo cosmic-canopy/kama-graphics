@@ -9,7 +9,9 @@
 //   sample of four on the box, a texel's red is 0.38, where the GPU's resolve gives 5.04 and a luma weight 0.87;
 // - **`Msaa4`:** every texel the linear average of its samples, the GPU's resolve;
 // - **`None`:** every texel the clear colour's or the box's, none between, both found;
-// - **`Msaa4ToneMapped` again:** the tone-mapped resolve, as the first render;
+// - **`Msaa4ToneMapped` again,** applied by `applyQuality` with the library's `High` (part 5's step 4,
+//   tests/src/quality.kama), so the next render is held to draw by what was applied: the tone-mapped resolve, as the
+//   first render;
 // - **an 8-bit target:** the edge shows the tone-mapped resolve clamped and sRGB-encoded, so it is resolved before the
 //   output pass;
 // - **a sample stored as infinity:** a box whose shader squares 10^30, so it is infinite on every GPU, resolves as one at
@@ -28,7 +30,7 @@ import {
     graphics::Color, graphics::Renderer, graphics::RenderTarget, graphics::TargetFormat, graphics::Scene, graphics::Mesh,
     graphics::PerspectiveCamera, graphics::BoxGeometry, graphics::Material, graphics::MaterialGpu,
     graphics::MaterialSettings, graphics::NodeBuilder, graphics::PixelRead, graphics::PixelStatus, graphics::ToneMapping,
-    graphics::Antialiasing, graphics::vec4, graphics::constant, graphics::Vec3Node,
+    graphics::Antialiasing, graphics::Quality, graphics::QualityPreset, graphics::vec4, graphics::constant, graphics::Vec3Node,
     Verdicts, halfValue, checkGolden, waiting,
 };
 export { AntialiasRun };
@@ -269,6 +271,10 @@ type resource AntialiasRun {
     fn void choose(Antialiasing method) {
         match (this.renderer) { case Some(value: rd): { rd.antialiasingMut() = method; } case None: { } };
     }
+    // ...or every technique, from one of the library's four quality presets, as a program applies one.
+    fn void applyPreset(QualityPreset preset) {
+        match (this.renderer) { case Some(value: rd): { rd.applyQuality(quality: Quality.make(preset: preset)); } case None: { } };
+    }
 
     // Whether the read has answered: its image kept in `got`, or `failed` set. False while it is pending.
     unsafe fn bool answered() {
@@ -460,14 +466,14 @@ type resource AntialiasRun {
             if (!this.answered()) { return false; }
             this.found.add(name: "None: one sample a texel, each texel the clear colour's or the box's, none between",
                            why: this.unresolved());
-            this.choose(method: Antialiasing::Msaa4ToneMapped);
+            this.applyPreset(preset: QualityPreset::High);
             this.draw(target: this.edgeTarget(), r: 20.0, g: 4.0, b: 1.0, squared: false, backdrop: Color.fromHex(hex: 0x3f3f3f));
             this.stage = 4;
             return false;
         }
         if (this.stage == 4) {
             if (!this.answered()) { return false; }
-            this.found.add(name: "Msaa4ToneMapped set again after None: the tone-mapped resolve, as the first render",
+            this.found.add(name: "Msaa4ToneMapped applied after None by applyQuality with the library's High: the next render draws the tone-mapped resolve, as the first",
                            why: this.resolvedAs(toneMapped: true, eight: false));
             Shared<RenderTarget> eight = new RenderTarget.make(width: EDGE_WIDE, height: EDGE_HIGH);
             this.draw(target: eight, r: 20.0, g: 4.0, b: 1.0, squared: false, backdrop: Color.fromHex(hex: 0x3f3f3f));

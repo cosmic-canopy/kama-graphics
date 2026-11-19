@@ -1,0 +1,137 @@
+// GFX-1's part 5, step 4: a renderer's quality (kyoten's rendering.md § Decided, part 5's question 2 and step 4's three
+// questions, the owner's (A) of 2026-11-19). With no GPU, the library's four presets; then, on the device the check
+// opened, one renderer, a quality applied to it, read back, and asked what it supports:
+// - a new renderer's quality is the default's, `Msaa4ToneMapped`;
+// - `applyQuality` of each of the library's four, over a method set to `None` directly so each one changes it, writes
+//   the renderer's method and hands back the quality in effect, which `quality()` then reads. Each case states the
+//   method it wants, so a preset that is wrong cannot pass its own case here as well as with no GPU;
+// - a game's own preset, the library's `Low` with anti-aliasing turned off, is applied as it is, over the tone-mapped
+//   resolve set directly;
+// - `quality()` reads a method set directly by `antialiasingMut()`, as it is made from the settings at each call;
+// - `supportsAntialiasing` is true for each method, each core WebGPU, on every leg.
+// That the next render draws by what was applied is held by an image: tests/src/antialias.kama's switch back to the
+// tone-mapped resolve after `None` goes through `applyQuality`.
+//
+// Every comparison goes through `Quality`'s `!=`, `@generate(Equatable)`'s, as a program's own would.
+//
+// Handing back the quality that was handed in, rather than the one in effect, cannot be told apart today: nothing steps
+// down until the first method a device may lack, 8x MSAA natively (GFX-19), whose cases will hold it.
+
+import {
+    gpu::Device, gpu::Queue,
+    graphics::Renderer, graphics::Antialiasing, graphics::Quality, graphics::QualityPreset,
+    Verdicts,
+};
+export { qualityCases, QualityRun };
+
+// A method's name, for a failing case's words.
+fn string spelled(Antialiasing method) {
+    return match (method) {
+        case Msaa4ToneMapped: "Msaa4ToneMapped";
+        case Msaa4: "Msaa4";
+        case None: "None";
+        case _: "a method these cases do not know";
+    };
+}
+
+// "" when `got` is `want`, else what `got` holds instead.
+fn string sameAs(Quality got, Quality want) {
+    if (got != want) {
+        string held = spelled(method: got.antialiasing);
+        string wanted = spelled(method: want.antialiasing);
+        return "its anti-aliasing is " + held + ", not " + wanted;
+    }
+    return "";
+}
+
+// The library's four, with no GPU: `Low` takes the GPU's resolve, the rest the tone-mapped one, and none turns
+// anti-aliasing off (part 5's question 2, provisional until measured).
+unsafe fn void qualityCases(ref Verdicts found) {
+    Quality resolved = Quality.of(antialiasing: Antialiasing::Msaa4);
+    Quality toneMapped = Quality.of(antialiasing: Antialiasing::Msaa4ToneMapped);
+    found.add(name: "quality: the library's Low takes Msaa4, the GPU's resolve",
+              why: sameAs(got: Quality.make(preset: QualityPreset::Low), want: resolved));
+    found.add(name: "quality: the library's Medium takes Msaa4ToneMapped, the tone-mapped resolve",
+              why: sameAs(got: Quality.make(preset: QualityPreset::Medium), want: toneMapped));
+    found.add(name: "quality: the library's High takes Msaa4ToneMapped, the tone-mapped resolve",
+              why: sameAs(got: Quality.make(preset: QualityPreset::High), want: toneMapped));
+    found.add(name: "quality: the library's Ultra takes Msaa4ToneMapped, the tone-mapped resolve",
+              why: sameAs(got: Quality.make(preset: QualityPreset::Ultra), want: toneMapped));
+}
+
+type resource QualityRun {
+    Verdicts found;
+    Device device;
+    Queue queue;
+
+    public ctor make(Device device, Queue queue) {
+        this.found = Verdicts.make();
+        this.device = give device;
+        this.queue = give queue;
+    }
+
+    public fn ref Verdicts verdicts() { return this.found; }
+
+    // `asked` applied over `over`, a method set directly first: "" when the renderer's method is then `want`, and the
+    // quality handed back and `quality()` both hold it. `want` is stated by the case, never read from `asked`, so a
+    // preset that is wrong cannot make its own case pass.
+    fn string applied(ref Renderer r, Quality asked, Antialiasing over, Antialiasing want) {
+        r.antialiasingMut() = over;
+        Quality handed = r.applyQuality(quality: asked);
+        Quality wanted = Quality.of(antialiasing: want);
+        string why = "";
+        if (r.antialiasing() != want) {
+            string set = spelled(method: r.antialiasing());
+            why = why + "antialiasing() is " + set + "; ";
+        }
+        string back = sameAs(got: handed, want: wanted);
+        if (!back.isEmpty()) { why = why + "the quality handed back: " + back + "; "; }
+        string now = sameAs(got: r.quality(), want: wanted);
+        if (!now.isEmpty()) { why = why + "quality(): " + now + "; "; }
+        return why;
+    }
+
+    // Whether the renderer answers that it can draw with `method`.
+    fn string supported(const ref Renderer r, Antialiasing method) {
+        return r.supportsAntialiasing(method: method) ? "" : "it answers false";
+    }
+
+    // Every case at once: nothing here waits on the GPU.
+    public unsafe fn bool step() {
+        Renderer r = Renderer.withDevice(device: copy this.device, queue: copy this.queue);
+        this.found.add(name: "quality: a new renderer's quality() is the default's, Msaa4ToneMapped",
+                       why: sameAs(got: r.quality(), want: Quality.of(antialiasing: Antialiasing::Msaa4ToneMapped)));
+
+        this.found.add(name: "quality: applyQuality of the library's Low over None writes Msaa4 and hands it back, which quality() reads",
+                       why: this.applied(r: ref r, asked: Quality.make(preset: QualityPreset::Low), over: Antialiasing::None,
+                                         want: Antialiasing::Msaa4));
+        this.found.add(name: "quality: applyQuality of the library's Medium over None writes Msaa4ToneMapped and hands it back, which quality() reads",
+                       why: this.applied(r: ref r, asked: Quality.make(preset: QualityPreset::Medium), over: Antialiasing::None,
+                                         want: Antialiasing::Msaa4ToneMapped));
+        this.found.add(name: "quality: applyQuality of the library's High over None writes Msaa4ToneMapped and hands it back, which quality() reads",
+                       why: this.applied(r: ref r, asked: Quality.make(preset: QualityPreset::High), over: Antialiasing::None,
+                                         want: Antialiasing::Msaa4ToneMapped));
+        this.found.add(name: "quality: applyQuality of the library's Ultra over None writes Msaa4ToneMapped and hands it back, which quality() reads",
+                       why: this.applied(r: ref r, asked: Quality.make(preset: QualityPreset::Ultra), over: Antialiasing::None,
+                                         want: Antialiasing::Msaa4ToneMapped));
+
+        // a game's own preset: the library's Low with anti-aliasing turned off, over the tone-mapped resolve
+        Quality own = Quality.make(preset: QualityPreset::Low);
+        own.antialiasing = Antialiasing::None;
+        this.found.add(name: "quality: a game's own preset, the library's Low with anti-aliasing set to None, is applied as it is over Msaa4ToneMapped",
+                       why: this.applied(r: ref r, asked: own, over: Antialiasing::Msaa4ToneMapped, want: Antialiasing::None));
+
+        // a method set directly, after that preset was applied
+        r.antialiasingMut() = Antialiasing::Msaa4;
+        this.found.add(name: "quality: quality() reads a method set directly by antialiasingMut(), Msaa4 after a preset of None",
+                       why: sameAs(got: r.quality(), want: Quality.of(antialiasing: Antialiasing::Msaa4)));
+
+        this.found.add(name: "quality: supportsAntialiasing(method: Msaa4ToneMapped) is true, core WebGPU on every device",
+                       why: this.supported(r: r, method: Antialiasing::Msaa4ToneMapped));
+        this.found.add(name: "quality: supportsAntialiasing(method: Msaa4) is true, core WebGPU on every device",
+                       why: this.supported(r: r, method: Antialiasing::Msaa4));
+        this.found.add(name: "quality: supportsAntialiasing(method: None) is true, core WebGPU on every device",
+                       why: this.supported(r: r, method: Antialiasing::None));
+        return true;
+    }
+}

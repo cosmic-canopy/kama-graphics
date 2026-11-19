@@ -178,3 +178,10 @@ package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   before the shaded one, both were reported, the first in the depth-only pipeline's words; a program reading
   `takeErrors()` saw the material twice. The first found is reported and its twin never, for a general form's two as
   well.
+- GFX-1's part 5, step 4: a renderer's quality, every technique set at once, and so part 5. `Quality`, a `type value`
+  with one field per technique, today `antialiasing`, compared by `==` and `!=`; `Quality.of(antialiasing:)`, one built
+  from nothing; `Quality.make(preset:)`, the library's four, `QualityPreset::Low`, `Medium`, `High` and `Ultra`, `Low`
+  taking `Msaa4` and the rest `Msaa4ToneMapped`. `renderer.applyQuality(quality:)` writes every technique and hands
+  back the quality in effect; `renderer.quality()` reads it at any time, a technique set directly included;
+  `renderer.supportsAntialiasing(method:)`, true for every method, each core WebGPU. The step-down where a device lacks
+  a method comes with the first method a device may lack, 8x MSAA natively (GFX-19).

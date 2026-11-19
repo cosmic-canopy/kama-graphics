@@ -497,7 +497,49 @@ natively. The library's own `examples/cube` is the same scene without an engine.
 
   One more, `compile` asking for the stand-in for a mesh whose material is refused, went uncaught until a case was
   added for it.
-- **Next, part 5's step 4:** `Quality`, `applyQuality` and the device's features.
+- **Decided on 2026-11-19, step 4's three questions** (kyoten's `docs/design/rendering.md` § Decided, `e72a90f`), each
+  (A), the owner: "I will take your recommendation on all". No engine hands back what was asked, what was chosen and
+  why; every one but Bevy steps down rather than fail, at most with a log line:
+  1. **`applyQuality(quality:)` hands back the `Quality` in effect,** each technique's method as chosen, and
+     `renderer.quality()` reads the same at any time, a technique set directly included. Nothing is printed, since a
+     weaker device stepping down is no misuse;
+  2. **the renderer answers per technique, in the library's terms,** by the rule `applyQuality` steps down by:
+     `supportsAntialiasing(method:)`, as Unity's `SystemInfo` and Godot's per-usage queries answer; the raw features
+     stay `@kama/gpu`'s `device.features()`. The question offered `supports(antialiasing:)`, but kama has no
+     overloading, so a later `supports(shadows:)` would be refused: each technique's query names its technique;
+  3. **step 4 builds what can be held now:** every method on the ladder is core WebGPU, so nothing can step down yet.
+     The step-down and its cases come with the first method a device may lack, 8x MSAA natively, GFX-19 (below).
+
+  Settled under kama's rule while recording them: the library's four are one ctor with a required parameter,
+  `Quality.make(preset: QualityPreset::High)` (kama's SPEC § Construction, KR-367), where question 2 above named
+  `Quality.low()` to `Quality.ultra()`.
+- **Built, part 5's step 4, `Quality`, and so part 5** (2026-11-19, [SPEC.md](SPEC.md) § The renderer and § Tests):
+  - `Quality` (`src/quality.kama`), a `type value` with one public field per technique, today `antialiasing`;
+    `Quality.of(antialiasing:)`; `Quality.make(preset:)`, `QualityPreset::Low` taking `Msaa4` and `Medium`, `High` and
+    `Ultra` `Msaa4ToneMapped`;
+  - on the renderer, `applyQuality(quality:)`, which writes the method and hands back `quality()`; `quality()`, made
+    from the settings at each call; `supportsAntialiasing(method:)`, a `match` true for each method.
+
+  **Settled while building, and reported:**
+  - `Quality` is `@generate(Equatable)`, so a program compares what it asked for with what `applyQuality` handed back
+    by `==` and `!=`, and a technique that joins as a field joins the comparison with no code (probed on 0.9.978);
+  - `antialiasing()` says what was set and `quality()` what is in effect, the same until a method a device may lack
+    exists (GFX-19).
+
+  Red first: on the API's stub, all 14 new cases failed, and the anti-aliasing run's switch back to the tone-mapped
+  resolve, routed through `applyQuality` with the library's `High`. Five of the first draft's cases passed on the stub,
+  since they read the method wanted from the preset, which the stub also had wrong; each now states its method. 414
+  cases natively, in Firefox and in Chrome for Testing, 401 in Edge, each debug and release. 12 of 13 mutations caught
+  (kyoten's `.scratch/s39/kg/list4.py`); the one left, `applyQuality` handing back the quality it was handed, is
+  equivalent until a method can step down, and GFX-19's cases hold it.
+
+  **Found on the way and fixed first** (`a51d169`): a mesh's two refused pipelines were reported twice where natively
+  they answered at two polls. A mutation run's printed-line count failed once in fifteen; a probe holding one answer
+  for the next poll reproduced it every time.
+
+  **Part 5 is built.**
+- **Next, part 6:** `examples/cube` in a window on both legs, `Renderer.make(window:, options:)`, FLIP, the 150 KB
+  measurement, FEATURES.md's rows and the SPEC.
 - **Done:**
   - `examples/cube` draws from one source on both legs;
   - its golden passes on a software GPU on each leg CI has, and perceptually on the reference machines present;

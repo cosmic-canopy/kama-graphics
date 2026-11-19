@@ -35,7 +35,7 @@ import {
     std::math::Vec3, std::math::Vec4, std::math::Quat, std::math::Mat3, std::math::Mat4, std::math::sqrt, std::math::tan,
     std::math::pow, std::math::log2,
     gpu::Device, gpu::Queue, gpu::Buffer, gpu::BufferDescriptor, gpu::BufferUsage,
-    Euler, EulerOrder, Geometry, Material, RenderTarget, Renderer, Color, ToneMapping,
+    Euler, EulerOrder, Geometry, Material, RenderTarget, Renderer, Color, ToneMapping, WhileCompiling,
 };
 export { Object3D, NodePart, Walk, Scene, Group, Mesh, PerspectiveCamera, DirectionalLight, AmbientLight,
          ev100Sunlight, ev100Overcast, ev100Indoor, ev100Blender, ev100For };
@@ -141,6 +141,7 @@ type resource CoreTable {
     DynamicArray<Mat3> normals;   // each world matrix's normal matrix, made when it is written
     DynamicArray<Optional<Shared<Geometry>>> geometries;
     DynamicArray<Optional<Shared<Material>>> materials;
+    DynamicArray<Optional<WhileCompiling>> ways;   // each mesh's own way while its pipelines compile, None the renderer's
     DynamicArray<isize> free;
     DynamicArray<isize> dirty;   // records written since the GPU's copy was
     bool rewrite = true;         // the GPU's copy is to be written whole
@@ -151,6 +152,7 @@ type resource CoreTable {
         this.normals = DynamicArray.empty();
         this.geometries = DynamicArray.empty();
         this.materials = DynamicArray.empty();
+        this.ways = DynamicArray.empty();
         this.free = DynamicArray.empty();
         this.dirty = DynamicArray.empty();
     }
@@ -163,6 +165,7 @@ type resource CoreTable {
         this.normals.add(item: Mat3.identity());
         this.geometries.add(item: Optional::None);
         this.materials.add(item: Optional::None);
+        this.ways.add(item: Optional::None);
         return this.worlds.length() - 1;
     }
     public unsafe fn void release(isize slot) {
@@ -170,15 +173,18 @@ type resource CoreTable {
         Optional<Shared<Material>> noLook = Optional::None;
         this.geometries[slot] = give noShape;
         this.materials[slot] = give noLook;
+        this.ways[slot] = Optional::None;
         this.free.add(item: slot);
     }
-    public unsafe fn void write(isize slot, Mat4 world, Shared<Geometry> geometry, Shared<Material> material) {
+    public unsafe fn void write(isize slot, Mat4 world, Shared<Geometry> geometry, Shared<Material> material,
+                               Optional<WhileCompiling> way) {
         Optional<Shared<Geometry>> shape = Optional::Some(value: give geometry);
         Optional<Shared<Material>> look = Optional::Some(value: give material);
         this.worlds[slot] = world;
         this.normals[slot] = normalMatrixOf(world: world);
         this.geometries[slot] = give shape;
         this.materials[slot] = give look;
+        this.ways[slot] = way;
         this.dirty.add(item: slot);
     }
 
@@ -189,6 +195,8 @@ type resource CoreTable {
         Mat3 turn = upperLeft(m: this.worlds[slot]);
         return turn.determinant() < 0.0;
     }
+    // The way of the mesh in `slot` while its pipelines compile: its own, or `None`, the renderer's.
+    public const fn Optional<WhileCompiling> wayAt(isize slot) { return this.ways[slot]; }
     public const fn bool live(isize slot) { return this.geometries[slot].isSome(); }
     public const fn isize liveCount() { return this.worlds.length() - this.free.length(); }
     public unsafe fn Shared<Geometry> geometryAt(isize slot) {
@@ -434,7 +442,8 @@ type resource Walk {
     }
 
     // A mesh's record written: in its instance, made the first time and again when the mesh came from another scene.
-    unsafe fn void push(ref Optional<Instance> instance, Mat4 world, Shared<Geometry> geometry, Shared<Material> material) {
+    unsafe fn void push(ref Optional<Instance> instance, Mat4 world, Shared<Geometry> geometry, Shared<Material> material,
+                        Optional<WhileCompiling> way) {
         bool fresh = match (instance) {
             case Some(value: i): !i.inTable(other: this.table.deref());
             case None: true;
@@ -444,7 +453,7 @@ type resource Walk {
             instance = Optional::Some(value: Instance.make(table: copy this.table));
         }
         isize slot = match (instance) { case Some(value: i): i.at(); case None: -1; };
-        this.table.write(slot: slot, world: world, geometry: give geometry, material: give material);
+        this.table.write(slot: slot, world: world, geometry: give geometry, material: give material, way: way);
     }
 }
 
@@ -778,9 +787,9 @@ type resource Scene implements Object3D {
     Shared<CoreTable> table;
     Shared<LightTable> lightTable;
 
-    friend Renderer::render[walkAll, recordsOn, drawSlots, geometryAt, materialAt, mirroredAt, objects, lightsOn,
+    friend Renderer::render[walkAll, recordsOn, drawSlots, geometryAt, materialAt, mirroredAt, wayAt, objects, lightsOn,
                             directionalCount, ambientLight];
-    friend Renderer::compile[walkAll, drawSlots, materialAt, mirroredAt];
+    friend Renderer::compile[walkAll, drawSlots, materialAt, mirroredAt, wayAt];
 
     public unsafe ctor make() {
         this.part = NodePart.make();
@@ -817,6 +826,7 @@ type resource Scene implements Object3D {
     unsafe fn Shared<Geometry> geometryAt(isize slot) { return this.table.geometryAt(slot: slot); }
     unsafe fn Shared<Material> materialAt(isize slot) { return this.table.materialAt(slot: slot); }
     unsafe fn bool mirroredAt(isize slot) { return this.table.mirroredAt(slot: slot); }
+    unsafe fn Optional<WhileCompiling> wayAt(isize slot) { return this.table.wayAt(slot: slot); }
     const fn isize objects() { return this.table.liveCount(); }
 
     public const fn Vec3 position() { return this.part.position(); }
@@ -882,6 +892,7 @@ type resource Mesh implements Object3D {
     NodePart part;
     Shared<Geometry> shape;
     Shared<Material> look;
+    Optional<WhileCompiling> way = Optional::None;
 
     public unsafe ctor make(Shared<Geometry> geometry, Shared<Material> material) {
         this.part = NodePart.make();
@@ -893,6 +904,11 @@ type resource Mesh implements Object3D {
     public unsafe fn ref Shared<Geometry> geometryMut() { this.part.touched(); return this.shape; }
     public unsafe const fn Shared<Material> material() { return copy this.look; }
     public unsafe fn ref Shared<Material> materialMut() { this.part.touched(); return this.look; }
+    // What this mesh's draw does while its pipelines compile, over the renderer's `whileCompiling()` (kyoten's rendering.md
+    // § Decided, GFX-1's part 5, step 3's question 1): `None` by default, the renderer's. A change takes effect at the
+    // next render.
+    public const fn Optional<WhileCompiling> whileCompiling() { return this.way; }
+    public unsafe fn ref Optional<WhileCompiling> whileCompilingMut() { this.part.touched(); return this.way; }
 
     public const fn const ref NodePart node() { return this.part; }
     public fn ref NodePart nodeMut() { return this.part; }
@@ -900,7 +916,7 @@ type resource Mesh implements Object3D {
         bool moved = this.part.placeSelf(walk: ref walk, parentWorld: parentWorld, parentMoved: parentMoved);
         if (moved) {
             walk.push(instance: ref this.part.drawn, world: this.part.anch.worldMatrix(), geometry: copy this.shape,
-                      material: copy this.look);
+                      material: copy this.look, way: this.way);
         }
         this.part.placeKids(walk: ref walk, moved: moved);
     }

@@ -157,7 +157,9 @@ draw takes while its pipeline compiles, the program's choice, the material's gen
 owns; shaders built ahead left to kyoten's question 11. Step 1 is built (SPEC § The renderer): pipelines compiled off
 the frame, `General`, `Skip` and `Wait`, and `compile(scene:, camera:)`. Step 2 is built (SPEC § The renderer and § The
 compiler): a material's general form, culling in the shader, which `General` draws while a mesh's own pipelines
-compile. Next, step 3: `StandIn` and the per-material override.
+compile. Step 3 is built (SPEC § The renderer and § The scene graph): `StandIn`, the renderer's stand-in, the
+library's lit grey unless a program names its own, drawn by its general form, and a mesh's own way over the
+renderer's. Next, step 4: `Quality`, `applyQuality` and the device's features.
 GFX-1 is built depth-first, and every example is a test: a headless readback and a golden image, on web and native. A
 feature a program does not use drops out at link time. [SPEC.md](SPEC.md) is what is built so far, and grows with each
 part.

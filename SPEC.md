@@ -131,23 +131,35 @@ a resource the program owns.
   `compile(scene:, camera:)` and of `takeErrors()`, and never while a render gathers its draws, so a render never uses a
   pipeline it asked for itself, even natively, where `@kama/gpu`'s threads may answer before a later draw sharing it.
   What a render draws does not hang on a race. What a draw does while its pipelines compile is the program's,
-  `whileCompiling()` and `whileCompilingMut()`, a property pair, a `WhileCompiling`, which is `@nonExhaustive`:
+  `whileCompiling()` and `whileCompilingMut()`, a property pair, a `WhileCompiling`, which is `@nonExhaustive`. It is
+  every draw's, unless a mesh names its own (§ The scene graph; kyoten's rendering.md § Decided, GFX-1's part 5, step
+  3's question 1):
   - **`WhileCompiling::General`, the default:** the material's general form (§ The compiler), the same pixels drawn more
     slowly, once it is compiled; where none is ready, or the device refused it, the draw is skipped. Its two pipelines
     cull nothing, since the shader culls, so one serves mirrored meshes and others. A draw that misses asks for it, and
     so does `compile(scene:, camera:)`, so a variant new at run time, such as a mirrored copy, finds it ready. A general
     form is drawn only at the samples a texel it was compiled at;
+  - **`WhileCompiling::StandIn`:** the renderer's stand-in, as Unreal's default material (step 3's question 2):
+    `standIn()` and `standInMut()`, a property pair, a `Shared<Material>`. By default it is the library's lit grey, a
+    `MeshStandardMaterial` of #808080, roughness 1 and metalness 0, lit by the scene so a shape still reads; a
+    program names its own, and a change takes effect at the next render. It is drawn by its general form with the
+    mesh's geometry and record, so one pair of pipelines serves every mesh, mirrored or not. A draw that misses asks
+    for it, and so does `compile(scene:, camera:)` where any mesh's way is `StandIn`; until it is ready, or where the
+    device refused it, the draw is skipped. A material refused outright is not drawn by the stand-in: it is not
+    compiling, and never draws;
   - **`WhileCompiling::Skip`:** nothing until the mesh's own pipelines are ready, as Bevy and Unreal's default;
   - **`WhileCompiling::Wait`:** the pipelines compiled during the render that needs them, as three.js r187's, a hitch
     the program chose, for a tool, a test or a cutscene. On the web the page does not freeze, but the browser's GPU
     process waits at the submit.
 
-  The frame's own passes go the same way: while the tone-mapped resolve compiles, the GPU resolves, the ladder's next
-  rung, and while the output pass compiles it is left out, the target left as it was. A refused pipeline of the
+  The frame's own passes take the renderer's way, never a mesh's: while the tone-mapped resolve compiles, the GPU
+  resolves, the ladder's next rung, and while the output pass compiles it is left out, the target left as it was;
+  under `Wait` they are made during the render. A refused pipeline of the
   renderer's own is handled alike, and reported (§ Misuse).
 - **`compile(scene:, camera:)` asks for every pipeline a scene needs, off the frame,** as three.js's `compileAsync` and
-  Unreal's precaching: each mesh's two at the anti-aliasing method's samples a texel, and, under `General`, its
-  material's general form's two, so a mesh added later as another variant draws by it; the tone-mapped resolve's when
+  Unreal's precaching: each mesh's two at the anti-aliasing method's samples a texel, and, where its way (its own, else
+  the renderer's) is `General`, its material's general form's two, so a mesh added later as another variant draws by
+  it; the stand-in's general form's two, once, where any mesh's way is `StandIn`; the tone-mapped resolve's when
   the method takes it; and the output pass's for the camera's tone mapping when its target is 8-bit. It places the scene as
   a render does. It hands back a `CompileRequest`, polled to a `CompileStatus`: `Pending` while any pipeline it asked
   for compiles, `Ready` once each has answered, made or refused. A render then draws everything with no miss, while
@@ -158,10 +170,11 @@ a resource the program owns.
   scene's meshes the GPU was asked for, both passes' (a mesh is two calls, as three.js counts a shadow pass's draws),
   `objects` (the meshes the scene holds a record for) and `matrices` (the world matrices its walk made: 0 when nothing in
   the scene changed). The output pass is the frame's, not the scene's, so it is not counted. Then what its pipelines
-  compiling cost it: `misses`, what it drew other than as asked, each mesh skipped or drawn by its material's general
-  form and each frame pass not run as asked, 0 when the render is the one asked for, which a loading screen or a test
-  waits for; `skipped`, the meshes skipped; `general`, the meshes drawn by their material's general form; and `waited`,
-  the pipelines it compiled itself under `Wait`, each a hitch. A refused material is no miss, since it
+  compiling cost it: `misses`, what it drew other than as asked, each mesh skipped, drawn by its material's general
+  form or drawn by the stand-in, and each frame pass not run as asked, 0 when the render is the one asked for, which a
+  loading screen or a test waits for; `skipped`, the meshes skipped; `general`, the meshes drawn by their material's
+  general form; `standIn`, the meshes drawn by the stand-in; and `waited`, the pipelines it compiled itself under
+  `Wait`, each a hitch. A refused material is no miss, since it
   never draws, so a program waiting for none is never held by one.
 - **A renderer makes three.js r187's DFG table once** (part 3's third part, question 2): `dfgTable()`, 16 x 16 texels of
   two half floats, a surface's specular scale and bias, written as they are into an RG16Float texture and read through a
@@ -207,6 +220,11 @@ Decided, GFX-1's part 2, question 4), as `@kama/gpu` reports every misuse of Web
   (§ The compiler), so a material passing 15 or 16 of the 16 a device takes has none. The renderer records it once, of kind `GraphicsErrorKind::Material`, its words
   beginning "a material's general form was refused by the device", once the material's own pipeline is made: a material
   the device refuses outright is reported once, as its own pipeline's refusal.
+- **A stand-in the compiler or the device refuses draws nothing,** and the draws that would take it are skipped. Its
+  compile's refusal is reported once, as any material's; its general form's, which the device refuses for a stand-in
+  passing 15 or 16 values, once, of kind `GraphicsErrorKind::Material`, its words beginning "a material's general form
+  was refused by the device", whether or not any pipeline of its own is made, since the stand-in is drawn by it
+  alone.
 - **A directional light at its own target lights nothing** (§ The scene graph): it has no direction, so its direction
   is the zero vector, never a NaN, and the renderer records the error, of kind `GraphicsErrorKind::Light`, when the light
   is written so. That is once each time it changes, never each frame.
@@ -254,8 +272,13 @@ Decided, GFX-1's part 2, question 4), as `@kama/gpu` reports every misuse of Web
 - **Change marks:** a write marks the node and each ancestor up to the first already marked, and the render walk enters
   only a subtree that moved or holds a mark, so an unchanged scene costs nothing to walk. A node is made again where it,
   or a node above it, changed.
-- **The flat core:** each mesh in a scene owns a record in the scene's table (its world matrix, geometry and material),
-  written when it changed and given up when the mesh leaves the scene.
+- **A mesh may name its own way while its pipelines compile** (kyoten's rendering.md § Decided, GFX-1's part 5, step
+  3's question 1): `whileCompiling()` and `whileCompilingMut()`, an `Optional<WhileCompiling>`, `None` by default,
+  the renderer's. A hero beside the camera may wait while fifty of its material in the distance skip, which a way on
+  the material could not say. A write marks the mesh changed, as a transform's does, so the next render writes its
+  record again, and takes effect there. A later drawable kind, such as an instanced mesh, carries the same pair.
+- **The flat core:** each mesh in a scene owns a record in the scene's table (its world matrix, geometry, material and
+  way), written when it changed and given up when the mesh leaves the scene.
   - The table reaches the GPU as one storage buffer, written where it changed. A record is 112 bytes: the world matrix,
     then its normal matrix (kyoten's rendering.md § Decided, GFX-1's part 3, its second part's question 1).
   - The normal matrix is the inverse transpose of the world matrix's 3x3, made on the CPU when the world matrix is
@@ -819,6 +842,25 @@ Firefox's WebGPU does.
   general form, which takes two more: its refusal is reported once, as `Material`, once its own pipeline is made, a mirrored copy is skipped,
   and a render's miss asks for it too. `Skip` never draws by a ready general form, `compile` under `Skip` asks for none,
   and `Wait` compiles a mirrored copy's own two pipelines during the render.
+- **Part 5's step 3, the stand-in and a mesh's own way, on each leg's GPU** (`tests/src/standin.kama`), in step 2's
+  scene. Every case is held on the first render of a variant nothing asked for, after a compile polled to `Ready`, so
+  it holds natively too, where `@kama/gpu`'s threads may answer between two renders. A pipeline is the renderer's for a
+  material's WGSL, whichever material wrote it, so the cases' materials that must not share one carry nodes of their
+  own.
+  - **A mesh's way over the renderer's:** a mesh's `General` under `Skip` is drawn by its general form, which compile
+    asked for since its way is `General`, while a copy following the renderer is skipped; a mesh's `Skip` under
+    `General` is skipped though its general form is ready, and compile asks for none for it; set back to `None`, a
+    mesh follows the renderer again; a mesh's `Wait` has its own two pipelines made during the render, beside a copy
+    drawn by its general form; and setting a mesh's way makes one world matrix at the next render.
+  - **The stand-in:** `StandIn`'s first render, nothing compiled, skips the mesh (and the frame's two passes miss).
+    In three trials, a mirrored copy, a camera inside a mirrored room and a flat box, a scene is compiled, a mesh
+    added and drawn by the stand-in (one miss, `standIn` 1), then given a grey `MeshStandardMaterial` of its own and
+    drawn each tick until its own pipelines answer: the image is the stand-in's, byte for byte. A program's red
+    `MeshBasicMaterial` draws red, and a blue one named between renders draws blue. Compile asks for the stand-in only
+    where a mesh's way is `StandIn`, the renderer's or a mesh's own, never for a mesh whose material is refused, since
+    it never draws, and a scene compiled under `StandIn` draws with no miss. A stand-in passing 16 values, whose general form the device refuses, is reported once, by a compile or by
+    a render's ask, and a stand-in its compile refuses once, in its compile's words; the draws that would take either
+    are skipped.
 - **Part 2's golden holds part 3's compiler:** `boxes/<gpu>.png` is matched byte for byte with `MeshBasicMaterial`'s
   nodes, as it was with its WGSL by hand.
 - **Printed from outside the program:** the gate counts each leg's printed lines: one for the render refused by the

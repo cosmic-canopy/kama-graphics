@@ -389,7 +389,8 @@ natively. The library's own `examples/cube` is the same scene without an engine.
 - **Decided on 2026-11-18, part 5's three questions** (kyoten's `docs/design/rendering.md` § Decided, `6dc5e44`), each
   (A) as revised, after the owner asked for the ubershader and pre-compiling as approaches too:
   1. pipelines every way, chosen by the program: `renderer.compile(scene:, camera:)`, a polled request, compiles ahead;
-     a draw whose pipeline is not ready takes the renderer's way, which a material may override: `General` (the
+     a draw whose pipeline is not ready takes the renderer's way, which a mesh may override (step 3's question 1, below;
+     first worded as the material's): `General` (the
      material's general form, the same pixels, slower, Godot's), `StandIn` (a material the program names, Unreal's
      default material), `Skip` (Bevy's, Unreal's default) or `Wait` (three.js r187's). The default is `General`, then
      `Skip`;
@@ -400,7 +401,7 @@ natively. The library's own `examples/cube` is the same scene without an engine.
 
   Its steps: 1, pipelines compiled off the frame, with `General` (skipping until a general form exists), `Skip` and
   `Wait`, and `compile`; 2, the general form, for the one option there is, the cull flip; 3, `StandIn` and the
-  per-material override; 4, `Quality`, `applyQuality` and the device's features.
+  mesh's override; 4, `Quality`, `applyQuality` and the device's features.
 - **Built, part 5's step 1, pipelines compiled off the frame** (2026-11-18, [SPEC.md](SPEC.md) § The renderer, § Misuse
   and § Tests):
   - every pipeline is a slot asked for with `@kama/gpu`'s `createRenderPipelineAsync` and polled by each render, which
@@ -453,7 +454,50 @@ natively. The library's own `examples/cube` is the same scene without an engine.
   before the fix, and four more cases came with it (40 in all). 362 cases natively, in Firefox and in Chrome for Testing, 349 in Edge, each debug and release. Every general form's
   image matched its own pipelines' byte for byte on WARP, SwiftShader and Edge's GPU. 37 of 39 mutations caught
   (kyoten's `.scratch/s37/kg/list2.py`).
-- **Next, part 5's step 3:** `StandIn` and the per-material override, its question asked first.
+- **Decided on 2026-11-19, step 3's two questions** (kyoten's `docs/design/rendering.md` § Decided, `498791c`), each
+  (A), the owner: "I will take your recommendations":
+  1. **the override is the mesh's, not the material's:** `mesh.whileCompiling()` and `whileCompilingMut()`, an
+     `Optional<WhileCompiling>`, `None` the renderer's; later drawable kinds carry the same pair, and `Material` does
+     not change. Question 1 above named the material, but its own examples are objects: a rock material shared by a
+     hero rock beside the camera and fifty in the distance cannot make the first wait and the rest skip, and kama's
+     contracts carry no default methods, so a method on `Material` costs every material a program writes. Unreal alone
+     is finer than one setting, by a per-component-class opt-in; no engine lets a material choose in a shipped game;
+  2. **the stand-in is the library's lit grey, compiled when its way is first in effect:** a `MeshStandardMaterial`
+     of #808080, roughness 1 and metalness 0, lit as Unreal's `WorldGridMaterial` is, which a program replaces with
+     `renderer.standIn()` and `standInMut()`; drawn by its general form, so one pair of pipelines serves every mesh;
+     asked for by `compile()` and by the first render with a draw whose way is `StandIn`, those draws skipped until it
+     is ready.
+- **Built, part 5's step 3, `StandIn` and the mesh's override** (2026-11-19, [SPEC.md](SPEC.md) § The renderer, §
+  Misuse, § The scene graph and § Tests):
+  - the mesh's way carried by the scene's walk into its table beside the material, and each draw's way its mesh's,
+    else the renderer's, in `render` and `compile` alike, so `waited` counts a mesh's `Wait`;
+  - `WhileCompiling::StandIn`, in the decision's order (`General`, `StandIn`, `Skip`, `Wait`); the stand-in made in
+    the renderer's ctor, `standIn()` and `standInMut()`; drawn by its general form with its own look group and the
+    mesh's geometry and record; asked for by a miss and by `compile` where any mesh's way is `StandIn`;
+  - `RenderInfo.standIn`, each such draw also a miss.
+
+  **Settled while building, and reported:**
+  - a material refused outright is not drawn by the stand-in: `StandIn` is what a draw does while it compiles, and a
+    refused material never draws (step 1). Drawing broken materials with an error material is a feature of its own;
+  - the frame's own passes, the resolve and the output, take the renderer's way, never a mesh's;
+  - a stand-in the compiler refuses is reported once in its compile's words, and one whose general form the device
+    refuses once as `Material`, whether or not any pipeline of its own is made; the draws that would take either are
+    skipped, never drawn by the stand-in's own pipelines for the mesh's variant;
+  - a stand-in changed between renders takes effect at the next render, as every property pair does.
+
+  Red first: on the API's stub, 17 of the first 33 new cases failed; the rest hold what the stub already did (a skip,
+  a way left to the renderer) and are there for the mutations. Four came after: three for a stand-in its compile
+  refuses, and one for a refused material whose way is `StandIn`. 399 cases natively, in Firefox and in Chrome for
+  Testing, 386 in Edge, each debug and release. 26 of 28 mutations caught (kyoten's `.scratch/s38/kg/list3.py`). The
+  two left:
+  - the stand-in drawn once its shaded pipeline alone is ready, which only a race between a pair's two answers could
+    show, since both are asked together and every case draws after both have answered;
+  - a released slot's way left in the table, shown equivalent by a run, since a released slot is never drawn and one
+    taken again is written, its way with it, before it is drawn.
+
+  One more, `compile` asking for the stand-in for a mesh whose material is refused, went uncaught until a case was
+  added for it.
+- **Next, part 5's step 4:** `Quality`, `applyQuality` and the device's features.
 - **Done:**
   - `examples/cube` draws from one source on both legs;
   - its golden passes on a software GPU on each leg CI has, and perceptually on the reference machines present;

@@ -1,0 +1,810 @@
+// GFX-1's part 5, step 3: `WhileCompiling::StandIn` and a mesh's own way (kyoten's rendering.md § Decided, GFX-1's part
+// 5, step 3's two questions, the owner's (A) of 2026-11-19). A mesh may override the renderer's way, `None` meaning the
+// renderer's; under `StandIn` a draw whose own pipelines compile is drawn with the renderer's stand-in, the library's lit
+// grey unless the program names its own, by the stand-in's general form, so one pair of pipelines serves every mesh. A
+// step a tick on the device the check opened, each case on a renderer of its own, in general.kama's scene: lit
+// MeshStandardMaterial boxes ahead of a camera at the origin, a sun and a dim ambient light, a 32 x 24 8-bit target with
+// no tone mapping, on a backdrop of #336699.
+//
+// Every case is held on the first render of a variant whose own pipelines nothing asked for, after a compile polled to
+// `Ready`, so it holds natively too, where @kama/gpu's threads may answer between two renders:
+// - **a mesh's `General` under a `Skip` renderer** is drawn by its general form, which compile asked for because the
+//   mesh's way is `General`, while a mirrored copy following the renderer is skipped;
+// - **a mesh's `Skip` under `General`** is skipped, though its material's general form is ready, and compile asks for no
+//   general form for a mesh whose way is `Skip`; **set back to `None`**, with a material whose general form is ready, it
+//   follows the renderer again;
+// - **a mesh's `Wait`** beside a box drawn by its general form has its own two pipelines made during the render;
+// - **setting a mesh's way writes its record again** at the next render, one world matrix made;
+// - **`StandIn`'s first render** draws nothing, its stand-in asked for, and the frame's own two passes miss as well;
+// - **the stand-in draws a mesh whose pipelines compile,** a mirrored copy, a camera inside a mirrored room and a flat
+//   box: its image held byte for byte to the same mesh drawn with a grey `MeshStandardMaterial` of its own;
+// - **a program's stand-in,** a red `MeshBasicMaterial`, draws red, and a blue one named between renders draws blue;
+// - **compile asks for the stand-in only where a draw's way is `StandIn`,** the renderer's or a mesh's, and under
+//   `StandIn` a compiled scene's first render has no miss;
+// - **a stand-in passing 16 values,** whose general form the device refuses, is reported once as `Material`, by a
+//   compile or by a render's ask, and the draws that would take it are skipped; so is **a stand-in its compile
+//   refuses**, reported once in its compile's words.
+// - **a mesh whose material is refused never draws,** so its way `StandIn` does not make compile ask for the stand-in.
+
+import {
+    std::collections::DynamicArray, std::memory::replace,
+    std::math::Vec3, std::math::radians,
+    std::time::Instant, std::time::monotonicNow,
+    image::Image,
+    gpu::Device, gpu::Queue, gpu::GpuError,
+    graphics::Color, graphics::Renderer, graphics::RenderInfo, graphics::RenderTarget, graphics::Scene, graphics::Mesh,
+    graphics::PerspectiveCamera, graphics::BoxGeometry, graphics::Material, graphics::MaterialGpu, graphics::MaterialSettings,
+    graphics::NodeBuilder, graphics::MeshStandardMaterial, graphics::MeshBasicMaterial, graphics::DirectionalLight,
+    graphics::AmbientLight, graphics::PixelRead, graphics::PixelStatus, graphics::ToneMapping, graphics::WhileCompiling,
+    graphics::CompileRequest, graphics::CompileStatus, graphics::GraphicsErrorKind, graphics::RendererErrors,
+    graphics::FloatNode, graphics::vec3, graphics::vec4, graphics::constant, graphics::varying, graphics::modelWorldMatrix,
+    graphics::positionLocal,
+    Verdicts,
+};
+export { StandInRun };
+
+comptime uint32 WIDE = 32;
+comptime uint32 HIGH = 24;
+comptime int64 PATIENCE_MS = 10000;   // how long a case waits for pipelines, or a read, before it fails
+comptime uint32 BACKDROP = 0x336699;
+
+// A stand-in passing 16 values from its vertex stage to its fragment stage, as many as a device takes: its general form,
+// which takes two more, is refused (general.kama's `Sixteen`).
+type resource Passing16 implements Material {
+    MaterialGpu cache;
+    public ctor make() { this.cache = MaterialGpu.make(); }
+    public fn ref MaterialGpu gpuMut() { return this.cache; }
+    public const fn uint32 version() { return 0; }
+    public const fn uint32 graphVersion() { return 0; }
+    public const fn void settings(ref MaterialSettings into) { into.addFloat(name: "k", value: 0.01); }
+    public fn void shade(ref NodeBuilder builder) {
+        FloatNode sum = builder.uniformFloat(name: "k");
+        for (int32 i = 1; i <= 16; i = i + 1) { sum = sum + varying(value: constant(value: cast<float32>(i) * 0.01)); }
+        builder.fragmentColor(node: vec4(xyz: vec3(x: sum, y: constant(value: 0.2), z: constant(value: 0.1)), w: constant(value: 1.0)));
+    }
+}
+
+// A stand-in its compile refuses: its fragment stage reads the object's world matrix, the vertex stage's alone
+// (shaders.kama's `Misread`).
+type resource MisreadStandIn implements Material {
+    MaterialGpu cache;
+    public ctor make() { this.cache = MaterialGpu.make(); }
+    public fn ref MaterialGpu gpuMut() { return this.cache; }
+    public const fn uint32 version() { return 0; }
+    public const fn uint32 graphVersion() { return 0; }
+    public const fn void settings(ref MaterialSettings into) { }
+    public fn void shade(ref NodeBuilder builder) {
+        builder.fragmentColor(node: modelWorldMatrix() * vec4(xyz: positionLocal(), w: constant(value: 1.0)));
+    }
+}
+
+// What `info()` said, held to the counts a case wants: "" when it says them.
+fn string infoIs(RenderInfo got, int32 calls, int32 misses, int32 skipped, int32 general, int32 standIn, int32 waited) {
+    if (got.calls == calls && got.misses == misses && got.skipped == skipped && got.general == general && got.standIn == standIn
+        && got.waited == waited) {
+        return "";
+    }
+    int32 c = got.calls;
+    int32 m = got.misses;
+    int32 s = got.skipped;
+    int32 g = got.general;
+    int32 st = got.standIn;
+    int32 w = got.waited;
+    return "it says ${c} calls, ${m} misses, ${s} skipped, ${g} by a general form, ${st} by the stand-in and ${w} waited";
+}
+
+// "" when `a` and `b` are the same image, byte for byte; else how many bytes differ, and the first texel that does.
+fn string sameImage(const ref Image a, const ref Image b) {
+    if (a.width() != b.width() || a.height() != b.height()) { return "the images' sizes differ"; }
+    isize n = a.samples8().length();
+    isize differ = 0;
+    isize first = -1;
+    for (isize i = 0; i < n; i = i + 1) {
+        if (a.samples8()[i] != b.samples8()[i]) {
+            differ = differ + 1;
+            if (first < 0) { first = i; }
+        }
+    }
+    if (differ == 0) { return ""; }
+    isize texel = first / 4;
+    isize x = texel % a.width();
+    isize y = texel / a.width();
+    int32 was = cast<int32>(a.samples8()[first]);
+    int32 now = cast<int32>(b.samples8()[first]);
+    return "${differ} bytes differ, the first at texel (${x}, ${y}): ${was}, then ${now}";
+}
+
+// "" when a mesh's way is `want`, `None` when `want` is.
+fn string wayIs(Optional<WhileCompiling> got, Optional<WhileCompiling> want) {
+    bool same = match (got) {
+        case Some(value: g): match (want) { case Some(value: w): g == w; case None: false; };
+        case None: want.isNone();
+    };
+    return same ? "" : "it is another";
+}
+
+// The scenes the stand-in is held to its grey twin in, each a scene compiled and then a mesh added (general.kama's).
+type enum Trial { MirroredCopy, Room, Flat }
+
+type resource StandInRun {
+    int32 stage = 0;
+    Instant began = monotonicNow();
+    Verdicts found;
+    Device device;
+    Queue queue;
+    Optional<Renderer> renderer = Optional::None;
+    Optional<Shared<Scene>> scene = Optional::None;
+    Optional<Shared<PerspectiveCamera>> camera = Optional::None;
+    Optional<Shared<RenderTarget>> target = Optional::None;
+    Optional<CompileRequest> compiling = Optional::None;
+    Optional<PixelRead> reading = Optional::None;
+    Optional<Image> got = Optional::None;
+    Optional<Image> byStandIn = Optional::None;   // the image the stand-in drew, held to the one drawn after
+    bool failed = false;
+    Trial trial = Trial::MirroredCopy;
+    Optional<Shared<MeshStandardMaterial>> material = Optional::None;   // the one material a trial's first meshes share
+    Optional<Shared<MeshStandardMaterial>> second = Optional::None;     // ...and the cases' others
+    Optional<Shared<MeshStandardMaterial>> third = Optional::None;
+    Optional<Shared<Mesh>> added = Optional::None;   // the mesh a case added after its compile
+
+    public ctor make(Device device, Queue queue) {
+        this.found = Verdicts.make();
+        this.device = give device;
+        this.queue = give queue;
+    }
+
+    public fn ref Verdicts verdicts() { return this.found; }
+
+    // A renderer of its own, drawing `way`, its errors read here rather than printed.
+    unsafe fn void fresh(WhileCompiling way) {
+        Renderer r = Renderer.withDevice(device: copy this.device, queue: copy this.queue);
+        r.whileCompilingMut() = way;
+        r.printErrorsMut() = false;
+        r.clearColorMut() = Color.fromHex(hex: BACKDROP);
+        this.renderer = Optional::Some(value: give r);
+    }
+
+    unsafe fn void setWay(WhileCompiling now) {
+        match (this.renderer) { case Some(value: r): { r.whileCompilingMut() = now; } case None: { } };
+    }
+
+    unsafe fn void setStandIn(Shared<Material> look) {
+        match (this.renderer) { case Some(value: r): { r.standInMut() = copy look; } case None: { } };
+    }
+
+    // A new 32 x 24 8-bit target and a camera at the origin looking down -z into it, with no tone mapping, and a scene
+    // with a sun and a dim ambient light and nothing else.
+    unsafe fn void stageScene() {
+        Shared<RenderTarget> t = new RenderTarget.make(width: WIDE, height: HIGH);
+        Shared<PerspectiveCamera> cam = new PerspectiveCamera.make(fovRad: radians(deg: 50.0), aspect: 32.0 / 24.0, near: 0.1, far: 100.0);
+        cam.targetMut() = Optional::Some(value: copy t);
+        cam.toneMappingMut() = ToneMapping::None;
+        Shared<Scene> s = new Scene.make();
+        Shared<DirectionalLight> sun = new DirectionalLight.make();
+        sun.positionMut() = Vec3.of(x: 1.0, y: 2.0, z: 3.0);
+        sun.intensityMut() = 2.0;
+        s.add(object: sun);
+        Shared<AmbientLight> sky = new AmbientLight.make();
+        sky.colorMut() = Color.fromHex(hex: 0x8090a0);
+        sky.intensityMut() = 0.4;
+        s.add(object: sky);
+        this.target = Optional::Some(value: give t);
+        this.camera = Optional::Some(value: give cam);
+        this.scene = Optional::Some(value: give s);
+    }
+
+    // A box of `look`, `size` across and `deep` deep, at `at`, scaled by `scale` (a negative x mirrors it), turned so
+    // three of its faces show when `turned`, its way `way`; added to the scene, and handed back.
+    unsafe fn Shared<Mesh> addBox(Shared<Material> look, float32 size, float32 deep, Vec3 at, Vec3 scale, bool turned,
+                                  Optional<WhileCompiling> way) {
+        Shared<BoxGeometry> shape = new BoxGeometry.make(width: size, height: size, depth: deep);
+        Shared<Mesh> m = new Mesh.make(geometry: shape, material: look);
+        m.positionMut() = at;
+        m.scaleMut() = scale;
+        if (turned) { m.rotateY(rad: 0.6); m.rotateX(rad: 0.4); }
+        m.whileCompilingMut() = way;
+        Shared<Scene> s = this.theScene();
+        s.add(object: copy m);
+        return m;
+    }
+
+    // A turned box of 1 metre at `x`, 3 metres ahead (or `z`), mirrored on x when `mirrored`.
+    unsafe fn Shared<Mesh> boxAt(Shared<Material> look, float32 x, float32 z, bool mirrored, Optional<WhileCompiling> way) {
+        Vec3 scale = mirrored ? Vec3.of(x: -1.0, y: 1.0, z: 1.0) : Vec3.of(x: 1.0, y: 1.0, z: 1.0);
+        return this.addBox(look: look, size: 1.0, deep: 1.0, at: Vec3.of(x: x, y: 0.0, z: z), scale: scale, turned: true, way: way);
+    }
+
+    unsafe fn Shared<Scene> theScene() { return match (this.scene) { case Some(value: s): copy s; case None: { panic(msg: "staged first"); } }; }
+    unsafe fn Shared<PerspectiveCamera> theCamera() { return match (this.camera) { case Some(value: c): copy c; case None: { panic(msg: "staged first"); } }; }
+    unsafe fn Shared<RenderTarget> theTarget() { return match (this.target) { case Some(value: t): copy t; case None: { panic(msg: "staged first"); } }; }
+    unsafe fn Shared<Mesh> theAdded() { return match (this.added) { case Some(value: m): copy m; case None: { panic(msg: "added first"); } }; }
+    unsafe fn Shared<MeshStandardMaterial> lookOfScene() {
+        return match (this.material) { case Some(value: m): copy m; case None: { panic(msg: "begun first"); } };
+    }
+    unsafe fn Shared<MeshStandardMaterial> secondLook() {
+        return match (this.second) { case Some(value: m): copy m; case None: { panic(msg: "begun first"); } };
+    }
+    unsafe fn Shared<MeshStandardMaterial> thirdLook() {
+        return match (this.third) { case Some(value: m): copy m; case None: { panic(msg: "begun first"); } };
+    }
+
+    // The scene drawn once by the run's renderer; what `info()` then says.
+    unsafe fn RenderInfo renderNow() {
+        Shared<Scene> s = this.theScene();
+        Shared<PerspectiveCamera> c = this.theCamera();
+        RenderInfo said = RenderInfo.of(calls: -1, triangles: -1, objects: -1, matrices: -1, misses: -1, skipped: -1, general: -1,
+                                        standIn: -1, waited: -1);
+        match (this.renderer) {
+            case Some(value: r): { r.render(scene: s, camera: c); said = r.info(); }
+            case None: { }
+        };
+        return said;
+    }
+
+    // The target read back, its read started now.
+    unsafe fn void startRead() {
+        Shared<RenderTarget> t = this.theTarget();
+        match (this.renderer) {
+            case Some(value: r): { this.reading = Optional::Some(value: r.readRenderTargetPixels(target: t)); }
+            case None: { }
+        };
+        this.began = monotonicNow();
+    }
+
+    // Whether the read has answered: its image kept in `got`, or `failed` set. False while it is pending.
+    unsafe fn bool answered() {
+        PixelStatus s = match (this.reading) {
+            case Some(value: r): r.poll();
+            case None: PixelStatus::Failed(error: GpuError::Taken);
+        };
+        bool pending = match (s) { case Pending: true; case _: false; };
+        if (pending && this.began.elapsed().asMillis() < PATIENCE_MS) { return false; }
+        this.reading = Optional::None;
+        this.failed = true;
+        this.got = Optional::None;
+        match (give s) {
+            case Ready(image: img): { this.failed = false; this.got = Optional::Some(value: give img); }
+            case _: { }
+        };
+        return true;
+    }
+
+    // "" when texel (x, y) of the read is not the backdrop, so something was drawn there; or, `backdrop`, when it is.
+    fn string drawnAt(isize x, isize y, bool backdrop) {
+        if (this.failed) { return "the read failed"; }
+        isize at = (y * cast<isize>(WIDE) + x) * 4;
+        string said = "no image";
+        match (this.got) {
+            case Some(value: img): {
+                int32 gr = cast<int32>(img.samples8()[at]);
+                int32 gg = cast<int32>(img.samples8()[at + 1]);
+                int32 gb = cast<int32>(img.samples8()[at + 2]);
+                bool isBackdrop = gr == 0x33 && gg == 0x66 && gb == 0x99;
+                said = isBackdrop == backdrop ? "" : "texel (${x}, ${y}) shows ${gr} ${gg} ${gb}";
+            }
+            case None: { }
+        };
+        return said;
+    }
+
+    // "" when texel (x, y) of the read is plainly channel `channel` (0 red, 2 blue): that channel bright, the others dark.
+    fn string tintAt(isize x, isize y, isize channel) {
+        if (this.failed) { return "the read failed"; }
+        isize at = (y * cast<isize>(WIDE) + x) * 4;
+        string said = "no image";
+        match (this.got) {
+            case Some(value: img): {
+                bool plain = true;
+                for (isize c = 0; c < 3; c = c + 1) {
+                    int32 v = cast<int32>(img.samples8()[at + c]);
+                    if (c == channel ? v < 200 : v > 40) { plain = false; }
+                }
+                int32 gr = cast<int32>(img.samples8()[at]);
+                int32 gg = cast<int32>(img.samples8()[at + 1]);
+                int32 gb = cast<int32>(img.samples8()[at + 2]);
+                said = plain ? "" : "texel (${x}, ${y}) shows ${gr} ${gg} ${gb}";
+            }
+            case None: { }
+        };
+        return said;
+    }
+
+    // The read kept as the stand-in's image.
+    fn void keepStandIn() {
+        Optional<Image> taken = replace(place: this.got, with: Optional::None);
+        this.byStandIn = give taken;
+    }
+
+    // "" when the read is the stand-in's image, byte for byte.
+    fn string asStandIn() {
+        if (this.failed) { return "the read failed"; }
+        string said = "no image";
+        match (this.got) {
+            case Some(value: now): {
+                match (this.byStandIn) {
+                    case Some(value: before): { said = sameImage(a: before, b: now); }
+                    case None: { said = "the stand-in's read failed"; }
+                };
+            }
+            case None: { }
+        };
+        return said;
+    }
+
+    // The compile request polled: 1 when it is ready, 0 while it is pending, -1 when it is still pending past patience.
+    unsafe fn int32 compiled() {
+        CompileStatus s = match (this.compiling) { case Some(value: q): q.poll(); case None: CompileStatus::Ready; };
+        bool ready = match (s) { case Ready: true; case Pending: false; };
+        if (ready) { return 1; }
+        return this.began.elapsed().asMillis() < PATIENCE_MS ? 0 : -1;
+    }
+
+    // The scene's pipelines asked for by the run's renderer, the request kept to poll.
+    unsafe fn void startCompile() {
+        Shared<Scene> s = this.theScene();
+        Shared<PerspectiveCamera> c = this.theCamera();
+        match (this.renderer) {
+            case Some(value: r): { this.compiling = Optional::Some(value: r.compile(scene: s, camera: c)); }
+            case None: { }
+        };
+        this.began = monotonicNow();
+    }
+
+    // The renderer's errors drained: "" when they are none, or, `general`, one `Material` report saying a general form
+    // was refused, in the device's words. Each leg says it its own way (tests/src/compiling.kama).
+    unsafe fn string errorsAre(bool general) {
+        RendererErrors e = match (this.renderer) { case Some(value: r): r.takeErrors(); case None: { panic(msg: "made first"); } };
+        isize n = e.reports().length();
+        if (!general) { return n == 0 && e.dropped() == 0 ? "" : "it reports ${n}"; }
+        if (n != 1) { return "it reports ${n}"; }
+        bool isMaterial = match (e.reports()[0].kind()) { case Material: true; case _: false; };
+        string words = e.reports()[0].message();
+        if (!isMaterial) { return "it is not Material: " + words; }
+        return words.startsWith(prefix: "a material's general form was refused by the device, so its draws are skipped while its own pipelines compile: ")
+            ? "" : "its words are: " + words;
+    }
+
+    // How many reports the renderer's errors hold now, drained; the first one's words kept for a case to read.
+    unsafe fn isize reportsNow(ref string first) {
+        RendererErrors e = match (this.renderer) { case Some(value: r): r.takeErrors(); case None: { panic(msg: "made first"); } };
+        isize n = e.reports().length();
+        if (n > 0) { first = e.reports()[0].message(); }
+        return n;
+    }
+
+    // A lit material of the cases' own, red, half rough.
+    unsafe fn Shared<MeshStandardMaterial> look() {
+        Shared<MeshStandardMaterial> m = new MeshStandardMaterial.make();
+        m.colorMut() = Color.fromHex(hex: 0xc04030);
+        m.roughnessMut() = 0.5;
+        return m;
+    }
+
+    // ...and a program's own grey, as the library's stand-in is: #808080, roughness 1 and metalness 0, the defaults.
+    unsafe fn Shared<MeshStandardMaterial> grey() {
+        Shared<MeshStandardMaterial> m = new MeshStandardMaterial.make();
+        m.colorMut() = Color.fromHex(hex: 0x808080);
+        return m;
+    }
+
+    // Three new materials of the cases' own, kept for a case's scenes. A pipeline is the renderer's for a material's WGSL,
+    // whichever material wrote it, so each has nodes of its own: the second an emissive node, the third a roughness node,
+    // so no two share a pipeline or a general form.
+    unsafe fn void newLooks() {
+        this.material = Optional::Some(value: this.look());
+        Shared<MeshStandardMaterial> glowing = this.look();
+        glowing.emissiveNodeMut() = Optional::Some(value: vec3(x: constant(value: 0.05), y: constant(value: 0.0), z: constant(value: 0.0)));
+        this.second = Optional::Some(value: give glowing);
+        Shared<MeshStandardMaterial> rough = this.look();
+        rough.roughnessNodeMut() = Optional::Some(value: constant(value: 0.75));
+        this.third = Optional::Some(value: give rough);
+    }
+
+    fn string trialName() {
+        return match (this.trial) {
+            case MirroredCopy: "a mirrored copy added after compile";
+            case Room: "a camera inside a mirrored room added after a box beyond it was compiled";
+            case Flat: "a flat box, its two faces on one another, added after a mirrored box was compiled";
+        };
+    }
+
+    // Where the added mesh shows.
+    fn isize addedX() { return match (this.trial) { case MirroredCopy: 23; case Room: 16; case Flat: 10; }; }
+
+    // A trial's first scene under `StandIn`, then its compile asked for.
+    unsafe fn void beginTrial(Trial which) {
+        this.trial = which;
+        this.newLooks();
+        Shared<MeshStandardMaterial> m = this.lookOfScene();
+        this.fresh(way: WhileCompiling::StandIn);
+        this.stageScene();
+        Shared<Mesh> first = match (which) {
+            case MirroredCopy: this.boxAt(look: m, x: -0.9, z: -3.0, mirrored: false, way: Optional::None);
+            case Room: this.boxAt(look: m, x: 0.0, z: -6.0, mirrored: false, way: Optional::None);
+            case Flat: this.boxAt(look: m, x: 0.9, z: -3.0, mirrored: true, way: Optional::None);
+        };
+        this.startCompile();
+    }
+
+    // ...and the mesh it adds once the compile is ready, of the same material, a variant nothing compiled.
+    unsafe fn void addTrialMesh() {
+        Shared<MeshStandardMaterial> m = this.lookOfScene();
+        Shared<Mesh> one = match (this.trial) {
+            case MirroredCopy: this.boxAt(look: m, x: 0.9, z: -3.0, mirrored: true, way: Optional::None);
+            case Room: this.addBox(look: m, size: 1.0, deep: 1.0, at: Vec3.zero(), scale: Vec3.of(x: -4.0, y: 4.0, z: 4.0),
+                                   turned: false, way: Optional::None);
+            case Flat: this.addBox(look: m, size: 1.0, deep: 0.0, at: Vec3.of(x: -0.6, y: 0.0, z: -2.0),
+                                   scale: Vec3.of(x: 1.0, y: 1.0, z: 1.0), turned: false, way: Optional::None);
+        };
+        this.added = Optional::Some(value: give one);
+    }
+
+    // A trial's stages, from `opening`: its compile polled, the mesh added and drawn by the stand-in, read; the mesh given
+    // a grey material of its own, drawn each tick until no miss, read again and held to the first. Whether it is done.
+    unsafe fn bool trialStep(int32 opening) {
+        string name = this.trialName();
+        if (this.stage == opening) {
+            int32 c = this.compiled();
+            if (c == 0) { return false; }
+            this.addTrialMesh();
+            RenderInfo first = this.renderNow();
+            this.found.add(name: "the stand-in, " + name + ": the compile is Ready, and the first render draws the new mesh by the stand-in, one miss",
+                           why: (c == 1 ? "" : "the compile never answered; ") + infoIs(got: first, calls: 4, misses: 1, skipped: 0, general: 0, standIn: 1, waited: 0));
+            this.startRead();
+            this.stage = opening + 1;
+            return false;
+        }
+        if (this.stage == opening + 1) {
+            if (!this.answered()) { return false; }
+            this.found.add(name: "the stand-in, " + name + ": the stand-in draws the new mesh",
+                           why: this.drawnAt(x: this.addedX(), y: 12, backdrop: false));
+            bool room = match (this.trial) { case Room: true; case _: false; };
+            if (room) {
+                this.found.add(name: "the stand-in, " + name + ": the room's walls, seen from behind, are not drawn, so the corner shows the backdrop",
+                               why: this.drawnAt(x: 0, y: 0, backdrop: true));
+            }
+            this.keepStandIn();
+            Shared<Mesh> m = this.theAdded();
+            m.materialMut() = this.grey();
+            this.began = monotonicNow();
+            this.stage = opening + 2;
+            return false;
+        }
+        if (this.stage == opening + 2) {
+            RenderInfo again = this.renderNow();
+            if (again.misses != 0 && this.began.elapsed().asMillis() < PATIENCE_MS) { return false; }
+            this.found.add(name: "the stand-in, " + name + ": given a grey material of its own and drawn each tick, a render with no miss comes",
+                           why: infoIs(got: again, calls: 4, misses: 0, skipped: 0, general: 0, standIn: 0, waited: 0));
+            this.startRead();
+            this.stage = opening + 3;
+            return false;
+        }
+        if (this.stage == opening + 3) {
+            if (!this.answered()) { return false; }
+            this.found.add(name: "the stand-in, " + name + ": a grey MeshStandardMaterial's own pipelines draw the stand-in's image, byte for byte",
+                           why: this.asStandIn());
+            return true;
+        }
+        return false;
+    }
+
+    public unsafe fn bool step() {
+        if (this.stage == 0) {
+            // a mesh's General under a Skip renderer: compile asks for its general form, since its way is General
+            this.newLooks();
+            this.fresh(way: WhileCompiling::Skip);
+            this.stageScene();
+            Shared<Mesh> a = this.boxAt(look: this.lookOfScene(), x: -0.9, z: -3.0, mirrored: false,
+                                        way: Optional::Some(value: WhileCompiling::General));
+            this.found.add(name: "a mesh's way: whileCompiling() reads back what whileCompilingMut() set",
+                           why: wayIs(got: a.whileCompiling(), want: Optional::Some(value: WhileCompiling::General)));
+            this.startCompile();
+            this.stage = 1;
+            return false;
+        }
+        if (this.stage == 1) {
+            int32 c = this.compiled();
+            if (c == 0) { return false; }
+            Shared<Mesh> b = this.boxAt(look: this.lookOfScene(), x: 0.9, z: -3.0, mirrored: true,
+                                        way: Optional::Some(value: WhileCompiling::General));
+            Shared<Mesh> following = this.boxAt(look: this.lookOfScene(), x: 0.0, z: -6.0, mirrored: true, way: Optional::None);
+            this.found.add(name: "a mesh's way: None by default, the renderer's",
+                           why: wayIs(got: following.whileCompiling(), want: Optional::None));
+            RenderInfo drawn = this.renderNow();
+            this.found.add(name: "a mesh's way: a mesh's General under a Skip renderer is drawn by its material's general form, which compile asked for, while a copy following the renderer is skipped",
+                           why: (c == 1 ? "" : "the compile never answered; ") + infoIs(got: drawn, calls: 4, misses: 2, skipped: 1, general: 1, standIn: 0, waited: 0));
+            // a mesh's Skip under a General renderer; compile asks for no general form for it
+            this.newLooks();
+            this.fresh(way: WhileCompiling::General);
+            this.stageScene();
+            Shared<Mesh> a = this.boxAt(look: this.lookOfScene(), x: -0.9, z: -3.0, mirrored: false, way: Optional::None);
+            Shared<Mesh> d = this.boxAt(look: this.secondLook(), x: 0.0, z: -6.0, mirrored: false,
+                                        way: Optional::Some(value: WhileCompiling::Skip));
+            Shared<Mesh> f = this.boxAt(look: this.thirdLook(), x: 0.0, z: -8.0, mirrored: false, way: Optional::None);
+            this.startCompile();
+            this.stage = 2;
+            return false;
+        }
+        if (this.stage == 2) {
+            int32 c = this.compiled();
+            if (c == 0) { return false; }
+            // both on the first render of their variants: a mesh's Skip, its material's general form ready, and a mirrored
+            // copy of the Skip mesh's material following the renderer, whose general form compile did not ask for
+            Shared<Mesh> b = this.boxAt(look: this.lookOfScene(), x: 0.9, z: -3.0, mirrored: true,
+                                        way: Optional::Some(value: WhileCompiling::Skip));
+            Shared<Mesh> e = this.boxAt(look: this.secondLook(), x: 0.0, z: -4.0, mirrored: true, way: Optional::None);
+            RenderInfo skipping = this.renderNow();
+            this.found.add(name: "a mesh's way: a mesh's Skip under a General renderer is skipped though its material's general form is ready, and compile asked for no general form for a mesh whose way is Skip, so a mirrored copy of its material following the renderer is skipped too",
+                           why: (c == 1 ? "" : "the compile never answered; ") + infoIs(got: skipping, calls: 6, misses: 2, skipped: 2, general: 0, standIn: 0, waited: 0));
+            // set back to None, with a material whose general form compile asked for (a variant nothing asked for): the
+            // renderer's General again. The copy, whose own pipelines that render asked for, leaves the scene.
+            Shared<Scene> s = this.theScene();
+            s.remove(object: e);
+            b.whileCompilingMut() = Optional::Some(value: WhileCompiling::Wait);
+            b.whileCompilingMut() = Optional::None;
+            b.materialMut() = this.thirdLook();
+            RenderInfo back = this.renderNow();
+            this.found.add(name: "a mesh's way: set back to None, it follows the renderer again, drawn by a general form",
+                           why: infoIs(got: back, calls: 8, misses: 1, skipped: 0, general: 1, standIn: 0, waited: 0));
+            // a mesh's Wait beside a box drawn by its general form
+            this.newLooks();
+            this.fresh(way: WhileCompiling::General);
+            this.stageScene();
+            Shared<Mesh> a = this.boxAt(look: this.lookOfScene(), x: -0.9, z: -3.0, mirrored: false, way: Optional::None);
+            this.startCompile();
+            this.stage = 3;
+            return false;
+        }
+        if (this.stage == 3) {
+            int32 c = this.compiled();
+            if (c == 0) { return false; }
+            Shared<Mesh> b = this.boxAt(look: this.lookOfScene(), x: 0.9, z: -3.0, mirrored: true, way: Optional::None);
+            Shared<Mesh> w = this.boxAt(look: this.secondLook(), x: 0.0, z: -6.0, mirrored: false,
+                                        way: Optional::Some(value: WhileCompiling::Wait));
+            RenderInfo waited = this.renderNow();
+            this.found.add(name: "a mesh's way: a mesh's Wait has its own two pipelines made during the render, beside a mirrored copy drawn by its general form",
+                           why: (c == 1 ? "" : "the compile never answered; ") + infoIs(got: waited, calls: 6, misses: 1, skipped: 0, general: 1, standIn: 0, waited: 2));
+            // setting a mesh's way writes its record again: one world matrix made
+            RenderInfo still = this.renderNow();
+            w.whileCompilingMut() = Optional::Some(value: WhileCompiling::Skip);
+            RenderInfo moved = this.renderNow();
+            int32 before = still.matrices;
+            int32 after = moved.matrices;
+            this.found.add(name: "a mesh's way: setting it writes the mesh's record again at the next render, one world matrix made",
+                           why: before == 0 && after == 1 ? "" : "the renders made ${before}, then ${after}");
+            // StandIn's first render: nothing asked for yet, so nothing drawn, its stand-in asked for
+            this.newLooks();
+            this.fresh(way: WhileCompiling::StandIn);
+            this.stageScene();
+            Shared<Mesh> a = this.boxAt(look: this.lookOfScene(), x: -0.9, z: -3.0, mirrored: false, way: Optional::None);
+            RenderInfo first = this.renderNow();
+            this.found.add(name: "the stand-in: StandIn's first render, nothing compiled, skips the mesh, and the frame's resolve and output pass miss too",
+                           why: infoIs(got: first, calls: 0, misses: 3, skipped: 1, general: 0, standIn: 0, waited: 0));
+            this.beginTrial(which: Trial::MirroredCopy);
+            this.stage = 11;
+            return false;
+        }
+        if (this.stage >= 11 && this.stage <= 14) {
+            if (!this.trialStep(opening: 11)) { return false; }
+            this.beginTrial(which: Trial::Room);
+            this.stage = 21;
+            return false;
+        }
+        if (this.stage >= 21 && this.stage <= 24) {
+            if (!this.trialStep(opening: 21)) { return false; }
+            this.beginTrial(which: Trial::Flat);
+            this.stage = 31;
+            return false;
+        }
+        if (this.stage >= 31 && this.stage <= 34) {
+            if (!this.trialStep(opening: 31)) { return false; }
+            // a program's stand-in: a red MeshBasicMaterial
+            this.newLooks();
+            this.fresh(way: WhileCompiling::StandIn);
+            Shared<MeshBasicMaterial> red = new MeshBasicMaterial.make();
+            red.colorMut() = Color.fromHex(hex: 0xff0000);
+            this.setStandIn(look: red);
+            this.stageScene();
+            Shared<Mesh> a = this.boxAt(look: this.lookOfScene(), x: -0.9, z: -3.0, mirrored: false, way: Optional::None);
+            this.startCompile();
+            this.stage = 41;
+            return false;
+        }
+        if (this.stage == 41) {
+            int32 c = this.compiled();
+            if (c == 0) { return false; }
+            Shared<Mesh> b = this.boxAt(look: this.lookOfScene(), x: 0.9, z: -3.0, mirrored: true, way: Optional::None);
+            this.added = Optional::Some(value: copy b);
+            RenderInfo drawn = this.renderNow();
+            this.found.add(name: "the stand-in: a program's own, named with standInMut(), draws a mirrored copy",
+                           why: (c == 1 ? "" : "the compile never answered; ") + infoIs(got: drawn, calls: 4, misses: 1, skipped: 0, general: 0, standIn: 1, waited: 0));
+            this.startRead();
+            this.stage = 42;
+            return false;
+        }
+        if (this.stage == 42) {
+            if (!this.answered()) { return false; }
+            this.found.add(name: "the stand-in: a program's red MeshBasicMaterial draws the copy red", why: this.tintAt(x: 23, y: 12, channel: 0));
+            // another named between renders: blue, taking effect at the next render, compiled ahead
+            Shared<MeshBasicMaterial> blue = new MeshBasicMaterial.make();
+            blue.colorMut() = Color.fromHex(hex: 0x0000ff);
+            this.setStandIn(look: blue);
+            this.startCompile();
+            this.stage = 43;
+            return false;
+        }
+        if (this.stage == 43) {
+            int32 c = this.compiled();
+            if (c == 0) { return false; }
+            // a box of a material no pipeline was asked for: a green MeshBasicMaterial, whose own WGSL nothing compiled (the
+            // stand-ins were drawn only by their general form)
+            Shared<Scene> s = this.theScene();
+            s.remove(object: this.theAdded());
+            Shared<MeshBasicMaterial> green = new MeshBasicMaterial.make();
+            green.colorMut() = Color.fromHex(hex: 0x00ff00);
+            Shared<Mesh> b = this.boxAt(look: green, x: 0.9, z: -3.0, mirrored: false, way: Optional::None);
+            RenderInfo drawn = this.renderNow();
+            this.found.add(name: "the stand-in: another named between renders takes effect at the next render, drawing a box of a new material",
+                           why: (c == 1 ? "" : "the compile never answered; ") + infoIs(got: drawn, calls: 4, misses: 1, skipped: 0, general: 0, standIn: 1, waited: 0));
+            this.startRead();
+            this.stage = 44;
+            return false;
+        }
+        if (this.stage == 44) {
+            if (!this.answered()) { return false; }
+            this.found.add(name: "the stand-in: the blue one named between renders draws the box blue", why: this.tintAt(x: 23, y: 12, channel: 2));
+            // compile asks for the stand-in only where a draw's way is StandIn: under General it asks for none. The scene's
+            // material has a node of its own, so its general form is not the library's grey's, which is a plain
+            // MeshStandardMaterial's
+            this.newLooks();
+            this.fresh(way: WhileCompiling::General);
+            this.stageScene();
+            Shared<Mesh> a = this.boxAt(look: this.secondLook(), x: -0.9, z: -3.0, mirrored: false, way: Optional::None);
+            this.startCompile();
+            this.stage = 45;
+            return false;
+        }
+        if (this.stage == 45) {
+            int32 c = this.compiled();
+            if (c == 0) { return false; }
+            this.setWay(now: WhileCompiling::StandIn);
+            Shared<Mesh> b = this.boxAt(look: this.secondLook(), x: 0.9, z: -3.0, mirrored: true, way: Optional::None);
+            RenderInfo drawn = this.renderNow();
+            this.found.add(name: "the stand-in: compile under General asks for no stand-in, so set to StandIn after it, a mirrored copy is skipped",
+                           why: (c == 1 ? "" : "the compile never answered; ") + infoIs(got: drawn, calls: 2, misses: 1, skipped: 1, general: 0, standIn: 0, waited: 0));
+            // ...and a mesh's StandIn under a Skip renderer has compile ask for it
+            this.newLooks();
+            this.fresh(way: WhileCompiling::Skip);
+            this.stageScene();
+            Shared<Mesh> again = this.boxAt(look: this.lookOfScene(), x: -0.9, z: -3.0, mirrored: false,
+                                            way: Optional::Some(value: WhileCompiling::StandIn));
+            this.startCompile();
+            this.stage = 46;
+            return false;
+        }
+        if (this.stage == 46) {
+            int32 c = this.compiled();
+            if (c == 0) { return false; }
+            Shared<Mesh> b = this.boxAt(look: this.lookOfScene(), x: 0.9, z: -3.0, mirrored: true,
+                                        way: Optional::Some(value: WhileCompiling::StandIn));
+            Shared<Mesh> following = this.boxAt(look: this.lookOfScene(), x: 0.0, z: -6.0, mirrored: true, way: Optional::None);
+            RenderInfo drawn = this.renderNow();
+            this.found.add(name: "the stand-in: a mesh's StandIn under a Skip renderer has compile ask for the stand-in, so a mirrored copy of its own draws by it, while one following the renderer is skipped",
+                           why: (c == 1 ? "" : "the compile never answered; ") + infoIs(got: drawn, calls: 4, misses: 2, skipped: 1, general: 0, standIn: 1, waited: 0));
+            // compile under StandIn, polled to Ready: the first render has no miss
+            this.newLooks();
+            this.fresh(way: WhileCompiling::StandIn);
+            this.stageScene();
+            Shared<Mesh> a = this.boxAt(look: this.lookOfScene(), x: -0.9, z: -3.0, mirrored: false, way: Optional::None);
+            this.startCompile();
+            this.stage = 47;
+            return false;
+        }
+        if (this.stage == 47) {
+            int32 c = this.compiled();
+            if (c == 0) { return false; }
+            RenderInfo drawn = this.renderNow();
+            this.found.add(name: "the stand-in: compile under StandIn polled to Ready, the first render has no miss",
+                           why: (c == 1 ? "" : "the compile never answered; ") + infoIs(got: drawn, calls: 2, misses: 0, skipped: 0, general: 0, standIn: 0, waited: 0));
+            // a stand-in passing 16 values: its general form refused, reported once, its draws skipped
+            this.newLooks();
+            this.fresh(way: WhileCompiling::StandIn);
+            Shared<Passing16> passing = new Passing16.make();
+            this.setStandIn(look: passing);
+            this.stageScene();
+            Shared<Mesh> a = this.boxAt(look: this.lookOfScene(), x: -0.9, z: -3.0, mirrored: false, way: Optional::None);
+            this.startCompile();
+            this.stage = 48;
+            return false;
+        }
+        if (this.stage == 48) {
+            int32 c = this.compiled();
+            if (c == 0) { return false; }
+            this.found.add(name: "the stand-in, 16 values passed: the compile comes to Ready, the stand-in's refusal an answer",
+                           why: c == 1 ? "" : "it is still pending");
+            this.found.add(name: "the stand-in, 16 values passed: takeErrors() reports its general form refused, as Material, in the device's words",
+                           why: this.errorsAre(general: true));
+            Shared<Mesh> b = this.boxAt(look: this.lookOfScene(), x: 0.9, z: -3.0, mirrored: true, way: Optional::None);
+            RenderInfo drawn = this.renderNow();
+            this.found.add(name: "the stand-in, 16 values passed: a mirrored copy that would take it is skipped",
+                           why: infoIs(got: drawn, calls: 2, misses: 1, skipped: 1, general: 0, standIn: 0, waited: 0));
+            this.found.add(name: "the stand-in, 16 values passed: its refusal is reported once, not again",
+                           why: this.errorsAre(general: false));
+            // a render's draw under StandIn asks for the stand-in too: drawn each tick with no compile, the refusal comes
+            this.newLooks();
+            this.fresh(way: WhileCompiling::StandIn);
+            Shared<Passing16> another = new Passing16.make();
+            this.setStandIn(look: another);
+            this.stageScene();
+            Shared<Mesh> a = this.boxAt(look: this.lookOfScene(), x: 0.0, z: -3.0, mirrored: false, way: Optional::None);
+            this.began = monotonicNow();
+            this.stage = 49;
+            return false;
+        }
+        if (this.stage == 49) {
+            RenderInfo drawn = this.renderNow();
+            string words = "";
+            isize n = this.reportsNow(first: ref words);
+            if (n == 0 && this.began.elapsed().asMillis() < PATIENCE_MS) { return false; }
+            bool general = words.startsWith(prefix: "a material's general form was refused by the device");
+            this.found.add(name: "the stand-in: a render's draw under StandIn asks for the stand-in, so drawn each tick with no compile, the 16-value stand-in's general form is reported refused",
+                           why: n == 1 && general ? "" : "it reports ${n}: " + words);
+            // a stand-in its compile refuses: reported once, in its compile's words, and the draws that would take it
+            // skipped
+            this.newLooks();
+            this.fresh(way: WhileCompiling::StandIn);
+            Shared<MisreadStandIn> wrong = new MisreadStandIn.make();
+            this.setStandIn(look: wrong);
+            this.stageScene();
+            Shared<Mesh> a = this.boxAt(look: this.lookOfScene(), x: -0.9, z: -3.0, mirrored: false, way: Optional::None);
+            this.startCompile();
+            this.stage = 50;
+            return false;
+        }
+        if (this.stage == 50) {
+            int32 c = this.compiled();
+            if (c == 0) { return false; }
+            string words = "";
+            isize n = this.reportsNow(first: ref words);
+            this.found.add(name: "the stand-in, refused by its compile: compile reports it once, as Material, in its compile's words",
+                           why: (c == 1 ? "" : "the compile never answered; ")
+                               + (n == 1 && words.startsWith(prefix: "a material was refused, so nothing draws with it: ") ? "" : "it reports ${n}: " + words));
+            Shared<Mesh> b = this.boxAt(look: this.lookOfScene(), x: 0.9, z: -3.0, mirrored: true, way: Optional::None);
+            RenderInfo drawn = this.renderNow();
+            this.found.add(name: "the stand-in, refused by its compile: a mirrored copy that would take it is skipped",
+                           why: infoIs(got: drawn, calls: 2, misses: 1, skipped: 1, general: 0, standIn: 0, waited: 0));
+            this.found.add(name: "the stand-in, refused by its compile: it is not compiled or reported again",
+                           why: this.errorsAre(general: false));
+            // a mesh whose material is refused never draws, so its StandIn does not make compile ask for the stand-in
+            this.newLooks();
+            this.fresh(way: WhileCompiling::Skip);
+            this.stageScene();
+            Shared<MisreadStandIn> broken = new MisreadStandIn.make();
+            Shared<Mesh> r = this.boxAt(look: broken, x: 0.0, z: -6.0, mirrored: false,
+                                        way: Optional::Some(value: WhileCompiling::StandIn));
+            Shared<Mesh> plain = this.boxAt(look: this.lookOfScene(), x: -0.9, z: -3.0, mirrored: false, way: Optional::None);
+            this.startCompile();
+            this.stage = 51;
+            return false;
+        }
+        if (this.stage == 51) {
+            int32 c = this.compiled();
+            if (c == 0) { return false; }
+            string words = "";
+            isize n = this.reportsNow(first: ref words);
+            Shared<Mesh> b = this.boxAt(look: this.lookOfScene(), x: 0.9, z: -3.0, mirrored: true,
+                                        way: Optional::Some(value: WhileCompiling::StandIn));
+            RenderInfo drawn = this.renderNow();
+            this.found.add(name: "the stand-in: a mesh whose material is refused, its way StandIn, does not make compile ask for the stand-in, so a mirrored copy of another material whose way is StandIn is skipped",
+                           why: (c == 1 ? "" : "the compile never answered; ") + (n == 1 ? "" : "it reported ${n}, not the refused material alone; ")
+                               + infoIs(got: drawn, calls: 2, misses: 1, skipped: 1, general: 0, standIn: 0, waited: 0));
+            this.renderer = Optional::None;
+            this.material = Optional::None;
+            this.second = Optional::None;
+            this.third = Optional::None;
+            this.added = Optional::None;
+            this.stage = 52;
+        }
+        return true;
+    }
+}

@@ -164,3 +164,12 @@ package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   **Fixed:** natively a render could draw with a pipeline it had asked for itself, where `@kama/gpu`'s threads answered
   before a later draw sharing it; every request is now polled once, at the start of a render, a compile and
   `takeErrors()`, and never during a render's draws.
+- GFX-1's part 5, step 3: `WhileCompiling::StandIn` and a mesh's own way. Under `StandIn` a draw whose own pipelines
+  compile is drawn with the renderer's stand-in, `standIn()` and `standInMut()`, a `Shared<Material>`: the library's
+  lit grey, a `MeshStandardMaterial` of #808080, unless the program names its own. It is drawn by its general form, so
+  one pair of pipelines serves every mesh; a miss asks for it, and so does `compile(scene:, camera:)` where any mesh's
+  way is `StandIn`. `mesh.whileCompiling()` and `whileCompilingMut()`, an `Optional<WhileCompiling>`, `None` the
+  renderer's, name a mesh's own way, in `render` and `compile` alike; the frame's own passes keep the renderer's.
+  `RenderInfo.standIn`, each such draw also a miss. A stand-in the compiler or the device refuses is reported once,
+  and its draws are skipped. **Changed:** `WhileCompiling` is `General`, `StandIn`, `Skip`, `Wait`; `RenderInfo.of`
+  takes `standIn:`.

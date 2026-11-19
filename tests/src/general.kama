@@ -180,7 +180,7 @@ type resource GeneralRun {
     unsafe fn RenderInfo renderNow() {
         Shared<Scene> s = this.theScene();
         Shared<PerspectiveCamera> c = this.theCamera();
-        RenderInfo said = RenderInfo.of(calls: -1, triangles: -1, objects: -1, matrices: -1, misses: -1, skipped: -1, general: -1, waited: -1);
+        RenderInfo said = RenderInfo.of(calls: -1, triangles: -1, objects: -1, matrices: -1, misses: -1, skipped: -1, general: -1, standIn: -1, waited: -1);
         match (this.renderer) {
             case Some(value: r): { r.render(scene: s, camera: c); said = r.info(); }
             case None: { }

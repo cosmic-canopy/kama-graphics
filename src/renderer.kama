@@ -21,8 +21,8 @@
 //
 // Every pipeline is compiled off the frame (kyoten's rendering.md § Decided, GFX-1's part 5, question 1): a slot asked for
 // with @kama/gpu's `createRenderPipelineAsync`, which each render polls and never uses in the render that asked for it.
-// What a draw does meanwhile is the program's (`WhileCompiling`), and `compile(scene:, camera:)` asks for a scene's
-// pipelines ahead, a request polled as @kama/gpu's are.
+// What a draw does meanwhile is the program's (`WhileCompiling`), the renderer's or a mesh's own, and
+// `compile(scene:, camera:)` asks for a scene's pipelines ahead, a request polled as @kama/gpu's are.
 //
 // The scene's lights reach every material as data in the frame's group (kyoten's rendering.md § Decided, GFX-1's part
 // 3, the lights' question 1): the frame block carries the ambient lights' sum and how many directional lights there
@@ -56,6 +56,7 @@ import {
     gpu::TexelCopyBufferLayout, gpu::Extent3D, gpu::TextureDimension, gpu::TextureViewDimension, gpu::TextureSampleType,
     image::Image, image::ImageError, image::PixelFormat, image::AlphaMode, image::ColorSpace,
     Color, RenderTarget, Scene, Walk, PerspectiveCamera, Geometry, BufferGeometry, Material, MaterialSettings, NodeBuilder,
+    MeshStandardMaterial,
     dfgTable, ToneMapping, outputWgsl, readsTable, blenderAgxTable, blenderAgxSize, Antialiasing, samplesOf, resolveWgsl,
 };
 export {
@@ -187,7 +188,8 @@ comptime uint64 FRAME_BYTES = 96;
 // no window to draw into. `Material`: a material's nodes were refused by its compile (node_builder.kama), or the device
 // refused its pipeline, such as one passing more values between its stages than the device takes, so no mesh draws with
 // it; or the device refused its general form alone, which takes two more of the values a device passes, so its draws
-// are skipped while its own pipelines compile, reported once its own pipeline is made. `Light`: a light that can light
+// are skipped while its own pipelines compile, reported once its own pipeline is made; or the device refused the
+// stand-in's general form, so the draws that would take it are skipped, reported once. `Light`: a light that can light
 // nothing, such as a directional light at its own target, reported when the light is written so. `Pipeline`: the
 // device refused a pipeline of the renderer's own, a fault below the program: the output pass's, which is then left out,
 // or the tone-mapped resolve's, when the GPU resolves instead. A later misuse joins the list, so a program's `match` on
@@ -229,11 +231,11 @@ type resource RendererErrors {
 // What the last render did, as three.js's `renderer.info`: its draw calls and triangles, the meshes its scene holds a
 // record for, and the world matrices its walk made (none, when nothing in the scene changed). Then what its pipelines
 // compiling cost it (part 5): `misses`, what it drew other than as asked, each mesh skipped or drawn by its material's
-// general form while its own pipelines compile, and each frame pass not run as asked (the GPU resolving while the
-// tone-mapped resolve compiles, the output pass left out), 0 when the render is the one asked for, which a loading screen
-// or a test waits for; `skipped`, the meshes skipped; `general`, the meshes drawn by their material's general form; and
-// `waited`, the pipelines it compiled itself, each a hitch, under `WhileCompiling::Wait`. A refused material is no miss,
-// since it never draws.
+// general form or by the stand-in while its own pipelines compile, and each frame pass not run as asked (the GPU
+// resolving while the tone-mapped resolve compiles, the output pass left out), 0 when the render is the one asked for,
+// which a loading screen or a test waits for; `skipped`, the meshes skipped; `general`, the meshes drawn by their
+// material's general form; `standIn`, the meshes drawn by the stand-in; and `waited`, the pipelines it compiled itself,
+// each a hitch, under `WhileCompiling::Wait`. A refused material is no miss, since it never draws.
 @generate(of)
 type value RenderInfo {
     public int32 calls;
@@ -243,22 +245,30 @@ type value RenderInfo {
     public int32 misses;
     public int32 skipped;
     public int32 general;
+    public int32 standIn;
     public int32 waited;
 }
 
 // What a draw does while its pipelines compile (kyoten's rendering.md § Decided, GFX-1's part 5, question 1, the owner's
-// (A) of 2026-11-18), every pipeline being compiled off the frame unless a program asks otherwise:
+// (A) of 2026-11-18), every pipeline being compiled off the frame unless a program asks otherwise. The renderer's
+// `whileCompiling()` is every draw's, unless a mesh's own `whileCompiling()` names another (step 3's question 1):
 // - `General`, the default: the material's general form (NodeBuilder's `generalWgsl()`), the same pixels drawn more
 //   slowly, once it is compiled; where none is ready, or the device refused it, the draw is skipped. A draw that misses
 //   asks for it, and so does `compile(scene:, camera:)`, so a variant new at run time, such as a mirrored copy, finds it;
+// - `StandIn`: the renderer's stand-in (`standIn()`), the library's lit grey unless the program names its own, as
+//   Unreal's default material, drawn by its general form, so one pair of pipelines serves every mesh, mirrored or not
+//   (step 3's question 2). A draw that misses asks for it, and so does `compile`, only where a draw's way is
+//   `StandIn`; until it is ready, or where the device refused it, the draw is skipped. A material refused outright is
+//   not drawn by it, since it is not compiling;
 // - `Skip`: nothing until the draw's own pipelines are ready, as Bevy and Unreal's default;
 // - `Wait`: the pipelines compiled during the render that needs them, as three.js r187's, a hitch the program chose, for a
 //   tool, a test or a cutscene. On the web the page does not freeze, but the browser's GPU process waits at the submit.
-// The frame's own passes go the same way: while the tone-mapped resolve compiles, the GPU resolves (the ladder's next
-// rung), and while the output pass compiles it is left out, the target left as it was. `StandIn` joins at step 3, and a
-// later way joins the list, so a program's `match` on it has a `case _:`.
+// The frame's own passes take the renderer's way, never a mesh's: while the tone-mapped resolve compiles, the GPU
+// resolves (the ladder's next rung), and while the output pass compiles it is left out, the target left as it was;
+// under `Wait` they are made during the render. A later way joins the list, so a program's `match` on it has a
+// `case _:`.
 @nonExhaustive
-type enum WhileCompiling { General, Skip, Wait }
+type enum WhileCompiling { General, StandIn, Skip, Wait }
 
 // A refused pipeline's words: the device's, then its stages' first error each, where they say more.
 fn string refusalWords(const ref PipelineError error) {
@@ -382,6 +392,7 @@ type resource Renderer {
     DynamicArray<uint32> generalAt;        // ...and the samples a texel they draw at
     DynamicArray<Shared<PipelineSlot>> generalShaded;
     DynamicArray<Shared<PipelineSlot>> generalDepth;
+    DynamicArray<bool> generalStandIn;     // ...and whether a stand-in draws by it, which has no pipelines of its own made
     BindGroupLayout outputLayout;               // the output pass's one binding: the scene's 16-bit float texture
     PipelineLayout outputPipelineLayout;
     BindGroupLayout tableLayout;                // ...and with Blender's AgX table beside it
@@ -389,7 +400,8 @@ type resource Renderer {
     Optional<TextureView> agxTableView = Optional::None;   // Blender's AgX table, made the first time a camera uses it
     DynamicArray<ToneMapping> outputCurves;     // the output pass's pipelines, by the tone mapping they apply
     DynamicArray<Shared<PipelineSlot>> outputs;
-    RenderInfo last = RenderInfo.of(calls: 0, triangles: 0, objects: 0, matrices: 0, misses: 0, skipped: 0, general: 0, waited: 0);
+    RenderInfo last = RenderInfo.of(calls: 0, triangles: 0, objects: 0, matrices: 0, misses: 0, skipped: 0, general: 0, standIn: 0,
+                                    waited: 0);
     BindGroupLayout resolveLayout;              // the tone-mapped resolve's one binding: the multisampled scene
     PipelineLayout resolvePipelineLayout;
     Shared<PipelineSlot> resolving;             // the tone-mapped resolve's pipeline, asked for the first time a render takes it
@@ -401,6 +413,9 @@ type resource Renderer {
     // What a draw does while its pipelines compile (`WhileCompiling`; kyoten's rendering.md § Decided, GFX-1's part 5,
     // question 1): the material's general form by default, a draw never waiting.
     WhileCompiling way = WhileCompiling::General;
+    // What a draw under `WhileCompiling::StandIn` is drawn with (kyoten's rendering.md § Decided, GFX-1's part 5, step 3's
+    // question 2): the library's lit grey by default, which a program replaces.
+    Shared<Material> standing;
     bool printing = true;                       // printErrors
     DynamicArray<GraphicsErrorReport> errors;   // the misuses refused since the last takeErrors, at most KEPT
     int64 overflow = 0;                         // those past KEPT, counted
@@ -469,6 +484,7 @@ type resource Renderer {
         this.generalAt = DynamicArray.empty();
         this.generalShaded = DynamicArray.empty();
         this.generalDepth = DynamicArray.empty();
+        this.generalStandIn = DynamicArray.empty();
         BindGroupLayoutDescriptor o = BindGroupLayoutDescriptor.make();
         o.entry(binding: 0, visibility: ShaderStage::Fragment, layout: BindingLayout::Texture(layout: TextureBindingLayout.make()));
         o.label(text: "the output pass's scene");
@@ -507,6 +523,9 @@ type resource Renderer {
                                                              kind: GraphicsErrorKind::Pipeline);
         this.resolving = give resolve;
         this.errors = DynamicArray.empty();
+        Shared<MeshStandardMaterial> grey = new MeshStandardMaterial.make();
+        grey.colorMut() = Color.fromHex(hex: 0x808080);
+        this.standing = give grey;
         this.device = give device;
         this.queue = give queue;
     }
@@ -529,11 +548,18 @@ type resource Renderer {
     public const fn WhileCompiling whileCompiling() { return this.way; }
     public fn ref WhileCompiling whileCompilingMut() { return this.way; }
 
+    // What a draw under `WhileCompiling::StandIn` is drawn with while its own pipelines compile: a `MeshStandardMaterial`
+    // of #808080, roughness 1 and metalness 0, lit by the scene. A property pair, as `clearColor`; a change takes effect
+    // at the next render.
+    public unsafe const fn Shared<Material> standIn() { return copy this.standing; }
+    public fn ref Shared<Material> standInMut() { return this.standing; }
+
     // Ask for every pipeline `scene` needs as `camera` sees it, off the frame (kyoten's rendering.md § Decided, GFX-1's
     // part 5, question 1), as three.js's `compileAsync` and Unreal's precaching: each mesh's two at the anti-aliasing
-    // method's samples a texel, and, under `WhileCompiling::General`, its material's general form's two, so a variant new
-    // at run time draws by it; the tone-mapped resolve's when the method takes it, and the output pass's for the camera's
-    // tone mapping when its target is 8-bit. The scene is placed as a render places it. Poll the request until it is
+    // method's samples a texel, and, where its way (its own, else the renderer's) is `WhileCompiling::General`, its
+    // material's general form's two, so a variant new at run time draws by it; the stand-in's general form's two, once,
+    // where any mesh's way is `StandIn`; the tone-mapped resolve's when the method takes it, and the output pass's for the
+    // camera's tone mapping when its target is 8-bit. The scene is placed as a render places it. Poll the request until it is
     // `Ready`: a render then draws everything with no miss, while nothing new joins the scene and the method and the
     // camera's tone mapping stay as they were. A loading screen polls it, and so does a test before it renders.
     public unsafe fn CompileRequest compile(Shared<Scene> scene, Shared<PerspectiveCamera> camera) {
@@ -543,6 +569,7 @@ type resource Renderer {
         for (isize i = 0; i < found.length(); i = i + 1) { this.refuse(kind: GraphicsErrorKind::Light, message: copy found[i]); }
         uint32 perTexel = samplesOf(method: this.method);
         DynamicArray<Shared<PipelineSlot>> asked = DynamicArray.empty();
+        bool standInWanted = false;
         DynamicArray<isize> slots = scene.drawSlots();
         for (isize i = 0; i < slots.length(); i = i + 1) {
             isize slot = slots[i];
@@ -551,14 +578,26 @@ type resource Renderer {
             if (!material.gpuMut().compiledAt(graph: graph)) { this.compileNodes(material: copy material); }
             DynamicArray<string> refused = material.gpuMut().refused();
             if (refused.length() > 0) { continue; }
+            // the draw's way: its mesh's, else the renderer's
+            WhileCompiling drawWay = match (scene.wayAt(slot: slot)) { case Some(value: w): w; case None: this.way; };
+            if (drawWay == WhileCompiling::StandIn) { standInWanted = true; }
             string source = material.gpuMut().source();
             string general = material.gpuMut().generalSource();
             isize e = this.pipelineFor(source: source, general: general, mirrored: scene.mirroredAt(slot: slot), count: perTexel);
             int32 madeNone = this.provide(i: e, now: false);
             asked.add(item: copy this.pipelines[e]);
             asked.add(item: copy this.prepasses[e]);
-            if (this.way == WhileCompiling::General) {
+            if (drawWay == WhileCompiling::General) {
                 isize g = this.generalOf[e];
+                this.provideGeneral(g: g);
+                asked.add(item: copy this.generalShaded[g]);
+                asked.add(item: copy this.generalDepth[g]);
+            }
+        }
+        // the stand-in's general form, once, when any draw's way is `StandIn`
+        if (standInWanted) {
+            isize g = this.standInEntry(count: perTexel);
+            if (g >= 0) {
                 this.provideGeneral(g: g);
                 asked.add(item: copy this.generalShaded[g]);
                 asked.add(item: copy this.generalDepth[g]);
@@ -624,6 +663,16 @@ type resource Renderer {
             Shared<PipelineSlot> depthOwn = copy this.prepasses[i];
             if (!shadedOwn.ready() || !depthOwn.ready()) { continue; }
             isize g = this.generalOf[i];
+            Shared<PipelineSlot> shadedGeneral = copy this.generalShaded[g];
+            Shared<PipelineSlot> depthGeneral = copy this.generalDepth[g];
+            string shadedWords = shadedGeneral.untold();
+            string depthWords = depthGeneral.untold();
+            if (!shadedWords.isEmpty()) { this.refuse(kind: shadedGeneral.kind(), message: copy shadedWords); }
+            else if (!depthWords.isEmpty()) { this.refuse(kind: depthGeneral.kind(), message: copy depthWords); }
+        }
+        // a stand-in's general form, which its draws take alone, its own pipelines never asked for
+        for (isize g = 0; g < this.generalShaded.length(); g = g + 1) {
+            if (!this.generalStandIn[g]) { continue; }
             Shared<PipelineSlot> shadedGeneral = copy this.generalShaded[g];
             Shared<PipelineSlot> depthGeneral = copy this.generalDepth[g];
             string shadedWords = shadedGeneral.untold();
@@ -834,7 +883,22 @@ type resource Renderer {
         this.generalAt.add(item: count);
         this.generalShaded.add(item: give shaded);
         this.generalDepth.add(item: give depth);
+        this.generalStandIn.add(item: false);
         return this.generalSources.length() - 1;
+    }
+
+    // The stand-in's general form's entry at `count` samples a texel, its nodes compiled the first time, as any
+    // material's; -1 when its compile refused them, which `compileNodes` reported.
+    unsafe fn isize standInEntry(uint32 count) {
+        Shared<Material> look = copy this.standing;
+        uint32 graph = look.graphVersion();
+        if (!look.gpuMut().compiledAt(graph: graph)) { this.compileNodes(material: copy look); }
+        DynamicArray<string> refused = look.gpuMut().refused();
+        if (refused.length() > 0) { return -1; }
+        string general = look.gpuMut().generalSource();
+        isize g = this.generalFor(source: general, count: count);
+        this.generalStandIn[g] = true;
+        return g;
     }
 
     // General entry `g`'s two pipelines, each asked for off the frame if it is still wanted, one shader module serving
@@ -919,7 +983,8 @@ type resource Renderer {
         Optional<Shared<RenderTarget>> named = camera.target();
         if (named.isNone()) {
             // no target, and no window to draw into until part 6 gives the renderer one
-            this.last = RenderInfo.of(calls: 0, triangles: 0, objects: objects, matrices: made, misses: 0, skipped: 0, general: 0, waited: 0);
+            this.last = RenderInfo.of(calls: 0, triangles: 0, objects: objects, matrices: made, misses: 0, skipped: 0, general: 0,
+                                      standIn: 0, waited: 0);
             this.refuse(kind: GraphicsErrorKind::NoTarget,
                         message: "render drew nothing: the camera names no render target, and this renderer has no window to draw into (name a target with the camera's targetMut())");
             return;
@@ -930,12 +995,15 @@ type resource Renderer {
         bool byGpu = this.method == Antialiasing::Msaa4;
         bool toneMappedResolve = this.method == Antialiasing::Msaa4ToneMapped;
         // the pipelines a draw needs and has not, asked for off the frame, or made now under `Wait`: what this render
-        // made itself, and what it drew other than as asked (`info()`)
+        // made itself, and what it drew other than as asked (`info()`). The frame's own passes take the renderer's way,
+        // and each mesh its own, else the renderer's.
         bool now = this.way == WhileCompiling::Wait;
         int32 waited = 0;
         int32 misses = 0;
         int32 skipped = 0;
         int32 byGeneral = 0;
+        int32 byStandIn = 0;
+        isize standInAt = -2;   // the stand-in's general entry, found by the first draw that takes it: -1 refused
         // the frame's own passes: while the tone-mapped resolve compiles the GPU resolves, the ladder's next rung, and
         // while the output pass compiles it is left out, the target left as it was. Neither is a miss once refused.
         if (toneMappedResolve) {
@@ -1020,10 +1088,12 @@ type resource Renderer {
             if (!material.gpuMut().compiledAt(graph: graph)) { this.compileNodes(material: copy material); }
             DynamicArray<string> refused = material.gpuMut().refused();
             if (refused.length() > 0) { continue; }
+            WhileCompiling drawWay = match (scene.wayAt(slot: slot)) { case Some(value: w): w; case None: this.way; };
             string source = material.gpuMut().source();
             string general = material.gpuMut().generalSource();
             isize e = this.pipelineFor(source: source, general: general, mirrored: scene.mirroredAt(slot: slot), count: perTexel);
-            waited = waited + this.provide(i: e, now: now);
+            waited = waited + this.provide(i: e, now: drawWay == WhileCompiling::Wait);
+            Shared<Material> drawnWith = copy material;
             Shared<PipelineSlot> shadedSlot = copy this.pipelines[e];
             Shared<PipelineSlot> depthSlot = copy this.prepasses[e];
             if (shadedSlot.ready() && depthSlot.ready()) {
@@ -1034,9 +1104,9 @@ type resource Renderer {
                 // refused, and never drawn, so no miss
                 if (shadedSlot.refusedNow() || depthSlot.refusedNow()) { continue; }
                 // compiling: under `General`, drawn by its material's general form once that is ready, asked for now if
-                // it is not yet; else skipped
+                // it is not yet; under `StandIn`, by the stand-in's, its look the stand-in's; else skipped
                 bool drawable = false;
-                if (this.way == WhileCompiling::General) {
+                if (drawWay == WhileCompiling::General) {
                     isize g = this.generalOf[e];
                     this.provideGeneral(g: g);
                     Shared<PipelineSlot> shadedGeneral = copy this.generalShaded[g];
@@ -1049,16 +1119,32 @@ type resource Renderer {
                         byGeneral = byGeneral + 1;
                     }
                 }
+                if (drawWay == WhileCompiling::StandIn) {
+                    if (standInAt == -2) { standInAt = this.standInEntry(count: perTexel); }
+                    if (standInAt >= 0) {
+                        this.provideGeneral(g: standInAt);
+                        Shared<PipelineSlot> shadedStandIn = copy this.generalShaded[standInAt];
+                        Shared<PipelineSlot> depthStandIn = copy this.generalDepth[standInAt];
+                        if (shadedStandIn.ready() && depthStandIn.ready()) {
+                            drawable = true;
+                            chosen.add(item: -2 - standInAt);
+                            shadedWith.add(item: shadedStandIn.pipeline());
+                            depthWith.add(item: depthStandIn.pipeline());
+                            drawnWith = this.standIn();
+                            byStandIn = byStandIn + 1;
+                        }
+                    }
+                }
                 if (!drawable) { skipped = skipped + 1; continue; }
             }
             DynamicArray<uint8> settings = DynamicArray.empty();
-            if (material.gpuMut().staleOn(device: this.device, version: material.version())) {
+            if (drawnWith.gpuMut().staleOn(device: this.device, version: drawnWith.version())) {
                 MaterialSettings declared = MaterialSettings.make();
-                material.settings(into: ref declared);
+                drawnWith.settings(into: ref declared);
                 settings = declared.bytes();
             }
-            looks.add(item: material.gpuMut().groupOn(device: ref this.device, queue: ref this.queue, layout: this.materialLayout,
-                                                      settings: settings, version: material.version()));
+            looks.add(item: drawnWith.gpuMut().groupOn(device: ref this.device, queue: ref this.queue, layout: this.materialLayout,
+                                                       settings: settings, version: drawnWith.version()));
             positionsOf.add(item: geometry.buffersMut().positionsOn(device: ref this.device, queue: ref this.queue));
             normalsOf.add(item: geometry.buffersMut().normalsOn(device: ref this.device, queue: ref this.queue));
             indicesOf.add(item: geometry.buffersMut().indicesOn(device: ref this.device, queue: ref this.queue));
@@ -1146,7 +1232,8 @@ type resource Renderer {
         // shadow pass's; the frame's own pass, the output, is not the scene's
         int32 calls = cast<int32>(chosen.length()) * 2;
         this.last = RenderInfo.of(calls: calls, triangles: triangles * 2, objects: objects, matrices: made,
-                                  misses: misses + skipped + byGeneral, skipped: skipped, general: byGeneral, waited: waited);
+                                  misses: misses + skipped + byGeneral + byStandIn, skipped: skipped, general: byGeneral,
+                                  standIn: byStandIn, waited: waited);
         this.reportRefusals();
     }
 

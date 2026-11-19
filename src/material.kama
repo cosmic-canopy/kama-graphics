@@ -29,21 +29,22 @@ type contract Material for resource {
     fn ref MaterialGpu gpuMut();
 }
 
-// What a renderer keeps of a material: its WGSL, compiled from the graph its `graphVersion()` named then, or what that
-// compile refused; and its settings on each device that drew it, a uniform buffer and its bind group, written again when
-// the material's version moved. Only a renderer reaches it.
+// What a renderer keeps of a material: its WGSL and its general form's, compiled from the graph its `graphVersion()`
+// named then, or what that compile refused; and its settings on each device that drew it, a uniform buffer and its bind
+// group, written again when the material's version moved. Only a renderer reaches it.
 type resource MaterialGpu {
     DynamicArray<UnsafePtr> devices;
     DynamicArray<Buffer> uniforms;
     DynamicArray<BindGroup> groups;
     DynamicArray<uint32> versions;
     Optional<string> compiled = Optional::None;
+    string generalCompiled = "";   // its general form (NodeBuilder's `generalWgsl()`)
     uint32 compiledGraph = 0;
     DynamicArray<string> refusals;
 
-    friend Renderer::render[groupOn, staleOn, compiledAt, source, refused];
+    friend Renderer::render[groupOn, staleOn, compiledAt, source, generalSource, refused];
     friend Renderer::compileNodes[store];
-    friend Renderer::compile[compiledAt, source, refused];
+    friend Renderer::compile[compiledAt, source, generalSource, refused];
 
     public unsafe ctor make() {
         this.devices = DynamicArray.empty();
@@ -55,12 +56,14 @@ type resource MaterialGpu {
 
     // Whether its WGSL is compiled from the graph numbered `graph`, so it is to be compiled again when not.
     const fn bool compiledAt(uint32 graph) { return this.compiled.isSome() && this.compiledGraph == graph; }
-    fn void store(string wgsl, DynamicArray<string> problems, uint32 graph) {
+    fn void store(string wgsl, string general, DynamicArray<string> problems, uint32 graph) {
         this.compiled = Optional::Some(value: give wgsl);
+        this.generalCompiled = give general;
         this.compiledGraph = graph;
         this.refusals = give problems;
     }
     const fn string source() { return match (this.compiled) { case Some(value: s): copy s; case None: ""; }; }
+    const fn string generalSource() { return copy this.generalCompiled; }
     const fn DynamicArray<string> refused() { return copy this.refusals; }
 
     // Whether `device` has no settings of this material's `version` yet, so they are to be written.

@@ -153,3 +153,14 @@ package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `waited`. `GraphicsErrorKind::Pipeline`. **Changed:** a new scene's first render draws nothing until its pipelines
   answer; poll `compile` first, or set `Wait` for step 4's behaviour. A material whose pipeline the device refuses is
   skipped alone, reported as `Material`, where its frame drew nothing before.
+- GFX-1's part 5, step 2: a material's general form, so `WhileCompiling::General` draws a mesh whose own pipelines are
+  compiling with the same pixels. `NodeBuilder.generalWgsl()`, written in the same pass as `wgsl()`: one more varying,
+  flat, whether the object is mirrored, from its world matrix's determinant; `fs` discarding a face that faces away after
+  its shading; and `fsCull`, the depth prepass's. Its pipelines cull nothing, so one draws mirrored meshes and others. A
+  miss asks for it, and so does `compile(scene:, camera:)` under `General`. `RenderInfo.general`, each such draw also a
+  miss. A general form the device refuses, as it does a material passing 15 or 16 values, since the general form
+  takes two more, is reported once as `Material` once the material's own pipeline is made. **Changed:** `RenderInfo.of` takes `general:`; `facing` and
+  `fsCull` are names the compiler writes, and a shader function named `determinant` is refused.
+  **Fixed:** natively a render could draw with a pipeline it had asked for itself, where `@kama/gpu`'s threads answered
+  before a later draw sharing it; every request is now polled once, at the start of a render, a compile and
+  `takeErrors()`, and never during a render's draws.

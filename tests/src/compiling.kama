@@ -20,6 +20,11 @@
 // - **the tone-mapped resolve while it compiles:** a scene compiled at `Msaa4` and drawn at `Msaa4ToneMapped` is resolved
 //   by the GPU for that render, one miss, the box drawn; once the resolve answers, no miss;
 // - **a method set back compiles nothing:** `Msaa4` again draws at once, with no miss;
+// - **a render never draws with a pipeline it asked for itself:** twelve boxes, by turns of two materials, share two
+//   pipeline pairs, each asked for by its first box's draw; a new scene's first render skips all twelve, though natively
+//   @kama/gpu's threads may answer before a later box's draw; under `General` nor by a general form;
+// - **a refusal a render found, reported by `takeErrors()` alone:** the two boxes rendered once, then `takeErrors()`
+//   polled each tick with no render, which polls the requests, reports it once;
 // - **a refusal a render finds itself:** the two boxes drawn with no compile, each tick until no miss, by a renderer that
 //   prints and never reads `takeErrors()`, as such a program keeps it: the render that finds the refusal prints it,
 //   once, which only the run's output shows, so tools/test.sh counts the line.
@@ -32,7 +37,7 @@ import {
     gpu::Device, gpu::Queue, gpu::GpuError,
     graphics::Color, graphics::Renderer, graphics::RenderInfo, graphics::RenderTarget, graphics::Scene, graphics::Mesh,
     graphics::PerspectiveCamera, graphics::BoxGeometry, graphics::Material, graphics::MaterialGpu, graphics::MaterialSettings,
-    graphics::NodeBuilder, graphics::MeshBasicMaterial, graphics::PixelRead, graphics::PixelStatus, graphics::ToneMapping,
+    graphics::NodeBuilder, graphics::MeshBasicMaterial, graphics::MeshStandardMaterial, graphics::PixelRead, graphics::PixelStatus, graphics::ToneMapping,
     graphics::Antialiasing, graphics::WhileCompiling, graphics::CompileRequest, graphics::CompileStatus,
     graphics::GraphicsErrorKind, graphics::RendererErrors, graphics::FloatNode, graphics::vec3, graphics::vec4,
     graphics::constant, graphics::varying,
@@ -131,6 +136,31 @@ type resource CompilingRun {
         this.scene = Optional::Some(value: give s);
     }
 
+    // A new 16 x 12 target and camera, and a scene of twelve boxes in a grid ahead of the camera, each a geometry of its
+    // own, by turns a red unlit material and a standard one: two pipeline pairs draw them all, so between two draws that
+    // share a pair the other's shader module is made, time a pipeline asked for by the first draw may answer in.
+    unsafe fn void stageMany() {
+        this.stageScene(two: false);
+        Shared<Scene> s = new Scene.make();
+        Shared<MeshBasicMaterial> red = new MeshBasicMaterial.make();
+        red.colorMut() = Color.fromHex(hex: 0xff0000);
+        Shared<MeshStandardMaterial> lit = new MeshStandardMaterial.make();
+        for (int32 i = 0; i < 12; i = i + 1) {
+            Shared<BoxGeometry> box = new BoxGeometry.make(width: 0.2, height: 0.2, depth: 0.2);
+            Vec3 at = Vec3.of(x: cast<float32>(i % 4) * 0.4 - 0.6, y: cast<float32>(i / 4) * 0.4 - 0.4, z: -3.0);
+            if (i % 2 == 0) {
+                Shared<Mesh> m = new Mesh.make(geometry: box, material: copy red);
+                m.positionMut() = at;
+                s.add(object: m);
+            } else {
+                Shared<Mesh> m = new Mesh.make(geometry: box, material: copy lit);
+                m.positionMut() = at;
+                s.add(object: m);
+            }
+        }
+        this.scene = Optional::Some(value: give s);
+    }
+
     unsafe fn Shared<Scene> theScene() { return match (this.scene) { case Some(value: s): copy s; case None: { panic(msg: "staged first"); } }; }
     unsafe fn Shared<PerspectiveCamera> theCamera() { return match (this.camera) { case Some(value: c): copy c; case None: { panic(msg: "staged first"); } }; }
     unsafe fn Shared<RenderTarget> theTarget() { return match (this.target) { case Some(value: t): copy t; case None: { panic(msg: "staged first"); } }; }
@@ -139,7 +169,7 @@ type resource CompilingRun {
     unsafe fn RenderInfo renderNow() {
         Shared<Scene> s = this.theScene();
         Shared<PerspectiveCamera> c = this.theCamera();
-        RenderInfo said = RenderInfo.of(calls: -1, triangles: -1, objects: -1, matrices: -1, misses: -1, skipped: -1, waited: -1);
+        RenderInfo said = RenderInfo.of(calls: -1, triangles: -1, objects: -1, matrices: -1, misses: -1, skipped: -1, general: -1, waited: -1);
         match (this.renderer) {
             case Some(value: r): { r.render(scene: s, camera: c); said = r.info(); }
             case None: { }
@@ -402,8 +432,36 @@ type resource CompilingRun {
             if (again.misses != 0 && this.began.elapsed().asMillis() < PATIENCE_MS) { return false; }
             this.found.add(name: "compiling, a pipeline the device refuses, found by a render: drawn again each tick, a render with no miss comes, the box beside it drawn",
                            why: infoIs(got: again, misses: 0, skipped: 0, waited: 0, calls: 2));
-            this.renderer = Optional::None;
+            // a render never draws with a pipeline it asked for itself: a box's draw asks for the pipelines the boxes of its
+            // material share, and natively @kama/gpu's own threads may answer before a later box's draw, which must not
+            // take them (found in part 5's step 2); under General, nor its material's general form
+            this.fresh(way: WhileCompiling::Skip);
+            this.stageMany();
+            RenderInfo many = this.renderNow();
+            this.found.add(name: "compiling: a render never draws with a pipeline it asked for itself, so twelve boxes, by turns of two materials, are all skipped by a new scene's first render (and the resolve and the output)",
+                           why: infoIs(got: many, misses: 14, skipped: 12, waited: 0, calls: 0));
+            this.fresh(way: WhileCompiling::General);
+            this.stageMany();
+            RenderInfo general = this.renderNow();
+            this.found.add(name: "compiling, General: a render never draws by a general form it asked for itself, so the twelve boxes are all skipped by a new scene's first render",
+                           why: infoIs(got: general, misses: 14, skipped: 12, waited: 0, calls: 0));
+            // a refusal a render found is reported by takeErrors() alone, with no render after it: it polls the requests
+            this.fresh(way: WhileCompiling::General);
+            this.stageScene(two: true);
+            RenderInfo once = this.renderNow();
+            this.began = monotonicNow();
             this.stage = 13;
+            return false;
+        }
+        if (this.stage == 13) {
+            RendererErrors e = match (this.renderer) { case Some(value: r): r.takeErrors(); case None: { panic(msg: "made first"); } };
+            isize n = e.reports().length();
+            if (n == 0 && this.began.elapsed().asMillis() < PATIENCE_MS) { return false; }
+            bool isMaterial = n == 1 && match (e.reports()[0].kind()) { case Material: true; case _: false; };
+            this.found.add(name: "compiling, a pipeline the device refuses, asked for by one render: takeErrors() polled alone, with no render after it, reports it once, as Material",
+                           why: isMaterial ? "" : "it reports ${n}");
+            this.renderer = Optional::None;
+            this.stage = 14;
         }
         return true;
     }

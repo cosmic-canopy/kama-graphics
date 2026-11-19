@@ -129,8 +129,35 @@ fn RenderPipelineDescriptor depthDescriptor(PipelineLayout layout, ShaderModule 
     return depthOnly;
 }
 
+// A material's general form's pipelines (NodeBuilder's `generalWgsl()`; kyoten's rendering.md § Decided, GFX-1's part 5,
+// question 1): the shaded pass's and the depth prepass's as above, but culling nothing, in the default winding, since the
+// shader culls, so one pipeline draws mirrored meshes and others. The depth prepass's runs `fsCull`, with no colour
+// target, which discards a face that faces away before its depth is written.
+fn RenderPipelineDescriptor generalShadedDescriptor(PipelineLayout layout, ShaderModule shader, uint32 count) {
+    FragmentState fragment = FragmentState.make(module: copy shader, entryPoint: "fs");
+    fragment.target(state: ColorTargetState.make(format: TextureFormat::RGBA16Float));
+    RenderPipelineDescriptor pipeline = RenderPipelineDescriptor.make(layout: Layout::Explicit(layout: give layout),
+                                                                      vertex: meshVertex(shader: give shader));
+    pipeline.fragment(state: give fragment);
+    pipeline.depthStencil(state: DepthStencilState.make(format: TextureFormat::Depth32Float, depthWriteEnabled: false,
+                                                        depthCompare: CompareFunction::Equal));
+    pipeline.multisampleMut().count = count;
+    pipeline.label(text: "a mesh, by its material's general form");
+    return pipeline;
+}
+fn RenderPipelineDescriptor generalDepthDescriptor(PipelineLayout layout, ShaderModule shader, uint32 count) {
+    RenderPipelineDescriptor depthOnly = RenderPipelineDescriptor.make(layout: Layout::Explicit(layout: give layout),
+                                                                       vertex: meshVertex(shader: copy shader));
+    depthOnly.fragment(state: FragmentState.make(module: give shader, entryPoint: "fsCull"));
+    depthOnly.depthStencil(state: DepthStencilState.make(format: TextureFormat::Depth32Float, depthWriteEnabled: true,
+                                                         depthCompare: CompareFunction::Greater));
+    depthOnly.multisampleMut().count = count;
+    depthOnly.label(text: "a mesh's depth, by its material's general form");
+    return depthOnly;
+}
+
 // One pass's draws, the depth prepass's or the shaded pass's: each mesh `render` gathered, with its pipeline, which
-// `chosen` names so a run of draws with one pipeline binds it once, its material's group, its geometry's buffers, and its
+// `chosen` names so a run of draws with one pipeline binds it once (a general form's named below -1), its material's group, its geometry's buffers, and its
 // record by its instance index.
 unsafe fn void drawEach(ref RenderPass pass, const ref DynamicArray<RenderPipeline> pipelines, const ref DynamicArray<isize> chosen,
                         const ref DynamicArray<BindGroup> looks, const ref DynamicArray<Buffer> positions,
@@ -159,10 +186,12 @@ comptime uint64 FRAME_BYTES = 96;
 // What kind of misuse a renderer refused. `NoTarget`: a camera naming no render target was rendered by a renderer with
 // no window to draw into. `Material`: a material's nodes were refused by its compile (node_builder.kama), or the device
 // refused its pipeline, such as one passing more values between its stages than the device takes, so no mesh draws with
-// it. `Light`: a light that can light nothing, such as a directional light at its own target, reported when the light is
-// written so. `Pipeline`: the device refused a pipeline of the renderer's own, a fault below the program: the output
-// pass's, which is then left out, or the tone-mapped resolve's, when the GPU resolves instead. A later misuse joins the
-// list, so a program's `match` on it has a `case _:`.
+// it; or the device refused its general form alone, which takes two more of the values a device passes, so its draws
+// are skipped while its own pipelines compile, reported once its own pipeline is made. `Light`: a light that can light
+// nothing, such as a directional light at its own target, reported when the light is written so. `Pipeline`: the
+// device refused a pipeline of the renderer's own, a fault below the program: the output pass's, which is then left out,
+// or the tone-mapped resolve's, when the GPU resolves instead. A later misuse joins the list, so a program's `match` on
+// it has a `case _:`.
 @nonExhaustive
 type enum GraphicsErrorKind { NoTarget, Material, Light, Pipeline }
 
@@ -199,11 +228,12 @@ type resource RendererErrors {
 
 // What the last render did, as three.js's `renderer.info`: its draw calls and triangles, the meshes its scene holds a
 // record for, and the world matrices its walk made (none, when nothing in the scene changed). Then what its pipelines
-// compiling cost it (part 5): `misses`, what it drew other than as asked, each mesh skipped while its pipelines compile
-// and each frame pass not run as asked (the GPU resolving while the tone-mapped resolve compiles, the output pass left
-// out), 0 when the render is the one asked for, which a loading screen or a test waits for; `skipped`, the meshes
-// skipped; and `waited`, the pipelines it compiled itself, each a hitch, under `WhileCompiling::Wait`. A refused
-// material is no miss, since it never draws.
+// compiling cost it (part 5): `misses`, what it drew other than as asked, each mesh skipped or drawn by its material's
+// general form while its own pipelines compile, and each frame pass not run as asked (the GPU resolving while the
+// tone-mapped resolve compiles, the output pass left out), 0 when the render is the one asked for, which a loading screen
+// or a test waits for; `skipped`, the meshes skipped; `general`, the meshes drawn by their material's general form; and
+// `waited`, the pipelines it compiled itself, each a hitch, under `WhileCompiling::Wait`. A refused material is no miss,
+// since it never draws.
 @generate(of)
 type value RenderInfo {
     public int32 calls;
@@ -212,13 +242,15 @@ type value RenderInfo {
     public int32 matrices;
     public int32 misses;
     public int32 skipped;
+    public int32 general;
     public int32 waited;
 }
 
 // What a draw does while its pipelines compile (kyoten's rendering.md § Decided, GFX-1's part 5, question 1, the owner's
 // (A) of 2026-11-18), every pipeline being compiled off the frame unless a program asks otherwise:
-// - `General`, the default: the material's general form, the same pixels drawn more slowly, once it is compiled; where
-//   none is ready the draw is skipped. No material has a general form until part 5's step 2, so for now it skips;
+// - `General`, the default: the material's general form (NodeBuilder's `generalWgsl()`), the same pixels drawn more
+//   slowly, once it is compiled; where none is ready, or the device refused it, the draw is skipped. A draw that misses
+//   asks for it, and so does `compile(scene:, camera:)`, so a variant new at run time, such as a mirrored copy, finds it;
 // - `Skip`: nothing until the draw's own pipelines are ready, as Bevy and Unreal's default;
 // - `Wait`: the pipelines compiled during the render that needs them, as three.js r187's, a hitch the program chose, for a
 //   tool, a test or a cutscene. On the web the page does not freeze, but the browser's GPU process waits at the submit.
@@ -345,6 +377,11 @@ type resource Renderer {
     DynamicArray<uint32> drawnAt;     // ...and the samples a texel they draw at, so a method changed back compiles nothing
     DynamicArray<Shared<PipelineSlot>> pipelines;
     DynamicArray<Shared<PipelineSlot>> prepasses;   // ...and each one's depth-only twin, for the depth prepass
+    DynamicArray<isize> generalOf;    // ...and the entry of its material's general form, below
+    DynamicArray<string> generalSources;   // the general forms' pipelines, by the WGSL they run, mirrored meshes or not
+    DynamicArray<uint32> generalAt;        // ...and the samples a texel they draw at
+    DynamicArray<Shared<PipelineSlot>> generalShaded;
+    DynamicArray<Shared<PipelineSlot>> generalDepth;
     BindGroupLayout outputLayout;               // the output pass's one binding: the scene's 16-bit float texture
     PipelineLayout outputPipelineLayout;
     BindGroupLayout tableLayout;                // ...and with Blender's AgX table beside it
@@ -352,7 +389,7 @@ type resource Renderer {
     Optional<TextureView> agxTableView = Optional::None;   // Blender's AgX table, made the first time a camera uses it
     DynamicArray<ToneMapping> outputCurves;     // the output pass's pipelines, by the tone mapping they apply
     DynamicArray<Shared<PipelineSlot>> outputs;
-    RenderInfo last = RenderInfo.of(calls: 0, triangles: 0, objects: 0, matrices: 0, misses: 0, skipped: 0, waited: 0);
+    RenderInfo last = RenderInfo.of(calls: 0, triangles: 0, objects: 0, matrices: 0, misses: 0, skipped: 0, general: 0, waited: 0);
     BindGroupLayout resolveLayout;              // the tone-mapped resolve's one binding: the multisampled scene
     PipelineLayout resolvePipelineLayout;
     Shared<PipelineSlot> resolving;             // the tone-mapped resolve's pipeline, asked for the first time a render takes it
@@ -427,6 +464,11 @@ type resource Renderer {
         this.drawnAt = DynamicArray.empty();
         this.pipelines = DynamicArray.empty();
         this.prepasses = DynamicArray.empty();
+        this.generalOf = DynamicArray.empty();
+        this.generalSources = DynamicArray.empty();
+        this.generalAt = DynamicArray.empty();
+        this.generalShaded = DynamicArray.empty();
+        this.generalDepth = DynamicArray.empty();
         BindGroupLayoutDescriptor o = BindGroupLayoutDescriptor.make();
         o.entry(binding: 0, visibility: ShaderStage::Fragment, layout: BindingLayout::Texture(layout: TextureBindingLayout.make()));
         o.label(text: "the output pass's scene");
@@ -489,11 +531,13 @@ type resource Renderer {
 
     // Ask for every pipeline `scene` needs as `camera` sees it, off the frame (kyoten's rendering.md § Decided, GFX-1's
     // part 5, question 1), as three.js's `compileAsync` and Unreal's precaching: each mesh's two at the anti-aliasing
-    // method's samples a texel, the tone-mapped resolve's when the method takes it, and the output pass's for the camera's
+    // method's samples a texel, and, under `WhileCompiling::General`, its material's general form's two, so a variant new
+    // at run time draws by it; the tone-mapped resolve's when the method takes it, and the output pass's for the camera's
     // tone mapping when its target is 8-bit. The scene is placed as a render places it. Poll the request until it is
     // `Ready`: a render then draws everything with no miss, while nothing new joins the scene and the method and the
     // camera's tone mapping stay as they were. A loading screen polls it, and so does a test before it renders.
     public unsafe fn CompileRequest compile(Shared<Scene> scene, Shared<PerspectiveCamera> camera) {
+        this.settleAll();
         Walk walk = scene.walkAll();
         DynamicArray<string> found = walk.refusals();
         for (isize i = 0; i < found.length(); i = i + 1) { this.refuse(kind: GraphicsErrorKind::Light, message: copy found[i]); }
@@ -508,10 +552,17 @@ type resource Renderer {
             DynamicArray<string> refused = material.gpuMut().refused();
             if (refused.length() > 0) { continue; }
             string source = material.gpuMut().source();
-            isize e = this.pipelineFor(source: source, mirrored: scene.mirroredAt(slot: slot), count: perTexel);
+            string general = material.gpuMut().generalSource();
+            isize e = this.pipelineFor(source: source, general: general, mirrored: scene.mirroredAt(slot: slot), count: perTexel);
             int32 madeNone = this.provide(i: e, now: false);
             asked.add(item: copy this.pipelines[e]);
             asked.add(item: copy this.prepasses[e]);
+            if (this.way == WhileCompiling::General) {
+                isize g = this.generalOf[e];
+                this.provideGeneral(g: g);
+                asked.add(item: copy this.generalShaded[g]);
+                asked.add(item: copy this.generalDepth[g]);
+            }
         }
         if (this.method == Antialiasing::Msaa4ToneMapped) {
             int32 resolveMadeNone = this.provideResolve(now: false);
@@ -532,6 +583,29 @@ type resource Renderer {
         return CompileRequest.make(slots: give asked);
     }
 
+    // Every pipeline's request polled, once, at the start of a render (and of a compile and `takeErrors()`), before any
+    // draw asks for one, so a render never draws with a pipeline it asked for itself, even where natively @kama/gpu's
+    // own threads answer before a later draw sharing it. What a draw asks for is polled at the next render.
+    unsafe fn void settleAll() {
+        for (isize i = 0; i < this.pipelines.length(); i = i + 1) {
+            Shared<PipelineSlot> shaded = copy this.pipelines[i];
+            Shared<PipelineSlot> depth = copy this.prepasses[i];
+            bool shadedAnswered = shaded.settle();
+            bool depthAnswered = depth.settle();
+        }
+        for (isize i = 0; i < this.generalShaded.length(); i = i + 1) {
+            Shared<PipelineSlot> shaded = copy this.generalShaded[i];
+            Shared<PipelineSlot> depth = copy this.generalDepth[i];
+            bool shadedAnswered = shaded.settle();
+            bool depthAnswered = depth.settle();
+        }
+        for (isize i = 0; i < this.outputs.length(); i = i + 1) {
+            Shared<PipelineSlot> slot = copy this.outputs[i];
+            bool answered = slot.settle();
+        }
+        bool resolveAnswered = this.resolving.settle();
+    }
+
     // Each pipeline's refusal found since the last, reported once: a mesh's two as one, since both fail on its material.
     // A render reports what it found as it ends, and `takeErrors()` what a compile request found.
     unsafe fn void reportRefusals() {
@@ -542,6 +616,20 @@ type resource Renderer {
             string second = depth.untold();
             if (!first.isEmpty()) { this.refuse(kind: shaded.kind(), message: copy first); }
             else if (!second.isEmpty()) { this.refuse(kind: depth.kind(), message: copy second); }
+        }
+        // a general form's refusal, once its material's own pipelines are made, so a material the device refuses outright,
+        // its general form too, is reported once, as its own pipeline's refusal
+        for (isize i = 0; i < this.pipelines.length(); i = i + 1) {
+            Shared<PipelineSlot> shadedOwn = copy this.pipelines[i];
+            Shared<PipelineSlot> depthOwn = copy this.prepasses[i];
+            if (!shadedOwn.ready() || !depthOwn.ready()) { continue; }
+            isize g = this.generalOf[i];
+            Shared<PipelineSlot> shadedGeneral = copy this.generalShaded[g];
+            Shared<PipelineSlot> depthGeneral = copy this.generalDepth[g];
+            string shadedWords = shadedGeneral.untold();
+            string depthWords = depthGeneral.untold();
+            if (!shadedWords.isEmpty()) { this.refuse(kind: shadedGeneral.kind(), message: copy shadedWords); }
+            else if (!depthWords.isEmpty()) { this.refuse(kind: depthGeneral.kind(), message: copy depthWords); }
         }
         for (isize i = 0; i < this.outputs.length(); i = i + 1) {
             Shared<PipelineSlot> slot = copy this.outputs[i];
@@ -563,6 +651,7 @@ type resource Renderer {
 
     // The misuses refused since the last call, the oldest first, with how many past the 64 kept were counted.
     public unsafe fn RendererErrors takeErrors() {
+        this.settleAll();
         this.reportRefusals();
         DynamicArray<GraphicsErrorReport> fresh = DynamicArray.empty();
         DynamicArray<GraphicsErrorReport> taken = replace(place: this.errors, with: give fresh);
@@ -616,11 +705,11 @@ type resource Renderer {
         return pipeline;
     }
 
-    // Slot `o`'s output pass for `curve`, settled: asked for off the frame if it is still wanted, or, `now`, made during
-    // this render. How many pipelines it made now.
+    // Slot `o`'s output pass for `curve`: asked for off the frame if it is still wanted, or, `now`, made during this
+    // render. How many pipelines it made now.
     unsafe fn int32 provideOutput(isize o, ToneMapping curve, bool now) {
         Shared<PipelineSlot> slot = copy this.outputs[o];
-        if (slot.settle() && (slot.ready() || slot.refusedNow())) { return 0; }
+        if (slot.ready() || slot.refusedNow()) { return 0; }
         if (now) {
             RenderPipelineDescriptor d = this.outputDescriptor(curve: curve);
             slot.makeNow(device: ref this.device, descriptor: give d);
@@ -675,10 +764,10 @@ type resource Renderer {
         return pipeline;
     }
 
-    // ...settled: asked for off the frame if it is still wanted, or, `now`, made during this render. How many pipelines
-    // it made now.
+    // ...asked for off the frame if it is still wanted, or, `now`, made during this render. How many pipelines it made
+    // now.
     unsafe fn int32 provideResolve(bool now) {
-        if (this.resolving.settle() && (this.resolving.ready() || this.resolving.refusedNow())) { return 0; }
+        if (this.resolving.ready() || this.resolving.refusedNow()) { return 0; }
         if (now) {
             RenderPipelineDescriptor d = this.resolveDescriptor();
             this.resolving.makeNow(device: ref this.device, descriptor: give d);
@@ -712,11 +801,13 @@ type resource Renderer {
     }
 
     // The pipelines that run `source`, a material's WGSL, for a mirrored mesh or not, at `count` samples a texel: their
-    // entry, added the first time with a slot for the shaded one and one for its depth-only twin, none asked for yet.
-    unsafe fn isize pipelineFor(const ref string source, bool mirrored, uint32 count) {
+    // entry, added the first time with a slot for the shaded one and one for its depth-only twin, none asked for yet, and
+    // the entry of its general form, `general`.
+    unsafe fn isize pipelineFor(const ref string source, const ref string general, bool mirrored, uint32 count) {
         for (isize i = 0; i < this.sources.length(); i = i + 1) {
             if (this.sources[i] == source && this.flipped[i] == mirrored && this.drawnAt[i] == count) { return i; }
         }
+        this.generalOf.add(item: this.generalFor(source: general, count: count));
         Shared<PipelineSlot> shaded = new PipelineSlot.make(what: "a material's pipeline was refused by the device, so nothing draws with it: ",
                                                             kind: GraphicsErrorKind::Material);
         Shared<PipelineSlot> depth = new PipelineSlot.make(what: "a material's depth-only pipeline was refused by the device, so nothing draws with it: ",
@@ -729,13 +820,48 @@ type resource Renderer {
         return this.pipelines.length() - 1;
     }
 
-    // Entry `i`'s two pipelines settled: each asked for off the frame if it is still wanted, or, `now`, made during this
-    // render, one shader module serving both. Neither, once either is refused. How many pipelines it made now.
+    // The pipelines that run a material's general form, `source`, at `count` samples a texel, mirrored meshes or not:
+    // their entry, added the first time, none asked for yet.
+    unsafe fn isize generalFor(const ref string source, uint32 count) {
+        for (isize i = 0; i < this.generalSources.length(); i = i + 1) {
+            if (this.generalSources[i] == source && this.generalAt[i] == count) { return i; }
+        }
+        Shared<PipelineSlot> shaded = new PipelineSlot.make(what: "a material's general form was refused by the device, so its draws are skipped while its own pipelines compile: ",
+                                                            kind: GraphicsErrorKind::Material);
+        Shared<PipelineSlot> depth = new PipelineSlot.make(what: "a material's general form was refused by the device, so its draws are skipped while its own pipelines compile: ",
+                                                           kind: GraphicsErrorKind::Material);
+        this.generalSources.add(item: copy source);
+        this.generalAt.add(item: count);
+        this.generalShaded.add(item: give shaded);
+        this.generalDepth.add(item: give depth);
+        return this.generalSources.length() - 1;
+    }
+
+    // General entry `g`'s two pipelines, each asked for off the frame if it is still wanted, one shader module serving
+    // both; neither once either is refused. Never made during a render: under `Wait` a draw makes its own.
+    unsafe fn void provideGeneral(isize g) {
+        Shared<PipelineSlot> shaded = copy this.generalShaded[g];
+        Shared<PipelineSlot> depth = copy this.generalDepth[g];
+        if (shaded.refusedNow() || depth.refusedNow()) { return; }
+        if (!shaded.wanted() && !depth.wanted()) { return; }
+        ShaderModuleDescriptor described = ShaderModuleDescriptor.make(wgsl: copy this.generalSources[g]);
+        described.label(text: "a material's general form");
+        ShaderModule shader = this.device.createShaderModule(descriptor: give described);
+        if (shaded.wanted()) {
+            shaded.ask(device: ref this.device, descriptor: generalShadedDescriptor(layout: copy this.layout, shader: copy shader,
+                                                                                   count: this.generalAt[g]));
+        }
+        if (depth.wanted()) {
+            depth.ask(device: ref this.device, descriptor: generalDepthDescriptor(layout: copy this.layout, shader: copy shader,
+                                                                                 count: this.generalAt[g]));
+        }
+    }
+
+    // Entry `i`'s two pipelines: each asked for off the frame if it is still wanted, or, `now`, made during this render,
+    // one shader module serving both. Neither, once either is refused. How many pipelines it made now.
     unsafe fn int32 provide(isize i, bool now) {
         Shared<PipelineSlot> shaded = copy this.pipelines[i];
         Shared<PipelineSlot> depth = copy this.prepasses[i];
-        bool shadedAnswered = shaded.settle();
-        bool depthAnswered = depth.settle();
         if (shaded.refusedNow() || depth.refusedNow()) { return 0; }
         bool shadedNeeded = now ? !shaded.ready() : shaded.wanted();
         bool depthNeeded = now ? !depth.ready() : depth.wanted();
@@ -768,6 +894,7 @@ type resource Renderer {
         NodeBuilder builder = NodeBuilder.make(settings: give declared);
         material.shade(builder: ref builder);
         string wgsl = builder.wgsl();
+        string general = builder.generalWgsl();
         DynamicArray<string> problems = builder.problems();
         if (problems.length() > 0) {
             string words = "a material was refused, so nothing draws with it: ";
@@ -777,11 +904,12 @@ type resource Renderer {
             }
             this.refuse(kind: GraphicsErrorKind::Material, message: give words);
         }
-        material.gpuMut().store(wgsl: give wgsl, problems: give problems, graph: graph);
+        material.gpuMut().store(wgsl: give wgsl, general: give general, problems: give problems, graph: graph);
     }
 
     // Draw `scene` as `camera` sees it, into the target the camera names.
     public unsafe fn void render(Shared<Scene> scene, Shared<PerspectiveCamera> camera) {
+        this.settleAll();
         Walk walk = scene.walkAll();
         int32 made = walk.matrices();
         DynamicArray<string> found = walk.refusals();
@@ -791,7 +919,7 @@ type resource Renderer {
         Optional<Shared<RenderTarget>> named = camera.target();
         if (named.isNone()) {
             // no target, and no window to draw into until part 6 gives the renderer one
-            this.last = RenderInfo.of(calls: 0, triangles: 0, objects: objects, matrices: made, misses: 0, skipped: 0, waited: 0);
+            this.last = RenderInfo.of(calls: 0, triangles: 0, objects: objects, matrices: made, misses: 0, skipped: 0, general: 0, waited: 0);
             this.refuse(kind: GraphicsErrorKind::NoTarget,
                         message: "render drew nothing: the camera names no render target, and this renderer has no window to draw into (name a target with the camera's targetMut())");
             return;
@@ -807,6 +935,7 @@ type resource Renderer {
         int32 waited = 0;
         int32 misses = 0;
         int32 skipped = 0;
+        int32 byGeneral = 0;
         // the frame's own passes: while the tone-mapped resolve compiles the GPU resolves, the ladder's next rung, and
         // while the output pass compiles it is left out, the target left as it was. Neither is a miss once refused.
         if (toneMappedResolve) {
@@ -892,18 +1021,36 @@ type resource Renderer {
             DynamicArray<string> refused = material.gpuMut().refused();
             if (refused.length() > 0) { continue; }
             string source = material.gpuMut().source();
-            isize e = this.pipelineFor(source: source, mirrored: scene.mirroredAt(slot: slot), count: perTexel);
+            string general = material.gpuMut().generalSource();
+            isize e = this.pipelineFor(source: source, general: general, mirrored: scene.mirroredAt(slot: slot), count: perTexel);
             waited = waited + this.provide(i: e, now: now);
             Shared<PipelineSlot> shadedSlot = copy this.pipelines[e];
             Shared<PipelineSlot> depthSlot = copy this.prepasses[e];
-            if (!shadedSlot.ready() || !depthSlot.ready()) {
-                // compiling, so skipped: no general form yet (part 5, step 2); or refused, and never drawn
-                if (!shadedSlot.refusedNow() && !depthSlot.refusedNow()) { skipped = skipped + 1; }
-                continue;
+            if (shadedSlot.ready() && depthSlot.ready()) {
+                chosen.add(item: e);
+                shadedWith.add(item: shadedSlot.pipeline());
+                depthWith.add(item: depthSlot.pipeline());
+            } else {
+                // refused, and never drawn, so no miss
+                if (shadedSlot.refusedNow() || depthSlot.refusedNow()) { continue; }
+                // compiling: under `General`, drawn by its material's general form once that is ready, asked for now if
+                // it is not yet; else skipped
+                bool drawable = false;
+                if (this.way == WhileCompiling::General) {
+                    isize g = this.generalOf[e];
+                    this.provideGeneral(g: g);
+                    Shared<PipelineSlot> shadedGeneral = copy this.generalShaded[g];
+                    Shared<PipelineSlot> depthGeneral = copy this.generalDepth[g];
+                    if (shadedGeneral.ready() && depthGeneral.ready()) {
+                        drawable = true;
+                        chosen.add(item: -2 - g);
+                        shadedWith.add(item: shadedGeneral.pipeline());
+                        depthWith.add(item: depthGeneral.pipeline());
+                        byGeneral = byGeneral + 1;
+                    }
+                }
+                if (!drawable) { skipped = skipped + 1; continue; }
             }
-            chosen.add(item: e);
-            shadedWith.add(item: shadedSlot.pipeline());
-            depthWith.add(item: depthSlot.pipeline());
             DynamicArray<uint8> settings = DynamicArray.empty();
             if (material.gpuMut().staleOn(device: this.device, version: material.version())) {
                 MaterialSettings declared = MaterialSettings.make();
@@ -999,7 +1146,7 @@ type resource Renderer {
         // shadow pass's; the frame's own pass, the output, is not the scene's
         int32 calls = cast<int32>(chosen.length()) * 2;
         this.last = RenderInfo.of(calls: calls, triangles: triangles * 2, objects: objects, matrices: made,
-                                  misses: misses + skipped, skipped: skipped, waited: waited);
+                                  misses: misses + skipped + byGeneral, skipped: skipped, general: byGeneral, waited: waited);
         this.reportRefusals();
     }
 

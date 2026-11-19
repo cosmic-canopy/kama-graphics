@@ -10,7 +10,8 @@
 // lights changed around a box with nothing compiled (tests/src/lights.kama), r187's physical model held to its formulas
 // (tests/src/physical.kama), the lit goldens, one for each feature part 3 built (tests/src/lit.kama), and part 4's frame
 // (tests/src/frame.kama), tone mapping (tests/src/tonemap.kama) and anti-aliasing methods (tests/src/antialias.kama),
-// and part 5's pipelines compiled off the frame (tests/src/compiling.kama), each on its own handle to the one device.
+// and part 5's pipelines compiled off the frame (tests/src/compiling.kama) and a material's general form
+// (tests/src/general.kama), each on its own handle to the one device.
 // `MeshStandardMaterial`'s values and settings, the DFG table and the lights' defaults are checked with no GPU, beside
 // part 2's.
 //
@@ -34,7 +35,7 @@ import {
     std::collections::DynamicArray,
     Verdicts, harnessCases, colorCases, partCases, nodeCases, ShaderCase, GpuOpen, GoldenRun, RendererRun, BoxesRun,
     ShaderRun, NormalsRun, standardCases, StandardRun, dfgCases, DfgRun, lightCases, LightsRun, physicalCases, PhysicalRun,
-    LitRun, FrameRun, ToneMapRun, AntialiasRun, CompilingRun,
+    LitRun, FrameRun, ToneMapRun, AntialiasRun, CompilingRun, GeneralRun,
 };
 
 // The software GPUs a leg can name: WARP, natively on Windows and as Firefox's fallback adapter, and SwiftShader, as
@@ -59,7 +60,7 @@ unsafe fn string goldenArgument() {
 
 // The stage that finishes the run: the last GPU case's step moves to it, and so does a leg whose device never opened,
 // named once so that a stage added before it cannot leave either pointing at a step that needs the device.
-comptime int32 DONE = 15;
+comptime int32 DONE = 16;
 
 type resource Check implements App {
     int32 runs = 0;
@@ -70,7 +71,8 @@ type resource Check implements App {
     int32 stage = 0;     // 0 the device, 1 the scene, 2 the renderer, 3 the boxes, 4 the shaders, 5 the normals,
                          // 6 the standard material, 7 the DFG table, 8 the lights, 9 the physical model, 10 the lit,
                          // 11 the frame, 12 the tone mapping
-                         // goldens, 13 the anti-aliasing methods, 14 the pipelines compiled off the frame, DONE
+                         // goldens, 13 the anti-aliasing methods, 14 the pipelines compiled off the frame, 15 the
+                         // general form, DONE
     Optional<GpuOpen> opening = Optional::None;
     Optional<Device> device = Optional::None;
     Optional<Queue> queue = Optional::None;
@@ -89,6 +91,7 @@ type resource Check implements App {
     Optional<ToneMapRun> toneRun = Optional::None;
     Optional<AntialiasRun> antialiasRun = Optional::None;
     Optional<CompilingRun> compilingRun = Optional::None;
+    Optional<GeneralRun> generalRun = Optional::None;
 
     public unsafe ctor make() {
         Verdicts found = Verdicts.make();
@@ -152,6 +155,7 @@ type resource Check implements App {
         if (this.stage == 12) { this.toneStep(); }
         if (this.stage == 13) { this.antialiasStep(); }
         if (this.stage == 14) { this.compilingStep(); }
+        if (this.stage == 15) { this.generalStep(); }
         if (this.stage == DONE) { return this.finish(); }
         return 1;
     }
@@ -381,6 +385,20 @@ type resource Check implements App {
         this.report(found: pending.verdicts());
         pending.verdicts().clear();
         if (!done) { this.compilingRun = Optional::Some(value: give pending); return; }
+        this.stage = 15;
+    }
+
+    // A material's general form, drawn while its own pipelines compile (tests/src/general.kama).
+    unsafe fn void generalStep() {
+        Optional<GeneralRun> taken = replace(place: this.generalRun, with: Optional::None);
+        GeneralRun pending = match (give taken) {
+            case Some(value: r): give r;
+            case None: GeneralRun.make(device: this.deviceCopy(), queue: this.queueCopy());
+        };
+        bool done = pending.step();
+        this.report(found: pending.verdicts());
+        pending.verdicts().clear();
+        if (!done) { this.generalRun = Optional::Some(value: give pending); return; }
         this.queue = Optional::None;
         this.device = Optional::None;
         println(s: "gpu cases: all run");

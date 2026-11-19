@@ -155,7 +155,9 @@ tone-mapped resolve the default.
 **Part 5 is under way** (2026-11-18): its three questions were decided as revised (ROADMAP_DETAIL § GFX-1): every way a
 draw takes while its pipeline compiles, the program's choice, the material's general form by default; presets the game
 owns; shaders built ahead left to kyoten's question 11. Step 1 is built (SPEC § The renderer): pipelines compiled off
-the frame, `General`, `Skip` and `Wait`, and `compile(scene:, camera:)`. Next, step 2: the general form.
+the frame, `General`, `Skip` and `Wait`, and `compile(scene:, camera:)`. Step 2 is built (SPEC § The renderer and § The
+compiler): a material's general form, culling in the shader, which `General` draws while a mesh's own pipelines
+compile. Next, step 3: `StandIn` and the per-material override.
 GFX-1 is built depth-first, and every example is a test: a headless readback and a golden image, on web and native. A
 feature a program does not use drops out at link time. [SPEC.md](SPEC.md) is what is built so far, and grows with each
 part.

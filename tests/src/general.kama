@@ -1,0 +1,541 @@
+// GFX-1's part 5, step 2: a material's general form (kyoten's rendering.md § Decided, GFX-1's part 5, question 1, the
+// owner's (A) of 2026-11-18): the same module with every option a pipeline would compile in read by the shader instead,
+// so a draw whose own pipelines are still compiling draws the same pixels by it. Today's one option is the cull flip of a
+// mirrored mesh. A step a tick on the device the check opened, each case on a renderer of its own. Every scene is lit
+// MeshStandardMaterial boxes 3 metres ahead of a camera at the origin, a sun and a dim ambient light, drawn into a
+// 32 x 24 8-bit target with no tone mapping, on a backdrop of #336699:
+// - **a mirrored copy added after `compile(scene:, camera:)`:** the scene's box compiled, then a copy mirrored on x
+//   added beside it. The first render draws the copy by its material's general form, one miss; drawn again each tick
+//   until its own pipelines answer, the image is the general form's byte for byte;
+// - **the reverse:** a mirrored box compiled, then a copy not mirrored added: the same;
+// - **a camera inside a mirrored room, a box beyond it:** the room added after the box was compiled, so it is drawn by
+//   the general form: its walls, seen from behind, are discarded in the depth prepass too (`fsCull`), so the box beyond
+//   shows, as it does once the room's own pipelines answer;
+// - **a flat box (depth 0), facing the camera:** its two faces lie on one another, wound opposite ways, so the shaded
+//   pass's Equal test passes for both; the general form's fragment stage discards the back one, drawn after it, and the
+//   image is again its own pipeline's;
+// - **a material passing 16 values to its fragment stage**, as many as a device takes: its own pipeline is made and its
+//   general form, passing one more, is refused, reported once as `Material`, so a mirrored copy is skipped;
+// - **a render's miss asks for the general form:** that material drawn each tick with no compile, the general form's
+//   refusal is reported;
+// - **`Skip` never draws by the general form,** though it is ready, and **`compile` under `Skip` asks for none**;
+// - **`Wait` compiles the copy's own pipelines during the render,** and draws nothing by the general form;
+// - **a general form is drawn only at the samples a texel it was compiled at:** the method set to None after the first
+//   trial, both meshes are skipped.
+
+import {
+    std::collections::DynamicArray, std::memory::replace,
+    std::math::Vec3, std::math::radians,
+    std::time::Instant, std::time::monotonicNow,
+    image::Image,
+    gpu::Device, gpu::Queue, gpu::GpuError,
+    graphics::Color, graphics::Renderer, graphics::RenderInfo, graphics::RenderTarget, graphics::Scene, graphics::Mesh,
+    graphics::PerspectiveCamera, graphics::BoxGeometry, graphics::Material, graphics::MaterialGpu, graphics::MaterialSettings,
+    graphics::NodeBuilder, graphics::MeshStandardMaterial, graphics::DirectionalLight, graphics::AmbientLight,
+    graphics::PixelRead, graphics::PixelStatus, graphics::ToneMapping, graphics::WhileCompiling, graphics::CompileRequest,
+    graphics::Antialiasing,
+    graphics::CompileStatus, graphics::GraphicsErrorKind, graphics::RendererErrors, graphics::FloatNode, graphics::vec3,
+    graphics::vec4, graphics::constant, graphics::varying,
+    Verdicts,
+};
+export { GeneralRun };
+
+comptime uint32 WIDE = 32;
+comptime uint32 HIGH = 24;
+comptime int64 PATIENCE_MS = 10000;   // how long a case waits for pipelines, or a read, before it fails
+comptime uint32 BACKDROP = 0x336699;
+
+// A program's own material passing 16 values from its vertex stage to its fragment stage, each a varying of its own, as
+// many as a device takes (WebGPU's `maxInterStageShaderVariables`): its own pipeline is made, and its general form,
+// which takes two more, whether the object is mirrored and the fragment stage's `front_facing`, is refused. 15 values
+// have none either, and 14 have one (measured on every leg).
+type resource Sixteen implements Material {
+    MaterialGpu cache;
+    public ctor make() { this.cache = MaterialGpu.make(); }
+    public fn ref MaterialGpu gpuMut() { return this.cache; }
+    public const fn uint32 version() { return 0; }
+    public const fn uint32 graphVersion() { return 0; }
+    public const fn void settings(ref MaterialSettings into) { into.addFloat(name: "k", value: 0.01); }
+    public fn void shade(ref NodeBuilder builder) {
+        FloatNode sum = builder.uniformFloat(name: "k");
+        for (int32 i = 1; i <= 16; i = i + 1) { sum = sum + varying(value: constant(value: cast<float32>(i) * 0.01)); }
+        builder.fragmentColor(node: vec4(xyz: vec3(x: sum, y: constant(value: 0.2), z: constant(value: 0.1)), w: constant(value: 1.0)));
+    }
+}
+
+// What `info()` said, held to the counts a case wants: "" when it says them.
+fn string infoIs(RenderInfo got, int32 calls, int32 misses, int32 skipped, int32 general, int32 waited) {
+    if (got.calls == calls && got.misses == misses && got.skipped == skipped && got.general == general && got.waited == waited) {
+        return "";
+    }
+    int32 c = got.calls;
+    int32 m = got.misses;
+    int32 s = got.skipped;
+    int32 g = got.general;
+    int32 w = got.waited;
+    return "it says ${c} calls, ${m} misses, ${s} skipped, ${g} by a general form and ${w} waited";
+}
+
+// "" when `a` and `b` are the same image, byte for byte; else how many bytes differ, and the first texel that does.
+fn string sameImage(const ref Image a, const ref Image b) {
+    if (a.width() != b.width() || a.height() != b.height()) { return "the images' sizes differ"; }
+    isize n = a.samples8().length();
+    isize differ = 0;
+    isize first = -1;
+    for (isize i = 0; i < n; i = i + 1) {
+        if (a.samples8()[i] != b.samples8()[i]) {
+            differ = differ + 1;
+            if (first < 0) { first = i; }
+        }
+    }
+    if (differ == 0) { return ""; }
+    isize texel = first / 4;
+    isize x = texel % a.width();
+    isize y = texel / a.width();
+    int32 was = cast<int32>(a.samples8()[first]);
+    int32 now = cast<int32>(b.samples8()[first]);
+    return "${differ} bytes differ, the first at texel (${x}, ${y}): ${was}, then ${now}";
+}
+
+// The cases that hold a general form's image to its own pipelines', each a scene compiled and then a mesh added.
+type enum Trial { MirroredCopy, Reverse, Room, Flat }
+
+type resource GeneralRun {
+    int32 stage = 0;
+    Instant began = monotonicNow();
+    Verdicts found;
+    Device device;
+    Queue queue;
+    Optional<Renderer> renderer = Optional::None;
+    Optional<Shared<Scene>> scene = Optional::None;
+    Optional<Shared<PerspectiveCamera>> camera = Optional::None;
+    Optional<Shared<RenderTarget>> target = Optional::None;
+    Optional<CompileRequest> compiling = Optional::None;
+    Optional<PixelRead> reading = Optional::None;
+    Optional<Image> got = Optional::None;
+    Optional<Image> byGeneral = Optional::None;   // the image the general form drew, held to the one drawn after
+    bool failed = false;
+    Trial trial = Trial::MirroredCopy;
+    Optional<Shared<MeshStandardMaterial>> material = Optional::None;   // the one material a trial's meshes share
+
+    public ctor make(Device device, Queue queue) {
+        this.found = Verdicts.make();
+        this.device = give device;
+        this.queue = give queue;
+    }
+
+    public fn ref Verdicts verdicts() { return this.found; }
+
+    // A renderer of its own, drawing `way`, its errors read here rather than printed.
+    unsafe fn void fresh(WhileCompiling way) {
+        Renderer r = Renderer.withDevice(device: copy this.device, queue: copy this.queue);
+        r.whileCompilingMut() = way;
+        r.printErrorsMut() = false;
+        r.clearColorMut() = Color.fromHex(hex: BACKDROP);
+        this.renderer = Optional::Some(value: give r);
+    }
+
+    unsafe fn void way(WhileCompiling now) {
+        match (this.renderer) { case Some(value: r): { r.whileCompilingMut() = now; } case None: { } };
+    }
+
+    // A new 32 x 24 8-bit target and a camera at the origin looking down -z into it, with no tone mapping, and a scene
+    // with a sun and a dim ambient light and nothing else.
+    unsafe fn void stageScene() {
+        Shared<RenderTarget> t = new RenderTarget.make(width: WIDE, height: HIGH);
+        Shared<PerspectiveCamera> cam = new PerspectiveCamera.make(fovRad: radians(deg: 50.0), aspect: 32.0 / 24.0, near: 0.1, far: 100.0);
+        cam.targetMut() = Optional::Some(value: copy t);
+        cam.toneMappingMut() = ToneMapping::None;
+        Shared<Scene> s = new Scene.make();
+        Shared<DirectionalLight> sun = new DirectionalLight.make();
+        sun.positionMut() = Vec3.of(x: 1.0, y: 2.0, z: 3.0);
+        sun.intensityMut() = 2.0;
+        s.add(object: sun);
+        Shared<AmbientLight> sky = new AmbientLight.make();
+        sky.colorMut() = Color.fromHex(hex: 0x8090a0);
+        sky.intensityMut() = 0.4;
+        s.add(object: sky);
+        this.target = Optional::Some(value: give t);
+        this.camera = Optional::Some(value: give cam);
+        this.scene = Optional::Some(value: give s);
+    }
+
+    // A box of `look`, `size` across and `deep` deep, at `at`, scaled by `scale` (a negative x mirrors it), turned so
+    // three of its faces show when `turned`; added to the scene.
+    unsafe fn void addBox(Shared<Material> look, float32 size, float32 deep, Vec3 at, Vec3 scale, bool turned) {
+        Shared<BoxGeometry> shape = new BoxGeometry.make(width: size, height: size, depth: deep);
+        Shared<Mesh> m = new Mesh.make(geometry: shape, material: look);
+        m.positionMut() = at;
+        m.scaleMut() = scale;
+        if (turned) { m.rotateY(rad: 0.6); m.rotateX(rad: 0.4); }
+        Shared<Scene> s = this.theScene();
+        s.add(object: m);
+    }
+
+    unsafe fn Shared<Scene> theScene() { return match (this.scene) { case Some(value: s): copy s; case None: { panic(msg: "staged first"); } }; }
+    unsafe fn Shared<PerspectiveCamera> theCamera() { return match (this.camera) { case Some(value: c): copy c; case None: { panic(msg: "staged first"); } }; }
+    unsafe fn Shared<RenderTarget> theTarget() { return match (this.target) { case Some(value: t): copy t; case None: { panic(msg: "staged first"); } }; }
+
+    // The scene drawn once by the run's renderer; what `info()` then says.
+    unsafe fn RenderInfo renderNow() {
+        Shared<Scene> s = this.theScene();
+        Shared<PerspectiveCamera> c = this.theCamera();
+        RenderInfo said = RenderInfo.of(calls: -1, triangles: -1, objects: -1, matrices: -1, misses: -1, skipped: -1, general: -1, waited: -1);
+        match (this.renderer) {
+            case Some(value: r): { r.render(scene: s, camera: c); said = r.info(); }
+            case None: { }
+        };
+        return said;
+    }
+
+    // The target read back, its read started now.
+    unsafe fn void startRead() {
+        Shared<RenderTarget> t = this.theTarget();
+        match (this.renderer) {
+            case Some(value: r): { this.reading = Optional::Some(value: r.readRenderTargetPixels(target: t)); }
+            case None: { }
+        };
+        this.began = monotonicNow();
+    }
+
+    // Whether the read has answered: its image kept in `got`, or `failed` set. False while it is pending.
+    unsafe fn bool answered() {
+        PixelStatus s = match (this.reading) {
+            case Some(value: r): r.poll();
+            case None: PixelStatus::Failed(error: GpuError::Taken);
+        };
+        bool pending = match (s) { case Pending: true; case _: false; };
+        if (pending && this.began.elapsed().asMillis() < PATIENCE_MS) { return false; }
+        this.reading = Optional::None;
+        this.failed = true;
+        this.got = Optional::None;
+        match (give s) {
+            case Ready(image: img): { this.failed = false; this.got = Optional::Some(value: give img); }
+            case _: { }
+        };
+        return true;
+    }
+
+    // "" when texel (x, y) of the read is not the backdrop, so something was drawn there; or, `backdrop`, when it is.
+    fn string drawnAt(isize x, isize y, bool backdrop) {
+        if (this.failed) { return "the read failed"; }
+        isize at = (y * cast<isize>(WIDE) + x) * 4;
+        string said = "no image";
+        match (this.got) {
+            case Some(value: img): {
+                int32 gr = cast<int32>(img.samples8()[at]);
+                int32 gg = cast<int32>(img.samples8()[at + 1]);
+                int32 gb = cast<int32>(img.samples8()[at + 2]);
+                bool isBackdrop = gr == 0x33 && gg == 0x66 && gb == 0x99;
+                said = isBackdrop == backdrop ? "" : "texel (${x}, ${y}) shows ${gr} ${gg} ${gb}";
+            }
+            case None: { }
+        };
+        return said;
+    }
+
+    // The read kept as the general form's image.
+    fn void keepGeneral() {
+        Optional<Image> taken = replace(place: this.got, with: Optional::None);
+        this.byGeneral = give taken;
+    }
+
+    // "" when the read is the general form's image, byte for byte.
+    fn string asGeneral() {
+        if (this.failed) { return "the read failed"; }
+        string said = "no image";
+        match (this.got) {
+            case Some(value: now): {
+                match (this.byGeneral) {
+                    case Some(value: before): { said = sameImage(a: before, b: now); }
+                    case None: { said = "the general form's read failed"; }
+                };
+            }
+            case None: { }
+        };
+        return said;
+    }
+
+    // The compile request polled: 1 when it is ready, 0 while it is pending, -1 when it is still pending past patience.
+    unsafe fn int32 compiled() {
+        CompileStatus s = match (this.compiling) { case Some(value: q): q.poll(); case None: CompileStatus::Ready; };
+        bool ready = match (s) { case Ready: true; case Pending: false; };
+        if (ready) { return 1; }
+        return this.began.elapsed().asMillis() < PATIENCE_MS ? 0 : -1;
+    }
+
+    // The scene's pipelines asked for by the run's renderer, the request kept to poll.
+    unsafe fn void startCompile() {
+        Shared<Scene> s = this.theScene();
+        Shared<PerspectiveCamera> c = this.theCamera();
+        match (this.renderer) {
+            case Some(value: r): { this.compiling = Optional::Some(value: r.compile(scene: s, camera: c)); }
+            case None: { }
+        };
+        this.began = monotonicNow();
+    }
+
+    // The renderer's errors drained: "" when they are none, or, `general`, one `Material` report saying the material's
+    // general form was refused, in the device's words. Each leg says it its own way (tests/src/compiling.kama).
+    unsafe fn string errorsAre(bool general) {
+        RendererErrors e = match (this.renderer) { case Some(value: r): r.takeErrors(); case None: { panic(msg: "made first"); } };
+        isize n = e.reports().length();
+        if (!general) { return n == 0 && e.dropped() == 0 ? "" : "it reports ${n}"; }
+        if (n != 1) { return "it reports ${n}"; }
+        bool isMaterial = match (e.reports()[0].kind()) { case Material: true; case _: false; };
+        string words = e.reports()[0].message();
+        if (!isMaterial) { return "it is not Material: " + words; }
+        return words.startsWith(prefix: "a material's general form was refused by the device, so its draws are skipped while its own pipelines compile: ")
+            ? "" : "its words are: " + words;
+    }
+
+    // How many reports the renderer's errors hold now, drained; the first one's words kept for a case to read.
+    unsafe fn isize reportsNow(ref string first) {
+        RendererErrors e = match (this.renderer) { case Some(value: r): r.takeErrors(); case None: { panic(msg: "made first"); } };
+        isize n = e.reports().length();
+        if (n > 0) { first = e.reports()[0].message(); }
+        return n;
+    }
+
+    // A trial's scene, compiled: a lit box of the one material, or what the trial adds to.
+    unsafe fn Shared<MeshStandardMaterial> look() {
+        Shared<MeshStandardMaterial> m = new MeshStandardMaterial.make();
+        m.colorMut() = Color.fromHex(hex: 0xc04030);
+        m.roughnessMut() = 0.5;
+        return m;
+    }
+
+    // The trial's first scene, then its compile asked for.
+    unsafe fn void beginTrial(Trial which, Shared<MeshStandardMaterial> look) {
+        this.trial = which;
+        this.fresh(way: WhileCompiling::General);
+        this.stageScene();
+        Vec3 one = Vec3.of(x: 1.0, y: 1.0, z: 1.0);
+        Vec3 mirrored = Vec3.of(x: -1.0, y: 1.0, z: 1.0);
+        match (which) {
+            case MirroredCopy: { this.addBox(look: look, size: 1.0, deep: 1.0, at: Vec3.of(x: -0.9, y: 0.0, z: -3.0), scale: one, turned: true); }
+            case Reverse: { this.addBox(look: look, size: 1.0, deep: 1.0, at: Vec3.of(x: 0.9, y: 0.0, z: -3.0), scale: mirrored, turned: true); }
+            case Room: { this.addBox(look: look, size: 1.0, deep: 1.0, at: Vec3.of(x: 0.0, y: 0.0, z: -6.0), scale: one, turned: true); }
+            case Flat: { this.addBox(look: look, size: 1.0, deep: 1.0, at: Vec3.of(x: 0.9, y: 0.0, z: -3.0), scale: mirrored, turned: true); }
+        };
+        this.startCompile();
+    }
+
+    // ...and the mesh it adds once the compile is ready, which its material's general form draws.
+    unsafe fn void addTrialMesh(Shared<MeshStandardMaterial> look) {
+        Vec3 one = Vec3.of(x: 1.0, y: 1.0, z: 1.0);
+        match (this.trial) {
+            case MirroredCopy: { this.addBox(look: look, size: 1.0, deep: 1.0, at: Vec3.of(x: 0.9, y: 0.0, z: -3.0), scale: Vec3.of(x: -1.0, y: 1.0, z: 1.0), turned: true); }
+            case Reverse: { this.addBox(look: look, size: 1.0, deep: 1.0, at: Vec3.of(x: -0.9, y: 0.0, z: -3.0), scale: one, turned: true); }
+            case Room: { this.addBox(look: look, size: 1.0, deep: 1.0, at: Vec3.zero(), scale: Vec3.of(x: -4.0, y: 4.0, z: 4.0), turned: false); }
+            case Flat: { this.addBox(look: look, size: 1.0, deep: 0.0, at: Vec3.of(x: -0.6, y: 0.0, z: -2.0), scale: one, turned: false); }
+        };
+    }
+
+    fn string trialName() {
+        return match (this.trial) {
+            case MirroredCopy: "a mirrored copy added after compile";
+            case Reverse: "a copy not mirrored added after a mirrored box was compiled";
+            case Room: "a camera inside a mirrored room added after a box beyond it was compiled";
+            case Flat: "a flat box, its two faces on one another, added after a mirrored box was compiled";
+        };
+    }
+
+    // Where the added mesh shows, and whether the case also holds a texel to the backdrop: (x, y, then a backdrop texel's
+    // x, y, or -1).
+    fn isize addedX() {
+        return match (this.trial) { case MirroredCopy: 23; case Reverse: 8; case Room: 16; case Flat: 10; };
+    }
+
+    // A trial's stages, from `opening`: its compile polled, the mesh added and drawn by the general form, read, drawn each
+    // tick until no miss, read again and held to the first. Whether the trial is done.
+    unsafe fn bool trialStep(int32 opening) {
+        string name = this.trialName();
+        if (this.stage == opening) {
+            int32 c = this.compiled();
+            if (c == 0) { return false; }
+            Shared<MeshStandardMaterial> m = this.lookOfScene();
+            this.addTrialMesh(look: m);
+            RenderInfo first = this.renderNow();
+            this.found.add(name: "the general form, " + name + ": the compile is Ready, and the first render draws the new mesh by its material's general form, one miss",
+                           why: (c == 1 ? "" : "the compile never answered; ") + infoIs(got: first, calls: 4, misses: 1, skipped: 0, general: 1, waited: 0));
+            this.startRead();
+            this.stage = opening + 1;
+            return false;
+        }
+        if (this.stage == opening + 1) {
+            if (!this.answered()) { return false; }
+            isize x = this.addedX();
+            this.found.add(name: "the general form, " + name + ": the general form draws the new mesh",
+                           why: this.drawnAt(x: x, y: 12, backdrop: false));
+            bool room = match (this.trial) { case Room: true; case _: false; };
+            if (room) {
+                this.found.add(name: "the general form, " + name + ": the room's walls, seen from behind, are not drawn, so the corner shows the backdrop",
+                               why: this.drawnAt(x: 0, y: 0, backdrop: true));
+            }
+            this.keepGeneral();
+            this.began = monotonicNow();
+            this.stage = opening + 2;
+            return false;
+        }
+        if (this.stage == opening + 2) {
+            RenderInfo again = this.renderNow();
+            if (again.misses != 0 && this.began.elapsed().asMillis() < PATIENCE_MS) { return false; }
+            this.found.add(name: "the general form, " + name + ": drawn again each tick, a render with no miss comes, by the mesh's own pipelines",
+                           why: infoIs(got: again, calls: 4, misses: 0, skipped: 0, general: 0, waited: 0));
+            this.startRead();
+            this.stage = opening + 3;
+            return false;
+        }
+        if (this.stage == opening + 3) {
+            if (!this.answered()) { return false; }
+            this.found.add(name: "the general form, " + name + ": its own pipelines draw the general form's image, byte for byte",
+                           why: this.asGeneral());
+            return true;
+        }
+        return false;
+    }
+
+    // The one material every mesh of a trial's scene is drawn with, kept while the trial runs.
+    unsafe fn Shared<MeshStandardMaterial> lookOfScene() {
+        return match (this.material) { case Some(value: m): copy m; case None: { panic(msg: "begun first"); } };
+    }
+    unsafe fn void begin(Trial which) {
+        Shared<MeshStandardMaterial> m = this.look();
+        this.material = Optional::Some(value: copy m);
+        this.beginTrial(which: which, look: m);
+    }
+
+    public unsafe fn bool step() {
+        if (this.stage == 0) {
+            this.begin(which: Trial::MirroredCopy);
+            this.stage = 1;
+            return false;
+        }
+        if (this.stage >= 1 && this.stage <= 4) {
+            if (!this.trialStep(opening: 1)) { return false; }
+            // a method changed: the general form, compiled at 4 samples a texel, is not drawn at 1
+            match (this.renderer) { case Some(value: r): { r.antialiasingMut() = Antialiasing::None; } case None: { } };
+            RenderInfo single = this.renderNow();
+            this.found.add(name: "the general form: compiled at 4 samples a texel, it is not drawn at 1, so the method set to None skips both meshes while their pipelines compile",
+                           why: infoIs(got: single, calls: 0, misses: 2, skipped: 2, general: 0, waited: 0));
+            this.begin(which: Trial::Reverse);
+            this.stage = 11;
+            return false;
+        }
+        if (this.stage >= 11 && this.stage <= 14) {
+            if (!this.trialStep(opening: 11)) { return false; }
+            this.begin(which: Trial::Room);
+            this.stage = 21;
+            return false;
+        }
+        if (this.stage >= 21 && this.stage <= 24) {
+            if (!this.trialStep(opening: 21)) { return false; }
+            this.begin(which: Trial::Flat);
+            this.stage = 31;
+            return false;
+        }
+        if (this.stage >= 31 && this.stage <= 34) {
+            if (!this.trialStep(opening: 31)) { return false; }
+            // a material passing 16 values: its own pipeline made, its general form refused
+            this.fresh(way: WhileCompiling::General);
+            this.stageScene();
+            Shared<Sixteen> passing = new Sixteen.make();
+            this.addBox(look: passing, size: 1.0, deep: 1.0, at: Vec3.of(x: -0.9, y: 0.0, z: -3.0),
+                        scale: Vec3.of(x: 1.0, y: 1.0, z: 1.0), turned: true);
+            this.startCompile();
+            this.stage = 41;
+            return false;
+        }
+        if (this.stage == 41) {
+            int32 c = this.compiled();
+            if (c == 0) { return false; }
+            this.found.add(name: "the general form, 16 values passed: the compile comes to Ready, the general form's refusal an answer",
+                           why: c == 1 ? "" : "it is still pending");
+            this.found.add(name: "the general form, 16 values passed: takeErrors() reports the general form refused once its own pipeline is made, as Material, in the device's words",
+                           why: this.errorsAre(general: true));
+            RenderInfo own = this.renderNow();
+            this.found.add(name: "the general form, 16 values passed: the material draws by its own pipelines, with no miss",
+                           why: infoIs(got: own, calls: 2, misses: 0, skipped: 0, general: 0, waited: 0));
+            Shared<Sixteen> another = new Sixteen.make();
+            this.addBox(look: another, size: 1.0, deep: 1.0, at: Vec3.of(x: 0.9, y: 0.0, z: -3.0),
+                        scale: Vec3.of(x: -1.0, y: 1.0, z: 1.0), turned: true);
+            RenderInfo copied = this.renderNow();
+            this.found.add(name: "the general form, 16 values passed: a mirrored copy of another such material, with no general form, is skipped",
+                           why: infoIs(got: copied, calls: 2, misses: 1, skipped: 1, general: 0, waited: 0));
+            this.found.add(name: "the general form, 16 values passed: its refusal is reported once, not again",
+                           why: this.errorsAre(general: false));
+            // a render's miss asks for the general form: the material drawn each tick with no compile
+            this.fresh(way: WhileCompiling::General);
+            this.stageScene();
+            Shared<Sixteen> alone = new Sixteen.make();
+            this.addBox(look: alone, size: 1.0, deep: 1.0, at: Vec3.of(x: 0.0, y: 0.0, z: -3.0),
+                        scale: Vec3.of(x: 1.0, y: 1.0, z: 1.0), turned: true);
+            this.began = monotonicNow();
+            this.stage = 42;
+            return false;
+        }
+        if (this.stage == 42) {
+            RenderInfo drawn = this.renderNow();
+            string words = "";
+            isize n = this.reportsNow(first: ref words);
+            if (n == 0 && this.began.elapsed().asMillis() < PATIENCE_MS) { return false; }
+            bool general = words.startsWith(prefix: "a material's general form was refused by the device");
+            this.found.add(name: "the general form: a render's miss asks for the general form too, so drawn each tick with no compile, the 16-value material's general form is reported refused",
+                           why: n == 1 && general ? "" : "it reports ${n}: " + words);
+            // Skip never draws by the general form, though it is ready
+            Shared<MeshStandardMaterial> m = this.look();
+            this.material = Optional::Some(value: copy m);
+            this.fresh(way: WhileCompiling::General);
+            this.stageScene();
+            this.addBox(look: m, size: 1.0, deep: 1.0, at: Vec3.of(x: -0.9, y: 0.0, z: -3.0), scale: Vec3.of(x: 1.0, y: 1.0, z: 1.0), turned: true);
+            this.startCompile();
+            this.stage = 43;
+            return false;
+        }
+        if (this.stage == 43) {
+            int32 c = this.compiled();
+            if (c == 0) { return false; }
+            this.way(now: WhileCompiling::Skip);
+            Shared<MeshStandardMaterial> m = this.lookOfScene();
+            this.addBox(look: m, size: 1.0, deep: 1.0, at: Vec3.of(x: 0.9, y: 0.0, z: -3.0), scale: Vec3.of(x: -1.0, y: 1.0, z: 1.0), turned: true);
+            RenderInfo skipping = this.renderNow();
+            this.found.add(name: "the general form, Skip: a mirrored copy is skipped though its material's general form is ready",
+                           why: (c == 1 ? "" : "the compile never answered; ") + infoIs(got: skipping, calls: 2, misses: 1, skipped: 1, general: 0, waited: 0));
+            // compile under Skip asks for no general form: set to General after it, a mirrored copy is skipped
+            Shared<MeshStandardMaterial> other = this.look();
+            this.material = Optional::Some(value: copy other);
+            this.fresh(way: WhileCompiling::Skip);
+            this.stageScene();
+            this.addBox(look: other, size: 1.0, deep: 1.0, at: Vec3.of(x: -0.9, y: 0.0, z: -3.0), scale: Vec3.of(x: 1.0, y: 1.0, z: 1.0), turned: true);
+            this.startCompile();
+            this.stage = 44;
+            return false;
+        }
+        if (this.stage == 44) {
+            int32 c = this.compiled();
+            if (c == 0) { return false; }
+            this.way(now: WhileCompiling::General);
+            Shared<MeshStandardMaterial> m = this.lookOfScene();
+            this.addBox(look: m, size: 1.0, deep: 1.0, at: Vec3.of(x: 0.9, y: 0.0, z: -3.0), scale: Vec3.of(x: -1.0, y: 1.0, z: 1.0), turned: true);
+            RenderInfo after = this.renderNow();
+            this.found.add(name: "the general form: compile under Skip asks for no general form, so set to General after it, a mirrored copy is skipped",
+                           why: (c == 1 ? "" : "the compile never answered; ") + infoIs(got: after, calls: 2, misses: 1, skipped: 1, general: 0, waited: 0));
+            // Wait: the copy's own pipelines compiled during the render, nothing by the general form
+            this.fresh(way: WhileCompiling::Wait);
+            this.stageScene();
+            Shared<MeshStandardMaterial> w = this.look();
+            this.addBox(look: copy w, size: 1.0, deep: 1.0, at: Vec3.of(x: -0.9, y: 0.0, z: -3.0), scale: Vec3.of(x: 1.0, y: 1.0, z: 1.0), turned: true);
+            RenderInfo waited = this.renderNow();
+            this.addBox(look: w, size: 1.0, deep: 1.0, at: Vec3.of(x: 0.9, y: 0.0, z: -3.0), scale: Vec3.of(x: -1.0, y: 1.0, z: 1.0), turned: true);
+            RenderInfo copied = this.renderNow();
+            this.found.add(name: "the general form, Wait: a mirrored copy's own two pipelines are compiled during the render, and nothing is drawn by the general form",
+                           why: infoIs(got: waited, calls: 2, misses: 0, skipped: 0, general: 0, waited: 4)
+                               + infoIs(got: copied, calls: 4, misses: 0, skipped: 0, general: 0, waited: 2));
+            this.renderer = Optional::None;
+            this.material = Optional::None;
+            this.stage = 45;
+        }
+        return true;
+    }
+}

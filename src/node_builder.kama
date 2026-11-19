@@ -1,7 +1,9 @@
 // The material compiler: a material's typed nodes in, its WGSL out (kyoten's rendering.md § Decided, GFX-1's part 3).
 // It writes what the renderer gives every material (group 0: the frame and the object records), the material's settings
 // as one uniform block (group 1), each typed function a stage reaches once, its callees first, a `let` for a node a
-// function or a stage uses more than once, the varyings, and the two entry points, `vs` and `fs`.
+// function or a stage uses more than once, the varyings, and the two entry points, `vs` and `fs`. Beside it, in the same
+// pass, the material's general form (`generalWgsl()`): the same module culling in the shader, so one pipeline draws a
+// mirrored object and others while their own pipelines compile (kyoten's rendering.md § Decided, GFX-1's part 5).
 //
 // A stage that reads the scene's lights (a lighting model, through `lit`) is written with one loop over the scene's
 // directional lights (kyoten's rendering.md § Decided, GFX-1's part 3, the owner's (A) of 2026-11-16): first a `let` for
@@ -169,7 +171,7 @@ fn bool compilerName(const ref string name) {
     return name == "vs" || name == "fs" || name == "v" || name == "object" || name == "position" || name == "frame"
         || name == "objects" || name == "material" || name == "Frame" || name == "Material" || name == "Varyings"
         || name == "normal" || name == "Object" || name == "dfgTable" || name == "dfgTable_sampler"
-        || name == "DirectionalLight" || name == "directionalLights" || name == "shaded";
+        || name == "DirectionalLight" || name == "directionalLights" || name == "shaded" || name == "facing" || name == "fsCull";
 }
 fn bool isLetName(const ref string name) {
     if (name.length() < 2 || name[0] != 110) { return false; }   // 'n'
@@ -266,6 +268,8 @@ type resource NodeBuilder {
     string pad = "  ";                 // a let's indent: a stage's, or deeper, inside its loop
     DynamicArray<usize> dependKeys;    // the nodes asked whether they depend on a light...
     DynamicArray<bool> dependValues;   // ...and the answers
+    string generalText = "";           // the general form, written beside the module
+    bool assembled = false;            // ...once `wgsl()` has run
 
     public ctor make(MaterialSettings settings) {
         this.declared = give settings;
@@ -637,6 +641,19 @@ type resource NodeBuilder {
         this.functions = this.functions + text;
     }
 
+    // The material's general form (kyoten's rendering.md § Decided, GFX-1's part 5, question 1): its module with every
+    // option a pipeline would otherwise compile in read by the shader instead, so one pipeline draws every variant, the
+    // same pixels more slowly, while a variant's own pipeline compiles. Today's one option is the cull flip of a mirrored
+    // object: one more varying, flat, says whether the object is mirrored, written by the vertex stage from the sign of
+    // its world matrix's determinant as the renderer's `mirroredAt` decides it; the fragment stage discards a face that
+    // faces away, after its shading, so a texture sample stays in uniform control flow; and `fsCull`, the test alone, is
+    // the depth prepass's fragment stage, since a pipeline that culls nothing writes a back face's depth otherwise.
+    // Written in the same pass as `wgsl()`, the first time either is asked for.
+    public fn string generalWgsl() {
+        if (!this.assembled) { string own = this.wgsl(); }
+        return copy this.generalText;
+    }
+
     // The material's whole shader module: the renderer's group 0, the settings, the functions, the stages.
     public fn string wgsl() {
         // the fragment stage first, so the vertex stage knows the varyings it writes
@@ -676,6 +693,10 @@ type resource NodeBuilder {
             varyingWrites = varyingWrites + "  v.v${i} = " + value + ";\n";
             varyingFields = varyingFields + "  @location(${i}) v${i}: " + typed + ",\n";
         }
+        // the general form calls WGSL's determinant, so a function of that name would hide it there
+        bool determinantKnown = false;
+        for (isize k = 0; k < this.builtins.length(); k = k + 1) { if (this.builtins[k] == "determinant") { determinantKnown = true; } }
+        if (!determinantKnown) { this.builtins.add(item: "determinant"); }
         for (isize i = 0; i < this.functionNames.length(); i = i + 1) {
             for (isize k = 0; k < this.builtins.length(); k = k + 1) {
                 if (this.functionNames[i] == this.builtins[k]) {
@@ -705,17 +726,29 @@ type resource NodeBuilder {
         written = written + this.functions;
         // the clip position @invariant: the depth prepass runs this vertex stage with no fragment stage, and the main pass
         // tests Equal against what it wrote, so both must compute it bit for bit (kyoten's rendering.md § Decided, part 4)
-        written = written + "struct Varyings {\n  @builtin(position) @invariant clip: vec4f,\n" + varyingFields + "};\n";
-        written = written + "@vertex fn vs(@builtin(instance_index) object: u32, @location(0) position: vec3f, @location(1) normal: vec3f) -> Varyings {\n"
-            + "  var v: Varyings;\n" + vertLets + vertLoop + vertRest + "  v.clip = " + vertOut + ";\n" + varyingWrites
-            + "  return v;\n}\n";
+        string vertex = "@vertex fn vs(@builtin(instance_index) object: u32, @location(0) position: vec3f, @location(1) normal: vec3f) -> Varyings {\n"
+            + "  var v: Varyings;\n" + vertLets + vertLoop + vertRest + "  v.clip = " + vertOut + ";\n" + varyingWrites;
         // every output kept at 0 or above, as three.js r187's (`vec4( outgoingLight, diffuseColor.a ).max( 0 )`, "force
         // unsigned floats"), which the 16-bit float scene would otherwise keep; then the light scaled by the camera's
         // exposure before it is stored, as Filament, Bevy and Unreal pre-expose, so sunlight's 100,000 lux stays within a
         // half float (kyoten's rendering.md § Decided, part 4)
-        written = written + "@fragment fn fs(v: Varyings) -> @location(0) vec4f {\n" + fragLets + fragLoop + fragRest
-            + "  let shaded = max(" + fragOut + ", vec4f(0.0));\n"
-            + "  return vec4f(shaded.rgb * frame.exposure, shaded.a);\n}\n";
+        string shading = fragLets + fragLoop + fragRest + "  let shaded = max(" + fragOut + ", vec4f(0.0));\n";
+        string exposed = "  return vec4f(shaded.rgb * frame.exposure, shaded.a);\n}\n";
+        string general = copy written;
+        written = written + "struct Varyings {\n  @builtin(position) @invariant clip: vec4f,\n" + varyingFields + "};\n"
+            + vertex + "  return v;\n}\n"
+            + "@fragment fn fs(v: Varyings) -> @location(0) vec4f {\n" + shading + exposed;
+        // the general form (`generalWgsl()`): whether the object is mirrored, after the material's own varyings
+        isize beyond = this.varyingSources.length();
+        string culled = "  if (facing == (v.mirrored != 0u)) { discard; }\n";
+        this.generalText = general + "struct Varyings {\n  @builtin(position) @invariant clip: vec4f,\n" + varyingFields
+            + "  @location(${beyond}) @interpolate(flat) mirrored: u32,\n};\n"
+            + vertex
+            + "  v.mirrored = u32(determinant(mat3x3f(objects[object].world[0].xyz, objects[object].world[1].xyz, objects[object].world[2].xyz)) < 0.0);\n"
+            + "  return v;\n}\n"
+            + "@fragment fn fs(v: Varyings, @builtin(front_facing) facing: bool) -> @location(0) vec4f {\n" + shading + culled + exposed
+            + "@fragment fn fsCull(v: Varyings, @builtin(front_facing) facing: bool) {\n" + culled + "}\n";
+        this.assembled = true;
         return written;
     }
 }

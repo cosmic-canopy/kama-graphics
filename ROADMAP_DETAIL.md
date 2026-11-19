@@ -427,7 +427,33 @@ natively. The library's own `examples/cube` is the same scene without an engine.
   One, a render's own refusals left unreported, went uncaught while every case read `takeErrors()`, which sweeps them
   anyway; a program that prints and never reads it would never see one, so the last case's renderer prints, and the
   gate counts the line.
-- **Next, part 5's step 2:** the general form, for the cull flip.
+- **Built, part 5's step 2, the general form** (2026-11-18, [SPEC.md](SPEC.md) § The renderer, § Misuse, § The compiler
+  and § Tests), for the one option there is, the cull flip:
+  - `NodeBuilder.generalWgsl()`, written in the same pass as `wgsl()`: one more varying, flat, whether the object is
+    mirrored, from its world matrix's determinant; `fs` discarding a face that faces away after its shading; `fsCull`,
+    the depth prepass's fragment stage;
+  - its two pipelines culling nothing, keyed by its WGSL and the samples a texel, so one serves mirrored meshes and
+    others; drawn under `General` while a mesh's own pipelines compile, asked for by a miss and by `compile` under
+    `General`;
+  - `RenderInfo.general`, each such draw also a miss;
+  - a general form the device refuses reported once, as `Material`, once its material's own pipeline is made.
+
+  **Found while building, and fixed:** natively a render could draw with a pipeline it had asked for itself, where
+  `@kama/gpu`'s threads answered before a later draw sharing it, which step 1 said could not happen. Every request is
+  now polled once, at the start of a render, a compile and `takeErrors()`. Twelve boxes by turns of two materials
+  showed it: a new scene's first render drew five, on every native run.
+
+  **Settled while building, and reported:**
+  - `compile` asks for general forms only under `General`, as it asks for what the settings are now;
+  - the general form's discard comes after the shading. Natively wgpu takes the DFG sample after it too, since WGSL's
+    discard leaves uniformity alone, so only the WGSL text holds the order;
+  - `facing` and `fsCull` are names the compiler writes, and a function named `determinant` is refused.
+
+  Red first: on the API's stub, 16 of the first 36 new cases failed; the race's case failed on 3 of 3 native runs
+  before the fix, and four more cases came with it (40 in all). 362 cases natively, in Firefox and in Chrome for Testing, 349 in Edge, each debug and release. Every general form's
+  image matched its own pipelines' byte for byte on WARP, SwiftShader and Edge's GPU. 37 of 39 mutations caught
+  (kyoten's `.scratch/s37/kg/list2.py`).
+- **Next, part 5's step 3:** `StandIn` and the per-material override, its question asked first.
 - **Done:**
   - `examples/cube` draws from one source on both legs;
   - its golden passes on a software GPU on each leg CI has, and perceptually on the reference machines present;

@@ -11,6 +11,7 @@ import {
     graphics::modelWorldMatrix, graphics::cameraViewProjectionMatrix, graphics::wgslNumber,
     graphics::MeshBasicMaterial, graphics::Color, graphics::Node, graphics::Mat4Node, graphics::Mat3Node,
     graphics::normalLocal, graphics::modelNormalMatrix, graphics::normalWorld, graphics::positionWorld,
+    graphics::MeshStandardMaterial,
     Verdicts,
 };
 export { nodeCases, ShaderCase, nodeShaders };
@@ -32,6 +33,20 @@ fn string standardVertex() {
 }
 fn string fragment(const ref string body) {
     return "@fragment fn fs(v: Varyings) -> @location(0) vec4f {\n" + body + "}\n";
+}
+// A general form's (kyoten's rendering.md § Decided, GFX-1's part 5, question 1): the vertex stage's last write, whether
+// the object is mirrored, from the sign of its world matrix's determinant, as the renderer's `mirroredAt`...
+fn string mirroredWrite() {
+    return "  v.mirrored = u32(determinant(mat3x3f(objects[object].world[0].xyz, objects[object].world[1].xyz, objects[object].world[2].xyz)) < 0.0);\n";
+}
+// ...and its fragment stages: `fs`, its `shading` (the stage up to its `let shaded`), then a face that faces away
+// discarded, then the light exposed; and `fsCull`, the test alone.
+fn string generalFragment(const ref string shading) {
+    return "@fragment fn fs(v: Varyings, @builtin(front_facing) facing: bool) -> @location(0) vec4f {\n" + shading
+        + "  if (facing == (v.mirrored != 0u)) { discard; }\n"
+        + "  return vec4f(shaded.rgb * frame.exposure, shaded.a);\n}\n"
+        + "@fragment fn fsCull(v: Varyings, @builtin(front_facing) facing: bool) {\n"
+        + "  if (facing == (v.mirrored != 0u)) { discard; }\n}\n";
 }
 
 // "" when `got` is `want`; else where they part, with what follows on each side.
@@ -350,6 +365,80 @@ unsafe fn void compileCases(ref Verdicts found, ref DynamicArray<ShaderCase> sha
                   why: sameText(got: got, want: want));
         shaders.add(item: ShaderCase.make(name: "normals", wgsl: give got));
     }
+    // the general form (kyoten's rendering.md § Decided, GFX-1's part 5, question 1): the same module with the cull flip
+    // read by the shader, one more varying after the material's own, so one pipeline draws a mirrored object and others
+    {
+        NodeBuilder b = NodeBuilder.make(settings: MaterialSettings.make());
+        b.fragmentColor(node: vec4(xyz: normalWorld() + positionWorld() + normalWorld(), w: constant(value: 1.0)));
+        string own = b.wgsl();
+        int32 lets = b.letCount();
+        string got = b.generalWgsl();
+        string want = prelude()
+            + "struct Varyings {\n  @builtin(position) @invariant clip: vec4f,\n  @location(0) v0: vec3f,\n  @location(1) v1: vec3f,\n"
+            + "  @location(2) @interpolate(flat) mirrored: u32,\n};\n"
+            + "@vertex fn vs(@builtin(instance_index) object: u32, @location(0) position: vec3f, @location(1) normal: vec3f) -> Varyings {\n"
+            + "  var v: Varyings;\n"
+            + "  v.clip = ((frame.viewProjection * objects[object].world) * vec4f(position, 1.0));\n"
+            + "  v.v0 = (objects[object].normal * normal);\n"
+            + "  v.v1 = (objects[object].world * vec4f(position, 1.0)).xyz;\n"
+            + mirroredWrite()
+            + "  return v;\n}\n"
+            + generalFragment(shading: "  let shaded = max(vec4f(((normalize(v.v0) + v.v1) + normalize(v.v0)), 1.0), vec4f(0.0));\n");
+        found.add(name: "NodeBuilder: a material's general form is its module with one more varying, flat, whether the object is mirrored; its fragment stage discards a face that faces away after its shading; and fsCull is the test alone",
+                  why: sameText(got: got, want: want));
+        // a material with lets: asking for the general form after the module writes nothing again, so counts no let again
+        NodeBuilder withLets = NodeBuilder.make(settings: rcd());
+        FloatNode rough = withLets.uniformFloat(name: "r");
+        FloatNode squared = rough * rough;
+        withLets.fragmentColor(node: vec4(xyz: withLets.uniformVec3(name: "c") * squared, w: squared));
+        string module = withLets.wgsl();
+        int32 counted = withLets.letCount();
+        string generalOfLets = withLets.generalWgsl();
+        int32 after = withLets.letCount();
+        found.add(name: "NodeBuilder: the general form is written in the same pass as the module, so asking for it after counts no let again",
+                  why: counted == 1 && after == 1 ? "" : "${counted} lets, then ${after}");
+        NodeBuilder first = NodeBuilder.make(settings: MaterialSettings.make());
+        first.fragmentColor(node: vec4(xyz: normalWorld() + positionWorld() + normalWorld(), w: constant(value: 1.0)));
+        string generalFirst = first.generalWgsl();
+        string ownSecond = first.wgsl();
+        found.add(name: "NodeBuilder: the general form asked for before the module is the same, and so is the module after it",
+                  why: sameText(got: generalFirst, want: got) + sameText(got: ownSecond, want: own));
+        shaders.add(item: ShaderCase.make(name: "normals, the general form", wgsl: give got));
+    }
+    {
+        NodeBuilder b = NodeBuilder.make(settings: MaterialSettings.make());
+        string got = b.generalWgsl();
+        string want = prelude()
+            + "struct Varyings {\n  @builtin(position) @invariant clip: vec4f,\n  @location(0) @interpolate(flat) mirrored: u32,\n};\n"
+            + "@vertex fn vs(@builtin(instance_index) object: u32, @location(0) position: vec3f, @location(1) normal: vec3f) -> Varyings {\n"
+            + "  var v: Varyings;\n"
+            + "  v.clip = ((frame.viewProjection * objects[object].world) * vec4f(position, 1.0));\n"
+            + mirroredWrite()
+            + "  return v;\n}\n"
+            + generalFragment(shading: "  let shaded = max(vec4f(vec3f(1.0, 1.0, 1.0), 1.0), vec4f(0.0));\n");
+        found.add(name: "NodeBuilder: the general form of a material that sets no node: its one varying, whether the object is mirrored, at location 0",
+                  why: sameText(got: got, want: want));
+        shaders.add(item: ShaderCase.make(name: "white, the general form", wgsl: give got));
+    }
+    // MeshStandardMaterial's general form, lit through r187's model, which samples the DFG table: compiled by the leg's
+    // compiler, its discard after the sample
+    {
+        Shared<MeshStandardMaterial> m = new MeshStandardMaterial.make();
+        MaterialSettings s = MaterialSettings.make();
+        m.settings(into: ref s);
+        NodeBuilder b = NodeBuilder.make(settings: give s);
+        m.shade(builder: ref b);
+        string own = b.wgsl();
+        string got = b.generalWgsl();
+        Optional<isize> sampleAt = got.find(substring: "textureSample(");
+        Optional<isize> discardAt = got.find(substring: "{ discard; }");
+        isize sampled = match (sampleAt) { case Some(value: i): i; case None: -1; };
+        isize discarded = match (discardAt) { case Some(value: i): i; case None: -1; };
+        found.add(name: "NodeBuilder: MeshStandardMaterial's general form samples the DFG table before its fragment stage discards",
+                  why: sampled >= 0 && discarded > sampled ? "" : "the sample at ${sampled}, the discard at ${discarded}");
+        shaders.add(item: ShaderCase.make(name: "MeshStandardMaterial", wgsl: give own));
+        shaders.add(item: ShaderCase.make(name: "MeshStandardMaterial, the general form", wgsl: give got));
+    }
     // two varyings written alike but for their operator are two
     {
         NodeBuilder b = NodeBuilder.make(settings: MaterialSettings.make());
@@ -544,6 +633,23 @@ unsafe fn void refusalCases(ref Verdicts found) {
         string all = b.wgsl();
         found.add(name: "NodeBuilder refuses a shader function that would hide a WGSL built-in the shader calls",
                   why: sameProblems(problems: b.problems(), want: one(a: "the shader function `max` would hide WGSL's built-in `max`, which this shader calls")));
+    }
+    // the names the general form writes: its fragment stage's `facing` and its `fsCull`, and WGSL's `determinant`, which
+    // every general form calls, so a material's module is refused alike whichever form is asked for
+    {
+        NodeBuilder b = NodeBuilder.make(settings: MaterialSettings.make());
+        Shared<ShaderFunction> f = new ShaderFunction.make(name: "fsCull");
+        FloatNode x = param(function: f, name: "facing", value: constant(value: 2.0));
+        Shared<ShaderFunction> g = new ShaderFunction.make(name: "determinant");
+        FloatNode y = param(function: g, name: "y", value: constant(value: 2.0));
+        b.fragmentColor(node: vec4(xyz: positionLocal(), w: called(function: f, body: x) + called(function: g, body: y)));
+        string all = b.wgsl();
+        DynamicArray<string> want = DynamicArray.empty();
+        want.add(item: "the shader function `fsCull` is a name the compiler writes");
+        want.add(item: "the parameter `facing` is a name the compiler writes");
+        want.add(item: "the shader function `determinant` would hide WGSL's built-in `determinant`, which this shader calls");
+        found.add(name: "NodeBuilder refuses the names a general form writes: a function fsCull, a parameter facing, and a function hiding WGSL's determinant",
+                  why: sameProblems(problems: b.problems(), want: want));
     }
     {
         MaterialSettings s = MaterialSettings.make();

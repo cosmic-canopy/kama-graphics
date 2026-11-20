@@ -714,10 +714,25 @@ natively. The library's own `examples/cube` is the same scene without an engine.
      from the next example on, a feature's budget is what it adds to the first example that uses it, that example built
      with and without it. The rule goes into FEATURES.md § How to read a row and `tools/check-features.sh`. GPU time
      waits on `@kama/gpu`'s timestamps (GPU-6).
-- **Next, part 6's step 4:** the build flag and the player's build in the gate, its measurement the ratchet;
-  FEATURES.md's 22 cube rows with their status (`built`, or `partial` with ✓ where a ladder's methods are not all
-  built) and the shared budget, with the rule in § How to read a row and `tools/check-features.sh`; and the SPEC. Then
-  kyoten's join draws the hello cube through it.
+- **Decided on 2026-11-20, step 4's second asking** (kyoten's `docs/design/rendering.md` § Decided, `c8771a4`), three
+  questions found by reading the code for it, each (A), the owner: "A (Recommended)" to each:
+  1. **each row says what is true:** of the 22 cube rows, 13 are built wholly, 7 in part (tone mapping, anti-aliasing,
+     the flat core, render targets, buffer geometry, primitive shapes, physical light units) and 2 not at all (color
+     spaces, which moves to `level`, and depth textures, to `shooter`); the unlit material, slot overrides and exposure
+     get their status too. A row is `built` when everything it names is, else `partial` with ✓ on the built part, a
+     one-method cell split into what it names. Built and partial rows in the cube's player build share its
+     measurement; the unlit material reads `with editor` until its first example measures it;
+  2. **every built feature keeps a golden of its own,** as FEATURES.md's test and this row say: about twelve new, each a
+     small scene in which the feature changes pixels; the renderer's row names the cube's goldens; the four features
+     that draw nothing of their own (the flat core, presets, pipelines compiled off the frame, values without
+     recompiling) are held by named cases; `tools/check-features.sh` holds a built row's test to a golden folder or a
+     named case, never a word anywhere in `tests/`;
+  3. **the goldens' loader is measured in:** kama packs a manifest's `assets` into every build, so a flag cannot leave
+     emscripten's file packager out (kyoten's KY-63, filed); the ratchet's record says the loader is in, and is lowered
+     with that reason when kama gives a way out.
+- **Next, part 6's step 4:** the build flag and the player's build in the gate, its measurement the ratchet; the new
+  goldens; FEATURES.md's rows with their status and the shared budget, with the rule in § How to read a row and
+  `tools/check-features.sh`; and the SPEC. Then kyoten's join draws the hello cube through it.
 - **Done:**
   - `examples/cube` draws from one source on both legs;
   - its golden passes on a software GPU on each leg CI has, and perceptually on the reference machines present;

@@ -647,9 +647,20 @@ natively. The library's own `examples/cube` is the same scene without an engine.
   is not caught: no leg draws a blank frame on a player's GPU, and FLIP (step 3) holds that frame to the golden.
   Planning them found a gap first: a comparison passing every frame passed every leg, since every frame matched, so
   the gate runs the cube a frame short, which must fail.
-- **Next, part 6's step 3:** FLIP in the harness, ported from NVIDIA's FLIP v1.7, comparing a hardware leg's frame with
-  the leg's software golden, its two limits set from the cube on the reference machines present; then step 4, the 150
-  KB measurement, FEATURES.md's rows and the SPEC.
+- **Decided on 2026-11-20, step 3's two questions** (kyoten's `docs/design/rendering.md` § Decided), each (A), the
+  owner: "sounds like we can do both as you recommend":
+  1. **FLIP lives in a package of its own, `@kama/imagediff`** (`../kama-imagediff`), on `@kama/image`, with the
+     byte-for-byte golden comparison beside it, as Filament keeps `libs/imagediff`. The frames FLIP compares on a
+     player's GPU are `examples/cube`'s, a package of its own, and kama lets no package read another's files, so the
+     tests' harness, where the decision of 2026-11-14 had put the port, cannot hold it alone. The tests' `golden.kama`
+     and the cube's `check.kama` call it, and their two copies of the exact comparison go. NVIDIA's notice reaches only
+     a program that compares images.
+  2. **Edge runs at Chrome for Testing's scale of 1.5 and is held to SwiftShader's golden,** the web's, so every web
+     leg on every operating system can be held to it. Natively on Windows, the GPU's frame is held to WARP's golden.
+- **Next, part 6's step 3:** `@kama/imagediff` seeded, the exact comparison moved there, and FLIP, LDR, ported from
+  NVIDIA's FLIP at `d3ab02a4` (v1.7's C++ with PR #45's mean summed in a double). It compares a hardware leg's frame
+  with the leg's software golden, its two limits set from the cube on the reference machines present. Then step 4, the
+  150 KB measurement, FEATURES.md's rows and the SPEC.
 - **Done:**
   - `examples/cube` draws from one source on both legs;
   - its golden passes on a software GPU on each leg CI has, and perceptually on the reference machines present;

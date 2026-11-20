@@ -952,8 +952,11 @@ When, among the slices, is the owner's call when the row comes up.
 ## GFX-20: the cube's web code against its gauge
 
 **What drives it:** kyoten's hello cube has a gauge of 150 KB of code on the web (wasm plus JS, release, brotli;
-kyoten's `docs/design/web-and-native.md` question 4), and a player's build of `examples/cube` measured 158.7 KB on
-2026-11-20, with `ENVIRONMENT=web` and emmalloc, on kyoten's 0.9.978 pin (kyoten's `.scratch/s42/size/`). The gauge
+kyoten's `docs/design/web-and-native.md` question 4), and a player's build of `examples/cube` is its ratchet: 169.1 KB
+on 2026-11-20 (`examples/cube/web-size.json`; kama 0.9.978, emcc 6.0.13), with `ENVIRONMENT=web`. The stand-in measured
+before it, with no assets and emmalloc, was 158.7 KB (kyoten's `.scratch/s42/size/`); the ratchet's build holds 6.8 KB
+of emscripten's file packager for the goldens, which a flag cannot leave out (kyoten's KY-63), and 1.9 KB of the
+example's own argument handling and frame read. The gauge
 shows growth and holds nothing back (the owner, 2026-11-20: "the gauge is just a budget we want to identify growth"),
 and confirming: "Yes we should not hold a slice back due to our arbitrary guage.  we likely will increase the guage and
 determine if there is something that can be done to lower and get back into range.  but that is arbitrary." So this
@@ -964,6 +967,8 @@ example's own seven functions 91 KB with what `-Oz` inlined into them, libc and 
 emdawnwebgpu 21 KB and kama's runtime 11 KB, and the data section 45 KB. The leads:
 - `__floatscan` and `sscanf`, 11 KB raw, whose caller is not yet found;
 - the standard material's `shade` (25 KB) and the node builder's `wgsl` and `spelled` (22 KB);
-- what `-Oz` inlines, `Cube.render` alone being 59 KB.
+- what `-Oz` inlines, `Cube.render` alone being 59 KB;
+- emmalloc, 1.8 KB of wasm (the stand-in, measured), a trade of allocation speed for size;
+- the file packager's 6.8 KB, which leaves once kama gives a build a way to leave its assets out (KY-63).
 
 Each saving is measured as a change of the cube's ratchet, and none drops a feature or a method.

@@ -18,6 +18,20 @@
 set -euo pipefail
 . "$(dirname "$0")/legs.sh"
 
+# The gate's last word on itself: a run that printed a FAIL line fails, whatever its status, so a check that prints FAIL
+# and forgets to set `failed` cannot pass (found by GFX-1's part 6, step 4's mutations, where the ratchet's status was
+# dropped). A passing gate prints none. The gate runs itself once more under tee and holds its own output to that.
+failLines() { grep -c '^FAIL' "$1" || true; }
+if [ -z "${KG_GATE_INNER:-}" ]; then
+    KG_GATE_INNER=1 bash "$ROOT/tools/test.sh" "$@" 2>&1 | tee tests/out/gate.log && status=0 || status=$?
+    if [ "$status" = 0 ] && [ "$(failLines tests/out/gate.log)" != 0 ]; then
+        echo "FAIL the gate printed $(failLines tests/out/gate.log) FAIL line(s) above, though its own status said it passed"
+        echo "test: FAILED" >&2
+        exit 1
+    fi
+    exit "$status"
+fi
+
 failed=0
 step() { echo; echo "== $*"; }
 rm -f tests/out/run-*.log   # this run's logs only, for the goldens' last word below
@@ -169,6 +183,99 @@ agreeCase "a frame printed on one leg of WARP while another never reached the ca
 agreeCase "a line naming no golden's file is refused" \
     $'a line names "../x warp", not a golden\nexit 1' "$ran" '' 'native ../x warp AAAA\n'
 
+step "the web-size ratchet holds a measurement to its record (tools/web-size.mjs, on crafted records)"
+# examples/cube's web code as a player gets it is held to its record, examples/cube/web-size.json (GFX-1's part 6, step 4;
+# kyoten's rendering.md § Decided, 2026-11-20). A build's bytes are its toolchain's as much as its source's, so each entry
+# names the emcc that built it, and a build is held to the last entry for its own emcc, as a frame is held to its own
+# software GPU's golden: a build above it fails, and one below it passes and says to lower it. One case: its name, what
+# `check` must say and its status, the record ('-' for none), and the measurement, wasm and JS, in bytes of brotli, on
+# emcc 6.0.13.
+sizeCase() {
+    local name="$1" want="$2" dir="tests/out/web-size/$((++sizeCases))" got
+    rm -rf "$dir" && mkdir -p "$dir"
+    [ "$3" = - ] || printf '%s' "$3" > "$dir/record.json"
+    got="$(node tools/web-size.mjs check "$dir/record.json" "$4" "$5" 6.0.13 2>&1; echo "exit $?")"
+    got="${got//$dir\//<dir>/}"
+    if [ "$got" = "$want" ]; then
+        echo "ok   web-size: $name"
+    else
+        echo "FAIL web-size: $name: said '$got', where '$want'"
+        failed=1
+    fi
+}
+if ! command -v node >/dev/null 2>&1; then
+    echo "skip no node on PATH"
+else
+    sizeCases=0
+    # An entry: wasm, JS, code, why, and its emcc (6.0.13 unless named).
+    entry() {
+        printf '{"date":"2026-11-20","kama":"0.9.978","emcc":"%s","wasm":%s,"js":%s,"code":%s,"why":"%s"}' \
+            "${5:-6.0.13}" "$1" "$2" "$3" "$4"
+    }
+    one="{\"measures\":\"a build\",\"history\":[$(entry 100 50 150 'the first measurement')]}"
+    lower='lower the record (tools/update-web-size.sh "<why>")'
+    raise='raising the record takes a written reason (tools/update-web-size.sh "<why>")'
+    sizeCase "a build its record's size passes" \
+        $'ok   150 B of web code (wasm 100 B, JS 50 B) on emcc 6.0.13, as its record says\nexit 0' "$one" 100 50
+    sizeCase "a build a byte over its record fails, saying by how much" \
+        "FAIL 151 B of web code (wasm 101 B, JS 50 B) on emcc 6.0.13, 1 B over its record's 150 B: $raise"$'\nexit 1' \
+        "$one" 101 50
+    sizeCase "a build under its record passes, saying to lower the record" \
+        "ok   140 B of web code (wasm 100 B, JS 40 B) on emcc 6.0.13, 10 B under its record's 150 B: $lower"$'\nexit 0' \
+        "$one" 100 40
+    sizeCase "the record is its last entry, not its largest" \
+        "FAIL 160 B of web code (wasm 100 B, JS 60 B) on emcc 6.0.13, 10 B over its record's 150 B: $raise"$'\nexit 1' \
+        "{\"measures\":\"a build\",\"history\":[$(entry 150 50 200 'before'),$(entry 100 50 150 'smaller')]}" 100 60
+    sizeCase "the record is the last entry for the build's own emcc, not another's" \
+        $'ok   150 B of web code (wasm 100 B, JS 50 B) on emcc 6.0.13, as its record says\nexit 0' \
+        "{\"measures\":\"a build\",\"history\":[$(entry 100 50 150 'here'),$(entry 90 40 130 'another machine' 7.0.0)]}" 100 50
+    sizeCase "a record with no entry for the build's emcc fails" \
+        $'FAIL the record at <dir>/record.json has no entry for emcc 6.0.13 (it has 7.0.0): write one with tools/update-web-size.sh "<why>"\nexit 1' \
+        "{\"measures\":\"a build\",\"history\":[$(entry 100 50 150 'another machine' 7.0.0)]}" 100 50
+    sizeCase "a record with no entry at all fails" \
+        $'FAIL the record at <dir>/record.json has no entry for emcc 6.0.13 (it has none): write one with tools/update-web-size.sh "<why>"\nexit 1' \
+        '{"measures":"a build","history":[]}' 100 50
+    sizeCase "no record fails" \
+        $'FAIL no record at <dir>/record.json: write one with tools/update-web-size.sh "<why>"\nexit 1' - 100 50
+    sizeCase "a record that is not JSON fails" $'FAIL the record at <dir>/record.json is not JSON\nexit 1' '{"history": [' 100 50
+    sizeCase "a record whose entry gives no reason fails" \
+        $'FAIL the record\'s last entry for emcc 6.0.13, of 2026-11-20, gives no reason\nexit 1' \
+        "{\"measures\":\"a build\",\"history\":[$(entry 100 50 150 '')]}" 100 50
+    sizeCase "a record whose code is not its wasm plus its JS fails" \
+        $'FAIL the record\'s last entry for emcc 6.0.13, of 2026-11-20, says 151 B of code, where its wasm and JS are 150 B\nexit 1' \
+        "{\"measures\":\"a build\",\"history\":[$(entry 100 50 151 'off by one')]}" 100 50
+    sizeCase "a measurement with a part of nothing fails" \
+        $'FAIL a part of the build measured nothing: wasm 100 B, JS 0 B\nexit 1' "$one" 100 0
+    sizeCase "a measurement that is not two byte counts fails" \
+        $'FAIL the measurement is not two byte counts: \'abc\' and \'50\'\nexit 1' "$one" abc 50
+    # `record` writes the record: with a reason, an entry the check then holds; with none, nothing.
+    dir="tests/out/web-size/record"
+    rm -rf "$dir" && mkdir -p "$dir"
+    said="$(node tools/web-size.mjs record "$dir/record.json" 100 50 0.9.978 6.0.13 '' 2>&1; echo "exit $?")"
+    if [ "$said" = $'FAIL a record takes a written reason\nexit 1' ] && [ ! -e "$dir/record.json" ]; then
+        echo "ok   web-size: a record with no reason is refused, and nothing is written"
+    else
+        echo "FAIL web-size: a record with no reason: said '$said', or wrote a record"; failed=1
+    fi
+    node tools/web-size.mjs record "$dir/record.json" 100 50 0.9.978 6.0.13 'the first measurement' > /dev/null 2>&1 || true
+    node tools/web-size.mjs record "$dir/record.json" 90 50 0.9.978 6.0.13 'smaller' > /dev/null 2>&1 || true
+    node tools/web-size.mjs record "$dir/record.json" 95 45 0.9.978 7.0.0 'another machine' > /dev/null 2>&1 || true
+    said="$(node tools/web-size.mjs check "$dir/record.json" 90 50 6.0.13 2>&1; echo "exit $?")"
+    entries="$(node -e 'const r = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")); console.log(r.history.map(e => e.emcc + ":" + e.code + ":" + e.why).join(","))' "$dir/record.json" 2>&1 || true)"
+    if [ "$said" = $'ok   140 B of web code (wasm 90 B, JS 50 B) on emcc 6.0.13, as its record says\nexit 0' ] \
+            && [ "$entries" = "6.0.13:150:the first measurement,6.0.13:140:smaller,7.0.0:140:another machine" ]; then
+        echo "ok   web-size: a record with a reason is appended as the last entry for its emcc, which the check then holds"
+    else
+        echo "FAIL web-size: three records, then the check: said '$said', and the entries are '$entries'"; failed=1
+    fi
+    said="$(node tools/web-size.mjs record "$dir/record.json" 90 50 0.9.978 6.0.13 'again' 2>&1; echo "exit $?")"
+    if [ "$said" = $'FAIL the record already says 140 B (wasm 90 B, JS 50 B) for emcc 6.0.13\nexit 1' ]; then
+        echo "ok   web-size: a record that changes nothing is refused"
+    else
+        echo "FAIL web-size: a record that changes nothing: said '$said'"; failed=1
+    fi
+fi
+
 step "kama check"
 "$KAMA" pkg install kama.json > /dev/null
 "$KAMA" check kama.json || failed=1
@@ -314,6 +421,26 @@ else
     fi
 fi
 
+step "examples/cube as a player gets it, natively: its harness left out (--define CUBE_PLAYER), it refuses a golden"
+# The player's build is the one the web leg measures (below). It says it carries no harness, and a run naming a golden
+# fails before it draws, so it can never pass as a golden leg holding nothing.
+if buildCubePlayerNative; then
+    "tests/out/cube-player-native/cube$EXE" --frames 2 --golden warp < /dev/null 2>&1 | tr -d '\r' \
+        > tests/out/cube-player-golden.log && code=0 || code=$?
+    if [ "$code" != 0 ] && grep -qx 'harness: out' tests/out/cube-player-golden.log \
+            && grep -qx "FAIL this build leaves the harness out (--define CUBE_PLAYER), so it holds no golden: the run names 'warp'" tests/out/cube-player-golden.log \
+            && grep -qx 'cube: 0 frames drawn, 0 misuses reported' tests/out/cube-player-golden.log \
+            && ! grep -q '^golden-png ' tests/out/cube-player-golden.log; then
+        echo "ok   examples/cube's player build says its harness is out, and refuses --golden warp before it draws"
+    else
+        grep -E '^FAIL|^harness|^golden-png|^cube: ' tests/out/cube-player-golden.log | cut -c1-160
+        echo "FAIL examples/cube's player build with --golden warp: the run's status is $code, or it did not refuse before it drew"
+        failed=1
+    fi
+else
+    failed=1
+fi
+
 step "the web leg: built debug and release, and run in every headless browser present"
 if ! command -v emcc >/dev/null 2>&1; then
     echo "skip no emcc on PATH (run from an interactive UCRT64 shell, bash -lic)"
@@ -401,6 +528,55 @@ else
         fi
     else
         echo "skip no browser for kama run (Edge or Chrome installed, Firefox or Chrome for Testing pinned under ~/browsers; or set KAMA_BROWSER)"
+    fi
+fi
+
+step "examples/cube as a player gets it: its harness left out (--define CUBE_PLAYER), run, and its web code held to its record"
+# The ratchet (GFX-1's part 6, step 4; kyoten's rendering.md § Decided, 2026-11-20): the player's web build, release, its
+# wasm plus its JS at brotli quality 11, held to examples/cube/web-size.json (tools/web-size.mjs). Above the record it
+# fails, and raising the record takes a written reason (tools/update-web-size.sh "<why>"); below it, it passes and says to
+# lower it. The build measured is run once in a player's browser, so it is one that draws.
+if ! command -v emcc >/dev/null 2>&1 || ! command -v node >/dev/null 2>&1; then
+    echo "skip no emcc or node on PATH, so the player's build is neither built nor measured"
+elif ! buildCubePlayerWeb; then
+    failed=1
+else
+    if grep -q 'UTF8ToString' tests/out/cube-player-web/cube.js; then
+        echo "FAIL tests/out/cube-player-web/cube.js still names UTF8ToString, so Closure never ran over it"
+        failed=1
+    else
+        echo "ok   Closure ran over tests/out/cube-player-web/cube.js"
+    fi
+    if sizes="$(measureCubePlayer)"; then
+        read -r wasmBytes jsBytes <<< "$sizes"
+        said="$(node tools/web-size.mjs check "$CUBE_RECORD" "$wasmBytes" "$jsBytes" "$(emccVersion)")" && code=0 || code=$?
+        echo "${said:0:5}examples/cube as a player gets it: ${said:5}"
+        [ "$code" = 0 ] || failed=1
+    else
+        echo "FAIL examples/cube's player build could not be measured: $sizes"
+        failed=1
+    fi
+    # A player's browser: Edge or Chrome as installed, else the first browser there is.
+    player=""
+    if browsers="$(node tools/browsers.mjs run 2>/dev/null)"; then
+        while IFS= read -r browser; do
+            case "$(browserKind "$browser")" in edge|chrome) player="$browser"; break ;; esac
+        done <<< "$browsers"
+        [ -n "$player" ] || player="$(head -1 <<< "$browsers")"
+    fi
+    if [ -z "$player" ]; then
+        echo "skip no browser for kama run, so the player's build is measured and not run"
+    else
+        echo "-- kama run, $player, release, --define CUBE_PLAYER: examples/cube on #canvas for $CUBE_FRAMES frames"
+        runCubePlayerKama "$player" tests/out/run-cube-player.log || failed=1
+        cubeHeld tests/out/run-cube-player.log "" "the player's build, ${player##*[/\\]}" ""
+        builtAs tests/out/run-cube-player.log release "examples/cube's player build, ${player##*[/\\]}"
+        if grep -qx 'harness: out' tests/out/run-cube-player.log; then
+            echo "ok   examples/cube's player build, run, says its harness is out"
+        else
+            echo "FAIL examples/cube's player build, run, never said \"harness: out\", so the run was another build"
+            failed=1
+        fi
     fi
 fi
 

@@ -31,7 +31,7 @@ import {
     graphics::Scene, graphics::Mesh, graphics::BoxGeometry, graphics::MeshStandardMaterial, graphics::DirectionalLight,
     graphics::AmbientLight, graphics::PerspectiveCamera, graphics::Euler, graphics::EulerOrder,
     graphics::CompileRequest, graphics::CompileStatus, graphics::PixelRead, graphics::PixelStatus,
-    knownGpu, adapterSays, adapterIsNamed, heldToGolden, heldByFlip, drawnHere,
+    knownGpu, adapterSays, adapterIsNamed, heldToGolden, heldByFlip, drawnHere, noHarness,
 };
 
 comptime int32 WIDE = 640;          // the window's logical size
@@ -142,6 +142,12 @@ type resource Cube implements App {
             this.stage = 4;
             return give this;
         }
+        if (!harnessIn() && (!named.isEmpty() || !against.isEmpty())) {
+            println(s: "FAIL " + noHarness() + ": the run names '" + named + against + "'");
+            this.wrong = true;
+            this.stage = 4;
+            return give this;
+        }
         this.gpu = give named;
         this.flipAgainst = give against;
     }
@@ -230,7 +236,7 @@ type resource Cube implements App {
     // Under `--golden <gpu>`, once the renderer says which GPU it draws with: held to the GPU named, before any frame of
     // it is held to a golden or printed as one.
     unsafe fn void holdAdapter() {
-        if (this.gpu.isEmpty() || this.adapterHeld) { return; }
+        if (!harnessIn() || this.gpu.isEmpty() || this.adapterHeld) { return; }
         Optional<AdapterInfo> said = match (this.renderer) { case Some(value: r): r.adapterInfo(); case None: Optional::None; };
         match (said) {
             case Some(value: info): {
@@ -361,9 +367,18 @@ fn string buildKind() { return "release"; }
 @compileFor(DEBUG)
 fn string buildKind() { return "debug"; }
 
+// Whether this build carries the harness, src/check.kama's goldens, PNG and FLIP, its second line. The player's build,
+// `--define CUBE_PLAYER`, leaves it out: it is the build the gate measures as the web code a player gets (kyoten's
+// rendering.md § Decided, GFX-1's part 6, step 4), and the gate holds each run to the build it says it is.
+@compileFor(CUBE_PLAYER)
+fn bool harnessIn() { return false; }
+@compileFor(!CUBE_PLAYER)
+fn bool harnessIn() { return true; }
+
 unsafe fn void runCube() {
     string built = buildKind();
     println(s: "build: ${built}");
+    println(s: harnessIn() ? "harness: in" : "harness: out");
     Owned<App> app = new Cube.make();
     run(app: give app, pace: Pace::EveryRefresh);
 }

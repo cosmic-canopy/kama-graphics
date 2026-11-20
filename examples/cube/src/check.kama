@@ -30,7 +30,7 @@ import {
     imagediff::compareExact, imagediff::ExactDiff, imagediff::ExactVerdict, imagediff::PixelAt,
     imagediff::compareFlip, imagediff::FlipOptions, imagediff::FlipMap, imagediff::DiffError,
 };
-export { knownGpu, adapterSays, adapterIsNamed, heldToGolden, heldByFlip, drawnHere };
+export { knownGpu, adapterSays, adapterIsNamed, heldToGolden, heldByFlip, drawnHere, noHarness };
 
 // What a hardware frame is held to against its leg's software golden (above), measured from this cube on the reference
 // machine's GPU (an AMD Radeon 880M, 2026-11-20), the same numbers on every run, debug and release:
@@ -77,6 +77,7 @@ fn string adapterIsNamed(const ref AdapterInfo info, const ref string gpu) {
 }
 
 // The frame as a PNG at archival(): its RGBA8 rows, top first, alpha kept as it is, as the library's tests write theirs.
+@compileFor(!CUBE_PLAYER)
 fn Result<DynamicArray<uint8>, ImageError> framePng(const ref Image frame) {
     FixedArray<uint8> samples = FixedArray.make(size: frame.width() * frame.height() * 4);
     borrow frame.samples8() as px { for (isize i = 0; i < px.length(); i = i + 1) { samples[i] = px[i]; } }
@@ -91,6 +92,7 @@ fn Result<DynamicArray<uint8>, ImageError> framePng(const ref Image frame) {
 
 // How the golden differs from the frame, by @kama/imagediff's exact comparison: "" when it does not. The golden is the
 // reference, the frame the test.
+@compileFor(!CUBE_PLAYER)
 fn string differs(const ref Image golden, const ref Image frame) {
     ExactDiff d = compareExact(reference: golden, test: frame);
     isize gw = golden.width();
@@ -119,6 +121,7 @@ fn string differs(const ref Image golden, const ref Image frame) {
 
 // The frame held to `goldens/<gpu>.png`: "" when it is the golden's bytes. Otherwise the frame is printed as its line,
 // for tools/update-goldens.sh, and the words say why.
+@compileFor(!CUBE_PLAYER)
 unsafe fn string heldToGolden(const ref Image frame, const ref string gpu) {
     Result<DynamicArray<uint8>, IoError> golden = readAsset(name: gpu + ".png");
     string why = match (golden) {
@@ -141,6 +144,7 @@ unsafe fn string heldToGolden(const ref Image frame, const ref string gpu) {
 }
 
 // The golden `goldens/<gpu>.png` decoded, or `why` set.
+@compileFor(!CUBE_PLAYER)
 unsafe fn Optional<Image> goldenOf(const ref string gpu, ref string why) {
     Result<DynamicArray<uint8>, IoError> golden = readAsset(name: gpu + ".png");
     return match (golden) {
@@ -157,6 +161,7 @@ unsafe fn Optional<Image> goldenOf(const ref string gpu, ref string why) {
 
 // The frame, drawn on a player's GPU, held to `goldens/<gpu>.png` by FLIP (above): "" when both numbers are within their
 // limits. It prints what FLIP found either way, and the frame as its line when it fails.
+@compileFor(!CUBE_PLAYER)
 unsafe fn string heldByFlip(const ref Image frame, const ref string gpu) {
     string why = "";
     Optional<Image> golden = goldenOf(gpu: gpu, why: ref why);
@@ -180,6 +185,7 @@ unsafe fn string heldByFlip(const ref Image frame, const ref string gpu) {
 }
 
 // FLIP's two numbers, printed, and held to their limits: "" when within both.
+@compileFor(!CUBE_PLAYER)
 fn string flipVerdict(const ref FlipMap m, const ref string gpu) {
     float64 mean = m.mean();
     isize pixels = m.width() * m.height();
@@ -201,6 +207,17 @@ fn string flipVerdict(const ref FlipMap m, const ref string gpu) {
     }
     return why;
 }
+
+// The player's build (`--define CUBE_PLAYER`, the build the gate measures; kyoten's rendering.md § Decided, GFX-1's part
+// 6, step 4) leaves the harness out: the goldens, PNG and FLIP. Its two holds refuse, though `main.kama` refuses a run
+// naming a golden before it draws.
+@compileFor(CUBE_PLAYER)
+fn string heldToGolden(const ref Image frame, const ref string gpu) { return noHarness(); }
+@compileFor(CUBE_PLAYER)
+fn string heldByFlip(const ref Image frame, const ref string gpu) { return noHarness(); }
+
+// What the player's build says when a run asks it to hold a golden.
+fn string noHarness() { return "this build leaves the harness out (--define CUBE_PLAYER), so it holds no golden"; }
 
 // On a run that names no software GPU: "" when the frame is `width` × `height` and the cube is drawn at its centre,
 // whose texel differs from the corner's background.

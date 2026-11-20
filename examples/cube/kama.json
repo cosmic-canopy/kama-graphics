@@ -6,9 +6,10 @@
   "description": "A lit cube spun in a window on @kama/graphics, natively and in a browser, its last frame held to a software GPU's golden: byte for byte, or by FLIP on a player's GPU",
   "entry": "src/main.kama",
   "webgpu": true,
-  "emSettings": { "ALLOW_MEMORY_GROWTH": 1 },
+  "emSettings": { "ALLOW_MEMORY_GROWTH": 1, "ENVIRONMENT": "web" },
   "shellFile": "web/shell.html",
   "assets": "goldens",
+  "flags": { "CUBE_PLAYER": {} },
   "modules": {
     ".": { "visibility": "internal" }
   },

@@ -206,3 +206,9 @@ package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   from `@kama/imagediff`, on its mean and its share of pixels above an error of 0.1, its limits measured; the gate holds
   the GPU natively against WARP's golden and Edge, at a scale of 1.5, against SwiftShader's. The tests' and the cube's
   golden comparisons are `@kama/imagediff`'s exact one.
+- GFX-1's part 6, step 4, its first part: `examples/cube`'s web code as a player gets it, held by a ratchet.
+  `--define CUBE_PLAYER` builds the cube with its harness left out (the goldens, PNG and FLIP), and the gate measures
+  that build's wasm plus JS at brotli quality 11 (`tools/web-size.mjs`), failing when it is above
+  `examples/cube/web-size.json`'s last entry for the emcc that built it; `tools/update-web-size.sh "<why>"` writes the
+  record. 169.1 KB on kama 0.9.978 and emcc 6.0.13, 6.8 KB of it the goldens' file packager (kyoten's KY-63). The cube's
+  manifest sets `ENVIRONMENT=web`. The gate fails a run that printed a FAIL line, whatever its status said.

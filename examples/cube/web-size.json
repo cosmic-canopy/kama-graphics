@@ -1,0 +1,14 @@
+{
+  "measures": "examples/cube as a player gets it: built for the web at --release with --define CUBE_PLAYER, which leaves its harness out; its wasm plus its JS, each at brotli quality 11, without the page shell or assets (tools/web-size.mjs). Each entry is a size the build had on the emcc it names, and why.",
+  "history": [
+    {
+      "date": "2026-11-20",
+      "kama": "0.9.978+g5e542c55",
+      "emcc": "6.0.13",
+      "wasm": 148800,
+      "js": 20291,
+      "code": 169091,
+      "why": "The cube enters with what it measures (kyoten's rendering.md § Decided, GFX-1's part 6, step 4, 2026-11-20): its player build, the harness left out by --define CUBE_PLAYER, with ENVIRONMENT=web. The goldens stay in it as assets, and emscripten's file packager with them, about 6.8 KB of the JS, since a build flag cannot leave a manifest's assets out (kyoten's KY-63): lower this with that reason when kama gives a way out. GFX-20 looks for what brings it under the hello cube's 150 KB gauge."
+    }
+  ]
+}

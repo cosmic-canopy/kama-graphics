@@ -167,3 +167,41 @@ runCubeKama() {
     KAMA_BROWSER="$browser" bounded "$KAMA" run examples/cube/kama.json $build --target WASM --headless \
         ${flags[@]+"${flags[@]}"} "${args[@]}" < /dev/null 2>&1 | tr -d '\r' | tee "$log"
 }
+
+# examples/cube as a player gets it (GFX-1's part 6, step 4; kyoten's rendering.md § Decided, 2026-11-20): the same source
+# at --release with --define CUBE_PLAYER, which leaves its harness out (src/check.kama's goldens, PNG and FLIP). Its web
+# build is what the ratchet measures (tools/web-size.mjs): its wasm plus its JS at brotli quality 11, held to the record
+# CUBE_RECORD, which tools/update-web-size.sh writes. The goldens stay in it as assets, and emscripten's file packager
+# with them, since kama packs a manifest's assets into every build (kyoten's KY-63); the record says so.
+CUBE_RECORD=examples/cube/web-size.json
+
+buildCubePlayerWeb() {
+    if ! "$KAMA" build examples/cube/kama.json --release --target WASM --define CUBE_PLAYER \
+            -o tests/out/cube-player-web/cube.js > tests/out/build-cube-player-web.log 2>&1; then
+        tail -20 tests/out/build-cube-player-web.log
+        return 1
+    fi
+}
+
+buildCubePlayerNative() {
+    if ! "$KAMA" build examples/cube/kama.json --define CUBE_PLAYER -o "tests/out/cube-player-native/cube$EXE" \
+            > tests/out/build-cube-player-native.log 2>&1; then
+        tail -20 tests/out/build-cube-player-native.log
+        return 1
+    fi
+}
+
+# "<wasm> <js>", each in bytes after brotli.
+measureCubePlayer() { node tools/web-size.mjs measure tests/out/cube-player-web/cube.wasm tests/out/cube-player-web/cube.js; }
+
+# The player's build run once in a browser under kama run, as a player's page runs it, naming no golden.
+runCubePlayerKama() {
+    local browser="$1" log="$2" flags=() f
+    while IFS= read -r f; do [ -n "$f" ] && flags+=("$f"); done < <(browserFlags "$browser")
+    KAMA_BROWSER="$browser" bounded "$KAMA" run examples/cube/kama.json --release --target WASM --define CUBE_PLAYER \
+        --headless ${flags[@]+"${flags[@]}"} -- --frames "$CUBE_FRAMES" < /dev/null 2>&1 | tr -d '\r' | tee "$log"
+}
+
+# The emcc a web build is made with: a build's bytes are its toolchain's as much as its source's, so the record keeps an
+# entry per emcc.
+emccVersion() { emcc -dumpversion 2>/dev/null | tr -d '\r'; }

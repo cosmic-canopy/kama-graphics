@@ -114,3 +114,41 @@ runKama() {
     KAMA_BROWSER="$browser" bounded "$KAMA" run tests/kama.json $build --target WASM --headless ${flags[@]+"${flags[@]}"} \
         ${args[@]+"${args[@]}"} < /dev/null 2>&1 | tr -d '\r' | tee "$log"
 }
+
+# examples/cube (GFX-1's part 6, step 2): a lit cube in a window, its last frame read back after CUBE_FRAMES frames and,
+# on a leg naming a software GPU, held to its golden, examples/cube/goldens/<gpu>.png. It names its GPU as the tests do.
+CUBE_FRAMES=60
+
+buildCube() {
+    local mode="$1" flag=""
+    [ "$mode" = release ] && flag="--release"
+    if ! "$KAMA" build examples/cube/kama.json $flag -o "tests/out/cube-native-$mode/cube$EXE" > "tests/out/build-cube-$mode.log" 2>&1; then
+        tail -20 "tests/out/build-cube-$mode.log"
+        return 1
+    fi
+}
+
+buildCubeWeb() {
+    local mode="$1" flag=""
+    [ "$mode" = release ] && flag="--release"
+    if ! "$KAMA" build examples/cube/kama.json $flag --target WASM -o "tests/out/cube-web-$mode/cube.html" \
+            > "tests/out/build-cube-web-$mode.log" 2>&1; then
+        tail -20 "tests/out/build-cube-web-$mode.log"
+        return 1
+    fi
+}
+
+runCube() {
+    local mode="$1" gpu="$2" log="$3" args=(--frames "$CUBE_FRAMES")
+    [ -n "$gpu" ] && args+=(--golden "$gpu")
+    "tests/out/cube-native-$mode/cube$EXE" "${args[@]}" < /dev/null 2>&1 | tr -d '\r' | tee "$log"
+}
+
+runCubeKama() {
+    local browser="$1" gpu="$2" log="$3" mode="${4:-debug}" args=(-- --frames "$CUBE_FRAMES") flags=() f build=""
+    while IFS= read -r f; do [ -n "$f" ] && flags+=("$f"); done < <(browserFlags "$browser")
+    [ -n "$gpu" ] && args+=(--golden "$gpu")
+    [ "$mode" = release ] && build="--release"
+    KAMA_BROWSER="$browser" bounded "$KAMA" run examples/cube/kama.json $build --target WASM --headless \
+        ${flags[@]+"${flags[@]}"} "${args[@]}" < /dev/null 2>&1 | tr -d '\r' | tee "$log"
+}

@@ -1,0 +1,154 @@
+// The cube's own check, as `@kama/gpu`'s triangle carries its own: what `--frames N` holds the window's last frame to.
+//
+// Under `--golden <gpu>` the run names the software GPU it draws on: `warp` natively on Windows and in Firefox,
+// `swiftshader` in Chromium. The renderer is asked for the fallback adapter, and held to what it says it draws with
+// (`renderer.adapterInfo()`): its kind is CPU, and its architecture says SwiftShader exactly where the run names it, as
+// the library's tests hold their own adapter (tests/src/open.kama). So WARP's frame is never held to SwiftShader's
+// golden, nor printed as it. Then the frame is held byte for byte to `goldens/<gpu>.png`, read through std::asset. A
+// frame that differs, or has no golden yet, is printed as one line, `golden-png cube <gpu> <base64>`, the frame as a
+// PNG at @kama/image's archival(), which tools/update-goldens.sh writes into `goldens/`, run on purpose.
+//
+// A run that names no software GPU, on a player's hardware, holds the frame to being drawn: the window's size, and the
+// cube at its centre, which the corner's background is not. Held to the golden perceptually is FLIP's (GFX-1's part 6,
+// step 3).
+
+import {
+    core::println,
+    std::collections::DynamicArray, std::collections::FixedArray,
+    std::encoding::base64::encode as base64Encode,
+    std::io::IoError,
+    std::asset::read as readAsset,
+    gpu::AdapterInfo, gpu::AdapterKind,
+    image::Image, image::ImageError, image::PixelFormat, image::AlphaMode, image::ColorSpace, image::DecodeOptions,
+    image::png::decode as pngDecode, image::png::encode as pngEncode, image::png::EncodeOptions,
+};
+export { knownGpu, adapterSays, adapterIsNamed, heldToGolden, drawnHere };
+
+// The software GPUs a run can name.
+fn bool knownGpu(const ref string gpu) { return gpu == "warp" || gpu == "swiftshader"; }
+
+fn string kindName(AdapterKind k) {
+    return match (k) {
+        case DiscreteGPU: "DiscreteGPU";
+        case IntegratedGPU: "IntegratedGPU";
+        case CPU: "CPU";
+        case Unknown: "Unknown";
+    };
+}
+
+// What an adapter says it is, in words.
+fn string adapterSays(const ref AdapterInfo info) {
+    string kind = kindName(k: info.kind());
+    string vendor = info.vendor();
+    string architecture = info.architecture();
+    string device = info.device();
+    return "kind " + kind + ", vendor '" + vendor + "', architecture '" + architecture + "', device '" + device + "'";
+}
+
+// "" when the adapter is the software GPU `gpu` names: the fallback one, its kind CPU, and SwiftShader exactly where the
+// run names it.
+fn string adapterIsNamed(const ref AdapterInfo info, const ref string gpu) {
+    bool cpu = match (info.kind()) { case CPU: true; case _: false; };
+    bool namesSwiftShader = info.architecture().equalsIgnoringAsciiCase(other: "swiftshader");
+    bool wantsSwiftShader = gpu == "swiftshader";
+    if (cpu && namesSwiftShader == wantsSwiftShader) { return ""; }
+    return "the run names " + gpu + ", and the adapter says " + adapterSays(info: info);
+}
+
+// The frame as a PNG at archival(): its RGBA8 rows, top first, alpha kept as it is, as the library's tests write theirs.
+fn Result<DynamicArray<uint8>, ImageError> framePng(const ref Image frame) {
+    FixedArray<uint8> samples = FixedArray.make(size: frame.width() * frame.height() * 4);
+    borrow frame.samples8() as px { for (isize i = 0; i < px.length(); i = i + 1) { samples[i] = px[i]; } }
+    Result<Image, ImageError> made = Image.fromSamples8(width: frame.width(), height: frame.height(),
+                                                         format: PixelFormat::Rgba8Unorm, alpha: AlphaMode::Straight,
+                                                         colorSpace: ColorSpace.srgb(), samples: give samples);
+    return match (give made) {
+        case Ok(value: img): pngEncode(image: img, options: EncodeOptions.archival());
+        case Err(error: e): Result::Err(error: e);
+    };
+}
+
+// How the golden differs from the frame: "" when it does not.
+fn string differs(const ref Image golden, const ref Image frame) {
+    isize gw = golden.width();
+    isize gh = golden.height();
+    isize fw = frame.width();
+    isize fh = frame.height();
+    if (gw != fw || gh != fh) { return "the golden is ${gw}x${gh}, the frame ${fw}x${fh}"; }
+    bool rgba8 = match (golden.format()) { case Rgba8Unorm: true; case _: false; };
+    if (!rgba8) { return "the golden is not RGBA8"; }
+    isize count = 0;
+    isize first = -1;
+    borrow golden.samples8() as want {
+        borrow frame.samples8() as got {
+            if (want.length() != got.length()) {
+                isize wl = want.length();
+                isize gl = got.length();
+                return "the golden holds ${wl} bytes, the frame ${gl}";
+            }
+            for (isize t = 0; t < fw * fh; t = t + 1) {
+                isize at = t * 4;
+                bool same = got[at] == want[at] && got[at + 1] == want[at + 1] && got[at + 2] == want[at + 2]
+                    && got[at + 3] == want[at + 3];
+                if (!same) {
+                    if (first < 0) { first = t; }
+                    count = count + 1;
+                }
+            }
+            if (count == 0) { return ""; }
+            isize x = first % fw;
+            isize y = first / fw;
+            isize at = first * 4;
+            uint8 r = got[at];
+            uint8 g = got[at + 1];
+            uint8 b = got[at + 2];
+            uint8 wr = want[at];
+            uint8 wg = want[at + 1];
+            uint8 wb = want[at + 2];
+            return "${count} of its texels differ from the golden's, the first at (${x}, ${y}): ${r} ${g} ${b}, the golden ${wr} ${wg} ${wb}";
+        }
+    }
+}
+
+// The frame held to `goldens/<gpu>.png`: "" when it is the golden's bytes. Otherwise the frame is printed as its line,
+// for tools/update-goldens.sh, and the words say why.
+unsafe fn string heldToGolden(const ref Image frame, const ref string gpu) {
+    Result<DynamicArray<uint8>, IoError> golden = readAsset(name: gpu + ".png");
+    string why = match (golden) {
+        case Ok(value: bytes): {
+            Result<Image, ImageError> decoded = pngDecode(bytes: bytes.view(), options: DecodeOptions.defaults());
+            := match (decoded) {
+                case Ok(value: img): differs(golden: img, frame: frame);
+                case Err(error: e): "the golden is not a PNG this check reads: " + e.message();
+            };
+        }
+        case Err(error: e): "no golden yet: " + e.message();
+    };
+    if (why.isEmpty()) { return ""; }
+    Result<DynamicArray<uint8>, ImageError> png = framePng(frame: frame);
+    match (give png) {
+        case Ok(value: file): { println(s: "golden-png cube " + gpu + " " + base64Encode(bytes: file.view())); }
+        case Err(error: e): { return why + "; and the frame could not be encoded as a PNG: " + e.message(); }
+    };
+    return why;
+}
+
+// On a run that names no software GPU: "" when the frame is `width` × `height` and the cube is drawn at its centre,
+// whose texel differs from the corner's background.
+fn string drawnHere(const ref Image frame, int32 width, int32 height) {
+    isize fw = frame.width();
+    isize fh = frame.height();
+    if (fw != cast<isize>(width) || fh != cast<isize>(height)) {
+        return "the frame is ${fw}x${fh}, the window ${width}x${height}";
+    }
+    borrow frame.samples8() as px {
+        isize middle = ((fh / 2) * fw + fw / 2) * 4;
+        isize corner = 0;
+        bool same = px[middle] == px[corner] && px[middle + 1] == px[corner + 1] && px[middle + 2] == px[corner + 2];
+        if (!same) { return ""; }
+        uint8 r = px[middle];
+        uint8 g = px[middle + 1];
+        uint8 b = px[middle + 2];
+        return "the centre is the corner's colour, ${r} ${g} ${b}: no cube was drawn";
+    }
+}

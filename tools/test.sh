@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# tools/test.sh — @kama/graphics' gate: the roadmap and the feature map held to their rules, the library and its tests
-# checked, and the tests program run natively, debug and release, and built for the web, debug and release, and run in
-# every headless browser present, every frame held to its software GPU's golden where the leg names one (tools/legs.sh).
+# tools/test.sh — @kama/graphics' gate: the roadmap and the feature map held to their rules, the library, its tests and
+# examples/cube checked, and the tests program and the cube run natively, debug and release, and built for the web, debug
+# and release, and run in every headless browser present, every frame held to its software GPU's golden where the leg
+# names one (tools/legs.sh). The cube's is its window's last frame, read back from the window.
 #
 #   tools/test.sh
 #
@@ -10,7 +11,8 @@
 # tools/browsers.mjs finds: Edge and Chrome as installed, the pinned Firefox and the pinned Chrome for Testing
 # (KAMA_BROWSER names one). Each part is skipped, and says so, without what it needs.
 #
-# The goldens (tests/goldens/<test>/<gpu>.png) are never written here. A frame that differs from its golden, or has none,
+# The goldens (tests/goldens/<test>/<gpu>.png, and the cube's examples/cube/goldens/<gpu>.png) are never written here. A
+# frame that differs from its golden, or has none,
 # fails its leg and is printed as a `golden-png` line; tools/update-goldens.sh, run on purpose, writes those, and the
 # change is reviewed in its diff.
 set -euo pipefail
@@ -92,6 +94,30 @@ builtAs() {
     fi
 }
 
+# examples/cube's run (GFX-1's part 6, step 2; tools/legs.sh): CUBE_FRAMES frames drawn into its window with no misuse,
+# and its last frame read back from the window and held. On a leg naming a software GPU that frame is the golden's bytes,
+# examples/cube/goldens/<gpu>.png, and no frame is printed; on a leg naming none, the frame reads back as drawn.
+cubeHeld() {
+    local log="$1" gpu="$2" leg="$3" said
+    said="$(grep -E '^FAIL|^cube: ' "$log" | grep -v "^cube: $CUBE_FRAMES frames drawn, 0 misuses reported$" | cut -c1-200 | head -3 || true)"
+    if ! grep -qx "cube: $CUBE_FRAMES frames drawn, 0 misuses reported" "$log"; then
+        echo "FAIL examples/cube ($leg) did not draw $CUBE_FRAMES frames with no misuse reported: ${said:-it said nothing}"
+        failed=1
+    elif [ -n "$gpu" ]; then
+        if grep -q "^ok   golden cube on $gpu: " "$log" && ! grep -q '^golden-png ' "$log"; then
+            echo "ok   examples/cube's last frame, read back from its window, is its $gpu golden ($leg)"
+        else
+            echo "FAIL examples/cube ($leg) --golden $gpu: its last frame is not its golden: ${said:-it said nothing}"
+            failed=1
+        fi
+    elif grep -qx "cube: the window's last frame reads back as drawn" "$log"; then
+        echo "ok   examples/cube's last frame, read back from its window, is as drawn ($leg)"
+    else
+        echo "FAIL examples/cube ($leg) did not read its last frame back as drawn: ${said:-it said nothing}"
+        failed=1
+    fi
+}
+
 step "the roadmap"
 tools/check-roadmap.sh || failed=1
 
@@ -138,6 +164,8 @@ step "kama check"
 "$KAMA" check kama.json || failed=1
 "$KAMA" pkg install tests/kama.json > /dev/null
 "$KAMA" check tests/kama.json || failed=1
+"$KAMA" pkg install examples/cube/kama.json > /dev/null
+"$KAMA" check examples/cube/kama.json || failed=1
 
 gpu="$(nativeGolden)"
 for mode in debug release; do
@@ -192,23 +220,84 @@ else
     failed=1
 fi
 
+step "examples/cube natively: a lit cube in a window, its last frame read back, on the GPU${gpu:+ and on $gpu}"
+# GFX-1's done (ROADMAP_DETAIL § GFX-1): the example draws from one source on both legs, reaches the GPU only through
+# the library, releases nothing by hand, and its golden passes on each software GPU's leg.
+if ! ls examples/cube/src/*.kama > /dev/null 2>&1; then
+    echo "FAIL examples/cube has no source"; failed=1
+elif grep -nE '\.raw\(|adopt\(|wgpu[A-Z]|extern fn' examples/cube/src/*.kama; then
+    echo "FAIL examples/cube releases or binds by hand (above)"; failed=1
+else
+    echo "ok   examples/cube releases nothing by hand"
+fi
+if [ -n "${KAMA_WINDOW_NO_DISPLAY:-}" ]; then
+    echo "skip KAMA_WINDOW_NO_DISPLAY is set"
+else
+    for mode in debug release; do
+        if buildCube "$mode"; then
+            echo "-- examples/cube, native, $mode, on the GPU"
+            runCube "$mode" "" "tests/out/run-cube-$mode.log" || failed=1
+            cubeHeld "tests/out/run-cube-$mode.log" "" "native on the GPU, $mode"
+            builtAs "tests/out/run-cube-$mode.log" "$mode" "examples/cube, native on the GPU, $mode"
+            if [ -n "$gpu" ]; then
+                echo "-- examples/cube, native, $mode, --golden $gpu"
+                runCube "$mode" "$gpu" "tests/out/run-cube-$gpu-$mode.log" || failed=1
+                cubeHeld "tests/out/run-cube-$gpu-$mode.log" "$gpu" "native, $mode"
+                builtAs "tests/out/run-cube-$gpu-$mode.log" "$mode" "examples/cube, native, $mode, --golden $gpu"
+            fi
+        else
+            failed=1
+        fi
+    done
+    # Natively on Windows the fallback adapter is WARP, so the cube naming SwiftShader must fail on what its renderer
+    # says it draws with (renderer.adapterInfo()), and neither hold WARP's frame to SwiftShader's golden nor print it.
+    if [ "$(nativeGolden)" = warp ] && [ -x "tests/out/cube-native-debug/cube$EXE" ]; then
+        runCube debug swiftshader tests/out/cube-wrong-gpu.log > /dev/null && code=0 || code=$?
+        if [ "$code" != 0 ] \
+                && grep -q '^FAIL golden cube on swiftshader: the run names swiftshader, and the adapter says kind CPU' tests/out/cube-wrong-gpu.log \
+                && ! grep -q '^golden-png ' tests/out/cube-wrong-gpu.log && ! grep -q '^ok   golden cube' tests/out/cube-wrong-gpu.log; then
+            echo "ok   examples/cube --golden swiftshader on WARP fails on its adapter, and compares and prints no frame"
+        else
+            grep -E '^FAIL|^golden-png|^ok   golden|^cube: ' tests/out/cube-wrong-gpu.log | cut -c1-160
+            echo "FAIL examples/cube --golden swiftshader on WARP: the run's status is $code, or it compared or printed a frame"
+            failed=1
+        fi
+    fi
+    # The comparison itself: a run whose last frame is another, the cube a degree short of the golden's, must fail it,
+    # saying how its texels differ, and print the frame, so a comparison that passed every frame would fail here.
+    if [ -n "$gpu" ] && [ -x "tests/out/cube-native-debug/cube$EXE" ]; then
+        "tests/out/cube-native-debug/cube$EXE" --frames $((CUBE_FRAMES - 1)) --golden "$gpu" < /dev/null 2>&1 | tr -d '\r' \
+            > tests/out/cube-other-frame.log && code=0 || code=$?
+        if [ "$code" != 0 ] && grep -q "^FAIL golden cube on $gpu: [0-9]* of its texels differ from the golden's" tests/out/cube-other-frame.log \
+                && grep -q "^golden-png cube $gpu " tests/out/cube-other-frame.log; then
+            echo "ok   examples/cube a frame short of its $gpu golden fails it, saying how its texels differ, and prints the frame"
+        else
+            grep -E '^FAIL|^ok   golden|^cube: ' tests/out/cube-other-frame.log | cut -c1-160
+            echo "FAIL examples/cube a frame short of its $gpu golden: the run's status is $code, or it did not fail by its texels and print the frame"
+            failed=1
+        fi
+    fi
+fi
+
 step "the web leg: built debug and release, and run in every headless browser present"
 if ! command -v emcc >/dev/null 2>&1; then
     echo "skip no emcc on PATH (run from an interactive UCRT64 shell, bash -lic)"
-elif ! buildWeb debug || ! buildWeb release; then
+elif ! buildWeb debug || ! buildWeb release || ! buildCubeWeb debug || ! buildCubeWeb release; then
     failed=1
 elif ! command -v node >/dev/null 2>&1; then
-    echo "ok   built tests/out/web-debug/graphicstests.html and tests/out/web-release/graphicstests.html"
+    echo "ok   built the tests and examples/cube for the web, debug and release"
     echo "skip no node on PATH, so no browser run"
 else
     # A release build's JS that still names emscripten's `UTF8ToString` was never run through Closure: a root manifest's
     # `"release": { "closure": false }` would do that, and the release legs would test nothing of what a game ships.
-    if grep -q 'UTF8ToString' tests/out/web-release/graphicstests.js; then
-        echo "FAIL tests/out/web-release/graphicstests.js still names UTF8ToString, so Closure never ran over it"
-        failed=1
-    else
-        echo "ok   Closure ran over tests/out/web-release/graphicstests.js"
-    fi
+    for js in tests/out/web-release/graphicstests.js tests/out/cube-web-release/cube.js; do
+        if grep -q 'UTF8ToString' "$js"; then
+            echo "FAIL $js still names UTF8ToString, so Closure never ran over it"
+            failed=1
+        else
+            echo "ok   Closure ran over $js"
+        fi
+    done
     if browsers="$(node tools/browsers.mjs run 2>/dev/null)"; then
         n=0
         cft=0
@@ -224,6 +313,10 @@ else
                 goldensHeld "tests/out/run-web-$n-$mode.log" "$gpu" "$name, $mode"
                 refusalsPrinted "tests/out/run-web-$n-$mode.log" "$name, $mode"
                 builtAs "tests/out/run-web-$n-$mode.log" "$mode" "kama run, $name, $mode"
+                echo "-- kama run, $browser, $mode: examples/cube on #canvas for $CUBE_FRAMES frames${gpu:+, --golden $gpu}"
+                runCubeKama "$browser" "$gpu" "tests/out/run-cube-web-$n-$mode.log" "$mode" || failed=1
+                cubeHeld "tests/out/run-cube-web-$n-$mode.log" "$gpu" "$name, $mode"
+                builtAs "tests/out/run-cube-web-$n-$mode.log" "$mode" "examples/cube, kama run, $name, $mode"
             done
             # The pinned Chrome for Testing is the web's SwiftShader leg (decided with the owner on 2026-11-14): one that
             # ran naming no software GPU passed on its hardware, comparing nothing.

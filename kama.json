@@ -10,7 +10,7 @@
   "publish": {
     "exclude": [
       ".claude/", "AGENTS.md", "AGENTS.package.md", "AGENTS.graphics.md", "CLAUDE.md", "KAMA_GAPS.md", "tools/",
-      "third_party/", "tests/goldens/"
+      "third_party/", "tests/goldens/", "examples/cube/goldens/"
     ]
   },
   "modules": {

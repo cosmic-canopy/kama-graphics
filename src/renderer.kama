@@ -54,7 +54,7 @@ import {
     gpu::TextureDescriptor, gpu::TextureUsage, gpu::TextureBindingLayout, gpu::SamplerBindingLayout, gpu::Sampler,
     gpu::SamplerDescriptor, gpu::AddressMode, gpu::FilterMode, gpu::MipmapFilterMode, gpu::TexelCopyTextureInfo,
     gpu::TexelCopyBufferLayout, gpu::Extent3D, gpu::TextureDimension, gpu::TextureViewDimension, gpu::TextureSampleType,
-    gpu::Instance, gpu::AdapterOptions, gpu::AdapterRequest, gpu::AdapterStatus, gpu::DeviceOptions, gpu::DeviceRequest,
+    gpu::Instance, gpu::AdapterInfo, gpu::AdapterOptions, gpu::AdapterRequest, gpu::AdapterStatus, gpu::DeviceOptions, gpu::DeviceRequest,
     gpu::DeviceStatus, gpu::PowerPreference, gpu::Surface, gpu::SurfaceCapabilities, gpu::SurfaceConfig, gpu::SurfaceTexture,
     gpu::SurfaceError, gpu::ConfigureError, gpu::PresentMode, gpu::AlphaMode as SurfaceAlpha,
     window::Window, window::NativeWindow, window::Size,
@@ -1358,6 +1358,16 @@ type resource Renderer {
 
     // What the last render did.
     public const fn RenderInfo info() { return this.last; }
+
+    // Which GPU it draws with (kyoten's rendering.md § Decided, GFX-1's part 6, step 2's question): its device's adapter,
+    // `@kama/gpu`'s `Device.adapterInfo()`, WebGPU's `GPUDevice.adapterInfo`. None until its GPU has answered, so a
+    // renderer made with a window says it once a render has found its device, and one made `withDevice` at once.
+    public unsafe const fn Optional<AdapterInfo> adapterInfo() {
+        return match (this.gpu) {
+            case Some(value: g): Optional::Some(value: g.device.adapterInfo());
+            case None: Optional::None;
+        };
+    }
 
     // Whether each misuse the renderer refuses is also printed to stderr as it happens: true, as @kama/gpu's
     // `DeviceOptions.printErrors`, so a misuse nobody reads is never silent. A program that reads `takeErrors()` itself

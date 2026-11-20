@@ -592,9 +592,64 @@ natively. The library's own `examples/cube` is the same scene without an engine.
   failed; with the GPU but no window read, every mode offered and no follow, the reads, the size, the target
   comparison, the posted resize, both present-mode cases, the dropped renderer, a windowless renderer's modes and the
   camera's follow failed, and the goldens whose cameras now follow their targets. 446 cases natively, 447 in Firefox and in Chrome for Testing, 434 in Edge, each debug and release; the web legs read the page's canvas, and natively a mode the surface offers is taken. 23 of 27 mutations caught (kyoten's `.scratch/s40/kg/list1.py` and `list2.py`), two on the web, where the page's canvas holds the pass onto the window, left out or reading a row off. The first batch found a gap, closed before the second: no case made the window refuse twice, so a refusal reported every frame passed, until a case posted a window larger than the device allows; and one mutation was mis-aimed, leaving `compile`'s ask for the pass onto the window in, and caught once it took the ask out. The four left: every frame drawn through the read's texture, a cost alone, equivalent; a changed present mode not configured, which only frame pacing shows; an out-of-date surface not configured again, which nothing on these legs brings about, since `@kama/window` cannot resize the system window; and a frame not presented, which natively nothing reads, and on the web the browser presents anyway.
-- **Next, part 6's step 2:** `examples/cube`, a lit spinning cube in a window on both legs, its last frame read back by
-  `readWindowPixels()` and held to its golden on each software GPU's leg; then FLIP, the 150 KB measurement,
-  FEATURES.md's rows and the SPEC.
+- **Decided on 2026-11-19, part 6's step 2's question** (kyoten's `docs/design/rendering.md` § Decided), (A), the owner:
+  "A (Recommended)". **A renderer says which GPU it draws with,** `adapterInfo()`, an `Optional<AdapterInfo>`, `None`
+  until its GPU has answered, read from its device through `@kama/gpu`'s new `Device.adapterInfo()` (WebGPU's
+  `GPUDevice.adapterInfo`, its AGENTS.gpu.md item 17), so a renderer made `withDevice` answers too, as Bevy hands
+  `RenderAdapterInfo` over with a program's own device. Found while reading the code for the example: under `--golden`
+  it must hold its adapter to the GPU named, as the tests hold theirs, so WARP's frame is never written as SwiftShader's.
+- **Built, part 6's step 2, `examples/cube`** (2026-11-19, [SPEC.md](SPEC.md) § The renderer, § The example and §
+  Tests), on `@kama/gpu`'s `Device.adapterInfo()` (kama-gpu `7ff6ea6`):
+  - `adapterInfo()` on the renderer, and its four cases in the window run: none before the GPU answers, none when the
+    device was refused, the fallback adapter once a renderer on a golden leg draws, field by field the check's device's,
+    and a `withDevice` renderer's at once. **Red first** on a stub answering `None`: the two wanting an adapter failed;
+    the two wanting none are held by a mutation (below);
+  - **`examples/cube`,** a package of its own: a `MeshStandardMaterial` box under a sun and an ambient light, its camera
+    following a 640 x 400 window; `--frames N`, its compile awaited first, a degree a frame, the last frame read back
+    with `readWindowPixels()`; under `--golden <gpu>` the fallback adapter, its `adapterInfo()` held to the GPU named,
+    and the frame held byte for byte to `examples/cube/goldens/<gpu>.png`, printed as `golden-png cube <gpu>` when it
+    differs; on a player's GPU, the frame the window's size with the cube at its centre;
+  - **the gate** (`tools/test.sh`, `tools/legs.sh`): the example checked, built and run natively on the GPU and on WARP
+    and in each browser, debug and release, each run held to its last frame, its 60 frames with no misuse and its
+    build, and its release JS to Closure; natively, the cube naming SwiftShader on WARP fails on its adapter, printing
+    no frame, and a run a frame short fails its golden by its texels, printing the frame, which holds the comparison
+    itself. `tools/update-goldens.sh` collects the cube's frames among its own legs, holds them to the same agreement
+    and writes `examples/cube/goldens/<gpu>.png`, refusing everything when either set disagrees.
+
+  **Settled while building, and reported:**
+  - the cube's goldens live in `examples/cube/goldens/`, where GFX-1's question 4 had said `tests/goldens/<example>/`:
+    the example is a package of its own, reading them through `std::asset` as its own assets, and kama refuses an
+    `assets` folder outside the package ("escapes the project with `..`; a package's own files belong inside it",
+    kyoten's `.scratch/s41/probe-assets`). They are left out of the published package, as `tests/goldens/` is;
+  - **the frame is the window's in device pixels:** 640 x 400 on WARP, natively at this machine's scale of 1 (96 DPI)
+    and in Firefox, the same bytes on both, which `update-goldens.sh`'s agreement proved at the first writing; 960 x 600
+    on SwiftShader in Chrome for Testing at its `--scale 1.5`. A native leg on a display at another scale fails its golden,
+    saying both sizes;
+  - 60 frames, a degree a frame, as `@kama/gpu`'s triangle; the frames counted only once the compile asked at the start
+    is `Ready`, so a counted frame that misses fails the run;
+  - on a player's GPU the frame is held to being drawn alone, the window's size and the cube at its centre, until FLIP
+    (step 3) holds it to the golden perceptually;
+  - `goldens/README.md` says what the folder holds and keeps it from being empty: emscripten's file packager refuses an
+    empty assets folder ("Nothing to do!"), which would leave a first golden unwritable on the web legs.
+
+  **Measured on the way:** natively and in Firefox, WARP draws the window's frame to the same bytes, as it draws a
+  target's; Edge draws the cube on the AMD GPU at 640 x 400, read back as drawn.
+
+  450 cases natively, 451 in Firefox and in Chrome for Testing, 438 in Edge, each debug and release; the cube on every
+  leg in both builds, its golden matched on each software GPU's. **17 of 18 mutations caught** (kyoten's
+  `.scratch/s41/kg/list1.py` to `list3.py`), each by its own FAIL lines, held to the gate's own lines: natively, the
+  adapter guard dropped, SwiftShader's name not held, the fallback adapter not asked for, the comparison passing every
+  frame, a failed golden leaving the status 0, the read a frame early, the cube never turned, frames counted before the
+  compile, the native golden run and `legs.sh`'s `runCube` naming no GPU, the wrong-GPU run naming WARP and the
+  frame-short run drawing the golden's frame; `adapterInfo()` answering `None`, and the adapter's info kept once the
+  adapter answers, (B), which the refused device's case catches; in Firefox, `runCubeKama` naming no GPU, the release
+  leg's run in debug, and Closure turned off in the cube's manifest. **The one left, a hardware frame held to nothing,**
+  is not caught: no leg draws a blank frame on a player's GPU, and FLIP (step 3) holds that frame to the golden.
+  Planning them found a gap first: a comparison passing every frame passed every leg, since every frame matched, so
+  the gate runs the cube a frame short, which must fail.
+- **Next, part 6's step 3:** FLIP in the harness, ported from NVIDIA's FLIP v1.7, comparing a hardware leg's frame with
+  the leg's software golden, its two limits set from the cube on the reference machines present; then step 4, the 150
+  KB measurement, FEATURES.md's rows and the SPEC.
 - **Done:**
   - `examples/cube` draws from one source on both legs;
   - its golden passes on a software GPU on each leg CI has, and perceptually on the reference machines present;

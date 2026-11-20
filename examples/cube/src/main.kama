@@ -1,0 +1,353 @@
+// cube: a lit cube spun in a window, on @kama/graphics, natively and in a browser, from this one source. A
+// `MeshStandardMaterial` box under a sun and an ambient light, its camera naming no target, so it draws into the window
+// and follows the window's shape. Escape or the close button quits; the renderer configures its window again when the
+// window's size changes.
+//
+// `cube --frames N` draws N frames and exits, for a check that needs no hand on the keyboard, and opens without taking
+// the focus; on the web the page passes it (`cube.html?arg=--frames&arg=60`). The scene's pipelines are compiled before
+// the frames are counted, so each counted frame draws with no miss, and the cube turns a degree a frame, so the last
+// frame is the same on every run. That frame is read back from the window (`renderer.readWindowPixels()`) and held as
+// src/check.kama says: under `--golden <gpu>` to that software GPU's golden, byte for byte, its adapter held to the GPU
+// named; on a player's hardware, to being drawn. Its exit status is 1 when the frame was never read, or not as it
+// should be, or the renderer reported a misuse.
+//
+// It is a `std::app` `App`, a step a tick, as `@kama/gpu`'s examples are: on the web the browser answers the GPU's
+// requests and a read's map between ticks, and paces the frames. Every handle is one its drop releases, so nothing here
+// releases anything by hand.
+
+import {
+    core::println,
+    core::env::args, core::env::Args,
+    std::app::App, std::app::Lifecycle, std::app::run, std::app::Pace, std::app::quit,
+    std::fmt::ParseError, std::fmt::Parseable,
+    std::math::Vec3, std::math::radians,
+    std::memory::Owned,
+    std::time::Instant, std::time::monotonicNow,
+    gpu::AdapterInfo,
+    window::Window, window::WindowOptions, window::WindowError, window::Event, window::Key, window::Size,
+    image::Image,
+    graphics::Renderer, graphics::RendererOptions, graphics::RendererErrors, graphics::RenderInfo, graphics::Color,
+    graphics::Scene, graphics::Mesh, graphics::BoxGeometry, graphics::MeshStandardMaterial, graphics::DirectionalLight,
+    graphics::AmbientLight, graphics::PerspectiveCamera, graphics::Euler, graphics::EulerOrder,
+    graphics::CompileRequest, graphics::CompileStatus, graphics::PixelRead, graphics::PixelStatus,
+    knownGpu, adapterSays, adapterIsNamed, heldToGolden, drawnHere,
+};
+
+comptime int32 WIDE = 640;          // the window's logical size
+comptime int32 HIGH = 400;
+comptime int64 SETTLE_MS = 30000;   // the most a check waits on the GPU, its compile or the read
+
+// What follows `flag` in the program's arguments: "" when it is not given, `flag` itself when nothing follows it.
+unsafe fn string argumentAfter(const ref string flag) {
+    Args a = args();
+    int32 i = 0;
+    while (i < a.count()) {
+        Optional<string> one = a.get(at: i);
+        bool found = match (one) { case Some(value: s): s == flag; case None: false; };
+        if (found) {
+            Optional<string> next = a.get(at: i + 1);
+            return match (give next) { case Some(value: s): give s; case None: copy flag; };
+        }
+        i = i + 1;
+    }
+    return "";
+}
+
+// `--frames N`, or 0 for no limit.
+unsafe fn int32 frameLimit() {
+    string given = argumentAfter(flag: "--frames");
+    if (given.isEmpty()) { return 0; }
+    Result<int32, ParseError> n = Parseable::<int32>.parse(text: given);
+    return match (n) { case Ok(value: k): k > 0 ? k : 0; case Err(error: e): 0; };
+}
+
+// The status `main` returns natively; on the web `run` never returns, so the program ends with `quit`.
+static int32 exitStatus = 1;
+
+@compileFor(ARCH_WASM32)
+fn void endOnTheWeb(int32 status) { quit(code: cast<uint8>(status)); }
+@compileFor(!ARCH_WASM32)
+fn void endOnTheWeb(int32 status) { }
+
+// The scene: a box under a sun and a cool ambient light, seen from above and in front.
+type resource Stage {
+    Shared<Scene> scene;
+    Shared<Mesh> cube;
+    Shared<PerspectiveCamera> camera;
+
+    public unsafe ctor make() {
+        Shared<Scene> s = new Scene.make();
+        Shared<BoxGeometry> box = new BoxGeometry.make(width: 1.0, height: 1.0, depth: 1.0);
+        Shared<MeshStandardMaterial> look = new MeshStandardMaterial.make();
+        look.colorMut() = Color.fromHex(hex: 0xd0703a);
+        look.roughnessMut() = 0.45;
+        Shared<Mesh> m = new Mesh.make(geometry: box, material: look);
+        s.add(object: m);
+        Shared<DirectionalLight> sun = new DirectionalLight.make();
+        sun.positionMut() = Vec3.of(x: 2.0, y: 3.0, z: 2.5);
+        sun.intensityMut() = 2.5;
+        s.add(object: sun);
+        Shared<AmbientLight> sky = new AmbientLight.make();
+        sky.colorMut() = Color.fromHex(hex: 0x8090b0);
+        sky.intensityMut() = 0.5;
+        s.add(object: sky);
+        Shared<PerspectiveCamera> cam = new PerspectiveCamera.make(fovRad: radians(deg: 45.0), near: 0.1, far: 100.0);
+        cam.positionMut() = Vec3.of(x: 0.0, y: 1.1, z: 2.6);
+        cam.lookAt(target: Vec3.zero());
+        this.scene = give s;
+        this.cube = give m;
+        this.camera = give cam;
+    }
+
+    // The cube turned `degrees` about the vertical, tipped towards the camera so three faces show.
+    public unsafe fn void turn(int32 degrees) {
+        this.cube.rotationMut() = Euler.fromDegrees(x: 20.0, y: cast<float32>(degrees % 360), z: 0.0, order: EulerOrder::YXZ);
+    }
+
+    public fn Shared<Scene> sceneOf() { return copy this.scene; }
+    public fn Shared<PerspectiveCamera> cameraOf() { return copy this.camera; }
+}
+
+type resource Cube implements App {
+    int32 limit = 0;
+    string gpu = "";
+    int32 stage = 0;   // 0 opening, 1 compiling, 2 frames, 3 reading, 4 the totals, 5 done
+    Instant began = monotonicNow();
+    Optional<Window> window = Optional::None;
+    Optional<Renderer> renderer = Optional::None;
+    Optional<Stage> scene = Optional::None;
+    Optional<CompileRequest> compiling = Optional::None;
+    Optional<PixelRead> reading = Optional::None;
+    bool adapterHeld = false;   // under `--golden`: the adapter was held to the GPU named
+    bool wrong = false;         // under `--frames N`: something was not as it should be
+    int32 frames = 0;           // frames drawn since the compile was ready
+    int32 blank = 0;            // renders before then
+
+    public unsafe ctor make() {
+        this.limit = frameLimit();
+        string named = argumentAfter(flag: "--golden");
+        if (!named.isEmpty() && !knownGpu(gpu: named)) {
+            println(s: "FAIL --golden names a software GPU this example knows (warp, swiftshader): it names '" + named + "'");
+            this.wrong = true;
+            this.stage = 4;
+            return give this;
+        }
+        this.gpu = give named;
+    }
+
+    public fn void lifecycle(Lifecycle event) { }
+
+    public unsafe fn bool tick() {
+        if (this.stage == 0) { this.open(); }
+        else if (this.stage == 1) { this.awaitCompile(); }
+        else if (this.stage == 2) { this.frame(); }
+        else if (this.stage == 3) { this.awaitRead(); }
+        if (this.stage == 4) { this.totals(); }
+        if (this.stage >= 5) { endOnTheWeb(status: exitStatus); return false; }
+        return true;
+    }
+
+    unsafe fn void fail(const ref string words) { println(s: "cube: " + words); this.wrong = true; this.stage = 4; }
+    unsafe fn bool late() { return this.began.elapsed().asMillis() >= SETTLE_MS; }
+
+    // The window, opened unfocused under `--frames N`, the renderer on it, the scene, and its compile asked.
+    unsafe fn void open() {
+        WindowOptions options = WindowOptions.make();
+        options.focused = this.limit == 0;
+        Result<Window, WindowError> opened = Window.openIn(canvas: "#canvas", title: "@kama/graphics cube", width: WIDE,
+                                                           height: HIGH, options: options);
+        Window w = match (give opened) {
+            case Ok(value: x): give x;
+            case Err(error: e): { string why = e.message(); this.fail(words: "no window: " + why); return; }
+        };
+        RendererOptions asked = RendererOptions.defaults();
+        asked.forceFallbackAdapter = !this.gpu.isEmpty();   // a run naming a software GPU draws on it
+        Renderer r = Renderer.make(window: w, options: asked);
+        r.clearColorMut() = Color.fromHex(hex: 0x1c2430);
+        Stage st = Stage.make();
+        st.turn(degrees: 0);
+        this.compiling = Optional::Some(value: r.compile(scene: st.sceneOf(), camera: st.cameraOf()));
+        this.scene = Optional::Some(value: give st);
+        this.renderer = Optional::Some(value: give r);
+        this.window = Optional::Some(value: give w);
+        this.began = monotonicNow();
+        this.stage = 1;
+    }
+
+    // The window's events since the last tick: false when it is closing.
+    unsafe fn bool pumped() {
+        bool running = true;
+        match (this.window) {
+            case Some(value: w): {
+                w.pump();
+                bool polling = true;
+                while (polling) {
+                    Optional<Event> next = w.pollEvent();
+                    match (next) {
+                        case None: { polling = false; }
+                        case Some(value: e): {
+                            match (e) {
+                                case CloseRequested: { running = false; }
+                                case KeyDown(key: k, mods: m, repeat: rep): { if (k == Key::Escape) { running = false; } }
+                                case _: { }
+                            };
+                        }
+                    };
+                }
+            }
+            case None: { }
+        };
+        return running;
+    }
+
+    // One render of the scene into the window, and what it did.
+    unsafe fn RenderInfo render() {
+        RenderInfo said = RenderInfo.of(calls: -1, triangles: -1, objects: -1, matrices: -1, misses: -1, skipped: -1,
+                                        general: -1, standIn: -1, waited: -1);
+        match (this.scene) {
+            case Some(value: st): {
+                match (this.renderer) {
+                    case Some(value: r): { r.render(scene: st.sceneOf(), camera: st.cameraOf()); said = r.info(); }
+                    case None: { }
+                };
+            }
+            case None: { }
+        };
+        return said;
+    }
+
+    // Under `--golden <gpu>`, once the renderer says which GPU it draws with: held to the GPU named, before any frame of
+    // it is held to a golden or printed as one.
+    unsafe fn void holdAdapter() {
+        if (this.gpu.isEmpty() || this.adapterHeld) { return; }
+        Optional<AdapterInfo> said = match (this.renderer) { case Some(value: r): r.adapterInfo(); case None: Optional::None; };
+        match (said) {
+            case Some(value: info): {
+                this.adapterHeld = true;
+                println(s: "info the adapter: " + adapterSays(info: info));
+                string why = adapterIsNamed(info: info, gpu: this.gpu);
+                if (!why.isEmpty()) { println(s: "FAIL golden cube on " + this.gpu + ": " + why); this.wrong = true; this.stage = 4; }
+            }
+            case None: { }
+        };
+    }
+
+    // Renders until the compile asked at the start is ready: each before the GPU answers draws nothing.
+    unsafe fn void awaitCompile() {
+        if (!this.pumped()) { this.stage = 4; return; }
+        RenderInfo got = this.render();
+        if (got.calls == 0) { this.blank = this.blank + 1; }
+        this.holdAdapter();
+        if (this.stage != 1) { return; }
+        CompileStatus cs = match (this.compiling) { case Some(value: c): c.poll(); case None: CompileStatus::Ready; };
+        if (cs == CompileStatus::Pending) {
+            if (this.limit > 0 && this.late()) { this.fail(words: "the scene's pipelines were still compiling after ${SETTLE_MS} ms"); }
+            return;
+        }
+        this.compiling = Optional::None;
+        int32 n = this.blank;
+        println(s: "info cube: compiled, after ${n} renders that drew nothing");
+        this.stage = 2;
+    }
+
+    // A frame: the cube turned a degree a frame; under `--frames N` the window read asked before the last one.
+    unsafe fn void frame() {
+        if (!this.pumped()) { this.stage = 4; return; }
+        bool last = this.limit > 0 && this.frames + 1 >= this.limit;
+        match (this.scene) { case Some(value: st): { st.turn(degrees: this.frames); } case None: { } };
+        if (last) {
+            match (this.renderer) { case Some(value: r): { this.reading = Optional::Some(value: r.readWindowPixels()); } case None: { } };
+        }
+        RenderInfo got = this.render();
+        if (this.limit > 0 && (got.calls == 0 || got.misses != 0)) {
+            int32 n = this.frames;
+            this.fail(words: "frame ${n} drew ${got.calls} calls with ${got.misses} misses, where every counted frame draws with none");
+            return;
+        }
+        this.frames = this.frames + 1;
+        if (last) { this.began = monotonicNow(); this.stage = 3; }
+    }
+
+    // The last frame's read, held as src/check.kama says.
+    unsafe fn void awaitRead() {
+        if (!this.pumped()) { this.stage = 4; return; }
+        PixelStatus s = match (this.reading) {
+            case Some(value: r): r.poll();
+            case None: PixelStatus::Pending;
+        };
+        bool pending = match (s) { case Pending: true; case _: false; };
+        if (pending) {
+            if (this.late()) { this.fail(words: "the last frame's read was still pending after ${SETTLE_MS} ms"); }
+            return;
+        }
+        this.reading = Optional::None;
+        match (give s) {
+            case Ready(image: img): { this.hold(frame: img); }
+            case Failed(error: e): { string why = e.message(); this.fail(words: "the last frame's read failed: " + why); return; }
+            case Pending: { }
+        };
+        this.stage = 4;
+    }
+
+    unsafe fn void hold(const ref Image frame) {
+        isize fw = frame.width();
+        isize fh = frame.height();
+        float32 sc = match (this.window) { case Some(value: w): w.scale(); case None: 0.0; };
+        println(s: "info cube: the last frame is ${fw}x${fh}, at a scale of ${sc}");
+        if (!this.gpu.isEmpty()) {
+            string why = heldToGolden(frame: frame, gpu: this.gpu);
+            if (why.isEmpty()) {
+                println(s: "ok   golden cube on " + this.gpu + ": the window's last frame is its golden's bytes");
+            } else {
+                println(s: "FAIL golden cube on " + this.gpu + ": " + why);
+                this.wrong = true;
+            }
+            return;
+        }
+        Size px = match (this.window) { case Some(value: w): w.framebufferSize(); case None: Size.of(width: 0, height: 0); };
+        string why = drawnHere(frame: frame, width: px.width, height: px.height);
+        if (why.isEmpty()) { println(s: "cube: the window's last frame reads back as drawn"); }
+        else { println(s: "cube: the window's last frame does not read back as drawn: " + why); this.wrong = true; }
+    }
+
+    // What the run came to.
+    unsafe fn void totals() {
+        int32 reported = 0;
+        string firstWords = "";
+        match (this.renderer) {
+            case Some(value: r): {
+                RendererErrors errs = r.takeErrors();
+                isize kept = errs.reports().length();
+                reported = cast<int32>(kept) + cast<int32>(errs.dropped());
+                if (kept > 0) { firstWords = errs.reports()[0].message(); }
+            }
+            case None: { }
+        };
+        int32 n = this.frames;
+        println(s: "cube: ${n} frames drawn, ${reported} misuses reported");
+        if (!firstWords.isEmpty()) { println(s: "cube: the first: " + firstWords); }
+        bool checked = this.limit == 0 || this.frames >= this.limit;
+        if (this.limit > 0 && !checked && !this.wrong) { println(s: "cube: the run ended before its last frame"); }
+        exitStatus = (reported > 0 || this.wrong || !checked) ? 1 : 0;
+        this.stage = 5;
+    }
+}
+
+// What this program was built as, its first line: the gate runs it in a debug and a release build, and holds each run
+// to the build it names.
+@compileFor(RELEASE)
+fn string buildKind() { return "release"; }
+@compileFor(DEBUG)
+fn string buildKind() { return "debug"; }
+
+unsafe fn void runCube() {
+    string built = buildKind();
+    println(s: "build: ${built}");
+    Owned<App> app = new Cube.make();
+    run(app: give app, pace: Pace::EveryRefresh);
+}
+
+fn uint8 main() {
+    runCube();
+    return cast<uint8>(exitStatus);
+}

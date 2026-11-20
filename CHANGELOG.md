@@ -196,3 +196,9 @@ package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   by the render that finds it. `GraphicsErrorKind::Device` and `Window`. **Changed:** `PerspectiveCamera.make(fovRad:,
   near:, far:)` and `withInfiniteFar(fovRad:, near:)` take no aspect: `aspect()` and `aspectMut()` are an
   `Optional<float32>`, `None` by default, when a render hands the camera what it draws into's.
+- GFX-1's part 6, step 2: `examples/cube`, a lit cube spun in a window, natively and in a browser from one source;
+  `--frames N` reads its last frame back from the window, and `--golden <gpu>` holds it to
+  `examples/cube/goldens/<gpu>.png` on that software GPU. `renderer.adapterInfo()`, an `Optional<AdapterInfo>` of the
+  GPU the renderer draws with, `None` until its GPU has answered, read from `@kama/gpu`'s `Device.adapterInfo()`, so it
+  needs `@kama/gpu` at `7ff6ea6` or later. The gate builds and runs the example on every leg, debug and release, and
+  `tools/update-goldens.sh` writes its goldens too.

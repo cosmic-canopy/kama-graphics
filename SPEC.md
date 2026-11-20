@@ -5,10 +5,11 @@ tested. What comes next is [ROADMAP.md](ROADMAP.md), every feature it will have 
 decided design and the library's departures from kama's are [AGENTS.graphics.md](AGENTS.graphics.md), and its history
 is the git log and [CHANGELOG.md](CHANGELOG.md).
 
-**Where it stands** (2026-11-19, kama 0.9.978): GFX-1's parts 1 to 5 and part 6's first step. A `Renderer` draws a scene
-of boxes through a perspective camera into a window or a render target, with reversed depth, and reads either back as
-an `@kama/image` `Image`, natively on Windows on wgpu-native v29.0.1.1 and on the web in headless Edge 157, Chrome for
-Testing 157 and Firefox 160.
+**Where it stands** (2026-11-19, kama 0.9.978): GFX-1's parts 1 to 5 and part 6's first two steps. A `Renderer` draws a
+scene of boxes through a perspective camera into a window or a render target, with reversed depth, and reads either back
+as an `@kama/image` `Image`, natively on Windows on wgpu-native v29.0.1.1 and on the web in headless Edge 157, Chrome for
+Testing 157 and Firefox 160. `examples/cube`, a lit cube spun in a window, draws from one source on both legs, its last
+frame held to its golden on each software GPU.
 A box is lit by directional and ambient lights through three.js r187's physical model (`MeshStandardMaterial`), or drawn
 unlit (`MeshBasicMaterial`). A material's shader is typed nodes compiled to WGSL at run time. A misuse the types cannot
 refuse is refused and reported, never ending the program. Every frame in the tests is held to its software GPU's golden.
@@ -79,6 +80,12 @@ a resource the program owns.
     request that fails is reported once, at a render (§ Misuse), and the renderer then draws nothing for good. Nothing
     else drives the request: `clear` does nothing before the GPU answers, a target's read fails, and a compile waits
     for the render that finds the GPU (below). `info()` shows when it has: a render's `calls`.
+- **`adapterInfo()` says which GPU it draws with** (kyoten's rendering.md § Decided, GFX-1's part 6, step 2's question):
+  an `Optional<AdapterInfo>`, `@kama/gpu`'s type (vendor, architecture, device, description, backend and kind), read
+  from its device's `adapterInfo()`. It is `None` until the renderer's GPU has answered: a renderer made with a window
+  says it once a render has found its device, and never when the device was refused; one made `withDevice` says its
+  device's at once. A program held to a software GPU, as `examples/cube` under `--golden` is, checks it before trusting
+  a frame, as Bevy's `RenderAdapterInfo` and Godot's `get_video_adapter_*` let a program.
 - **A camera naming no target draws into the window** (part 1's question 4; part 6, step 1). At each such render:
   - **the window's surface is configured** at the window's `framebufferSize()`, as of the program's last `pump()`, and
     the present mode in effect, and again whenever either differs from what it was configured with, or an acquire says
@@ -691,16 +698,46 @@ first, a BGRA frame's channels put in RGBA's order.
 - **A read fails, at its first poll, on a renderer with no window** ("the renderer has no window"), on one whose GPU
   never came, and on one dropped before it drew the read's frame, which fails the reads it holds as it is dropped.
 
+## The example, `examples/cube`
+
+A lit cube spun in a window, natively and in a browser, from one source (GFX-1's part 6, step 2), a package of its own
+naming `@kama/graphics` by path: a `MeshStandardMaterial` box under a `DirectionalLight` and an `AmbientLight`, its camera
+naming no target, so it draws into a 640 x 400 window and follows the window's shape. It is a `std::app` `App`, a step a
+tick; Escape or the close button quits. It reaches the GPU only through the library and releases nothing by hand.
+
+- **`cube --frames N`** draws N frames and exits, its window opened unfocused; on the web the page passes it. It asks
+  `compile(scene:, camera:)` first and counts frames only once that is `Ready`, so each counted frame draws with no miss,
+  and the cube turns a degree a frame, so the last frame is the same on every run. That frame is read back from the
+  window with `readWindowPixels()`. Its exit status is 1 when the frame was never read or was not as it should be, a
+  counted frame missed, or the renderer reported a misuse.
+- **`--golden <gpu>`** (`warp` or `swiftshader`) asks for the fallback adapter, holds the renderer's `adapterInfo()` to
+  the GPU named as the tests hold theirs (its kind CPU, and SwiftShader's architecture exactly where the run names it),
+  and holds the last frame byte for byte to `examples/cube/goldens/<gpu>.png`, read through `std::asset`. A frame that
+  differs, or has no golden yet, fails and is printed as `golden-png cube <gpu> <base64>`; one from another GPU is
+  neither compared nor printed. With no `--golden`, on a player's GPU, the frame must be the window's size with the cube
+  drawn at its centre; FLIP holds it to the golden perceptually (step 3, next).
+- **Its goldens** are the window's frames in device pixels: 640 x 400 on WARP, natively at a scale of 1 and in Firefox,
+  the same bytes on both, and 960 x 600 on SwiftShader in Chrome for Testing at its 1.5. A native leg on a display at
+  another scale fails its golden, saying both sizes. They are the example's own assets, since kama refuses an `assets`
+  folder outside a package. `goldens/README.md` keeps the folder from being empty, which emscripten's file packager
+  refuses. They are left out of the published package.
+
 ## Tests
 
 `tools/test.sh` is the gate:
 - `tools/check-roadmap.sh` and `tools/check-features.sh`;
 - `tools/goldens-agree.sh` on five crafted records;
-- `kama check` on the library and its tests;
+- `kama check` on the library, its tests and `examples/cube`;
 - then `tests/`, one program, built debug and release and run natively, and built for the web and run under `kama run`
-  in Edge, Firefox and the pinned Chrome for Testing, each started as `tools/browsers.mjs` says.
+  in Edge, Firefox and the pinned Chrome for Testing, each started as `tools/browsers.mjs` says;
+- and `examples/cube` for 60 frames, built debug and release: natively on the GPU and with the leg's `--golden`, and in
+  each browser beside the tests, with the leg's `--golden` where it names one. Each run is held to its last frame read
+  back, as its golden or as drawn, to 60 frames with no misuse reported, and to the build it says it is; its release
+  build's JS to Closure. Natively the cube naming SwiftShader on WARP fails on its adapter and compares and prints no
+  frame, and a run a frame short of its golden fails it by its texels and prints the frame, which holds the comparison
+  itself.
 
-It is 446 cases natively and 447 in Firefox and in Chrome for Testing, each leg that names a software GPU, and 434
+It is 450 cases natively and 451 in Firefox and in Chrome for Testing, each leg that names a software GPU, and 438
 in Edge, whose leg names none: a web leg reads the page's canvas and holds that it offers `Fifo` alone, where natively a
 mode the surface offers is taken. Natively the window run opens a system window, so it needs a display. Natively on Windows the
 legs run with `@kama/gpu`'s `dxcompiler.dll` on the PATH (`tools/legs.sh`), so Direct3D 12 compiles with DXC, as
@@ -716,7 +753,8 @@ Firefox's WebGPU does.
   - Every frame is held byte for byte to `tests/goldens/<test>/<gpu>.png`, read through `std::asset` and decoded with
     `@kama/image`. A frame that differs, or has none, fails and is printed as one line, `golden-png <test> <gpu>
     <base64>`, the frame as a PNG at `archival()`.
-  - `tools/update-goldens.sh`, run on purpose, writes those lines. It refuses when the legs of one GPU disagree.
+  - `tools/update-goldens.sh`, run on purpose, writes those lines, the tests' and `examples/cube`'s, each among its own
+    legs. It refuses, writing nothing, when the legs of one GPU disagree.
   - The gate holds every leg that names a GPU to declaring and matching every golden there is for it. It holds every
     leg, whether it names a GPU or not, to running its GPU cases to the end (`gpu cases: all run`).
   - A leg whose device never opens fails saying why, with its last lines, never a panic: the gate asks a browser that
@@ -990,12 +1028,13 @@ Firefox's WebGPU does.
   window opened unfocused, natively a system window and on the web the page's `#canvas`. Each renderer there requests
   its own GPU through `make(window:, options:)`, the fallback adapter on a leg that names a software GPU:
   - **a device refused:** a renderer whose device asks for a 2D texture limit past every adapter's reports it once, as
-    `Device`, and draws nothing, and a render after reports nothing more; a window read on it fails at once, and a
-    compile on it is `Ready`;
-  - **before the GPU answers:** the present mode is `Fifo`, the only one offered, and a compile is `Pending`; renders
-    draw nothing and report nothing (natively about a dozen), and one draws once the GPU has answered. The compile is
-    asked then and is `Ready` once its pipelines are, and the render after draws into the window with no miss, each box
-    twice;
+    `Device`, and draws nothing, and a render after reports nothing more, and it says no adapter; a window read on it
+    fails at once, and a compile on it is `Ready`;
+  - **before the GPU answers:** the present mode is `Fifo`, the only one offered, a compile is `Pending`, and it says no
+    adapter; renders draw nothing and report nothing (natively about a dozen), and one draws once the GPU has answered,
+    and the renderer then says its adapter: on a leg that names a software GPU the fallback one, field by field the
+    check's device's adapter. The compile is asked then and is `Ready` once its pipelines are, and the render after
+    draws into the window with no miss, each box twice;
   - **the window read:** a read is pending through a render into a window of no area (a posted `Resize` to 0 x 0),
     which draws nothing and reports nothing; two reads asked before one render each hand back that frame, the window's
     size in pixels; the frame reads as the same scene drawn into a target of its size, byte for byte, on every leg,
@@ -1011,7 +1050,8 @@ Firefox's WebGPU does.
     is reported once over two renders, as `Window`, each render drawing with `Fifo`, `presentMode()` saying what was
     set, and `Fifo` set again presents with no report; natively the first mode it does offer is taken with no report;
   - **the read's ends:** a renderer dropped before its next frame fails the read it holds; a renderer with no window
-    fails a window read at its first poll, and offers `Fifo` alone;
+    fails a window read at its first poll, and offers `Fifo` alone; one made `withDevice` says its device's adapter at
+    once, field by field;
   - **the camera's aspect:** 1 before a render; a 2:1 target's taken at a render; a fixed 0.75 kept through one, and
     read back; set back to `None`, the target's again.
 

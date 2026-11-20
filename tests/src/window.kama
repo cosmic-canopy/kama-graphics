@@ -27,7 +27,7 @@ import {
     std::math::Vec3, std::math::Mat4, std::math::abs, std::math::radians,
     std::time::Instant, std::time::monotonicNow,
     std::memory::replace,
-    gpu::Device, gpu::Queue, gpu::GpuError, gpu::PresentMode,
+    gpu::Device, gpu::Queue, gpu::GpuError, gpu::PresentMode, gpu::AdapterInfo, gpu::AdapterKind, gpu::Backend,
     window::Window, window::WindowOptions, window::WindowError, window::Event, window::Size,
     image::Image,
     graphics::Color, graphics::Renderer, graphics::RendererOptions, graphics::RenderInfo, graphics::RenderTarget,
@@ -41,6 +41,63 @@ export { WindowRun };
 comptime int64 SETTLE_MS = 20000;   // the most a step waits on the GPU
 comptime int32 WIN_WIDE = 160;      // the window's logical size
 comptime int32 WIN_HIGH = 96;
+
+fn string adapterKindName(AdapterKind k) {
+    return match (k) {
+        case DiscreteGPU: "DiscreteGPU";
+        case IntegratedGPU: "IntegratedGPU";
+        case CPU: "CPU";
+        case Unknown: "Unknown";
+    };
+}
+
+fn string backendName(Backend b) {
+    return match (b) {
+        case Undefined: "Undefined";
+        case Null: "Null";
+        case WebGPU: "WebGPU";
+        case D3D11: "D3D11";
+        case D3D12: "D3D12";
+        case Metal: "Metal";
+        case Vulkan: "Vulkan";
+        case OpenGL: "OpenGL";
+        case OpenGLES: "OpenGLES";
+    };
+}
+
+// Every field of an adapter's info, in words: two infos are the same exactly when their words are.
+fn string adapterWords(const ref AdapterInfo info) {
+    string kind = adapterKindName(k: info.kind());
+    string backend = backendName(b: info.backend());
+    string vendor = info.vendor();
+    string architecture = info.architecture();
+    string device = info.device();
+    string description = info.description();
+    uint32 vendorId = info.vendorId();
+    uint32 deviceId = info.deviceId();
+    return "kind " + kind + ", backend " + backend + ", vendor '" + vendor + "' (${vendorId}), architecture '"
+        + architecture + "', device '" + device + "' (${deviceId}), description '" + description + "'";
+}
+
+// "" when a renderer says no adapter yet.
+fn string saysNone(const ref Optional<AdapterInfo> said) {
+    return match (said) {
+        case Some(value: info): "it says " + adapterWords(info: info);
+        case None: "";
+    };
+}
+
+// "" when a renderer says the adapter `want` says, field by field.
+fn string saysAdapter(const ref Optional<AdapterInfo> said, const ref AdapterInfo want) {
+    string wanted = adapterWords(info: want);
+    return match (said) {
+        case Some(value: info): {
+            string got = adapterWords(info: info);
+            := got == wanted ? "" : "it says " + got + ", not " + wanted;
+        }
+        case None: "it says no adapter, not " + wanted;
+    };
+}
 
 // The image's texels as one byte array, RGBA.
 fn DynamicArray<uint8> texelsOf(const ref Image img) {
@@ -258,6 +315,13 @@ type resource WindowRun {
         return said;
     }
 
+    unsafe fn Optional<AdapterInfo> rendererAdapter() {
+        return match (this.renderer) {
+            case Some(value: r): r.adapterInfo();
+            case None: Optional::None;
+        };
+    }
+
     unsafe fn RendererErrors errors() {
         return match (this.renderer) {
             case Some(value: r): r.takeErrors();
@@ -331,6 +395,8 @@ type resource WindowRun {
         RendererErrors again = r.takeErrors();
         this.found.add(name: "window: ...and a render after reports nothing more and draws nothing",
                        why: noReports(errors: again) + drewNothing(got: r.info()));
+        this.found.add(name: "window: ...and it says no adapter, since its device never answered (adapterInfo() is None)",
+                       why: saysNone(said: r.adapterInfo()));
         PixelRead orphan = r.readWindowPixels();
         PixelStatus s = orphan.poll();
         string why = match (s) {
@@ -359,6 +425,8 @@ type resource WindowRun {
         if (r.supportsPresentMode(mode: PresentMode::Immediate)) { presentWhy = presentWhy + "Immediate is supported; "; }
         this.found.add(name: "window: before its first render a renderer presents with Fifo, and offers Fifo alone, its surface not yet read",
                        why: give presentWhy);
+        this.found.add(name: "window: before its GPU answers, a renderer made with a window says no adapter (adapterInfo() is None)",
+                       why: saysNone(said: r.adapterInfo()));
         CompileRequest c = r.compile(scene: copy this.scene, camera: copy this.camera);
         CompileStatus cs = c.poll();
         this.found.add(name: "window: a compile asked before the renderer's GPU answered is Pending",
@@ -384,6 +452,19 @@ type resource WindowRun {
         }
         this.found.add(name: "window: renders before the GPU answers draw nothing and report nothing, and one draws once it has",
                        why: copy this.blankWhy);
+        // The adapter it says: on a leg naming a software GPU the fallback one, which the check's device came from too.
+        Optional<AdapterInfo> adapterSaid = this.rendererAdapter();
+        string adapterWhy = "";
+        if (this.gpu.isEmpty()) {
+            adapterWhy = match (adapterSaid) { case Some(value: info): ""; case None: "it says no adapter"; };
+        } else {
+            AdapterInfo check = this.device.adapterInfo();
+            adapterWhy = saysAdapter(said: adapterSaid, want: check);
+            bool cpu = match (adapterSaid) { case Some(value: info): info.kind() == AdapterKind::CPU; case None: false; };
+            if (!cpu) { adapterWhy = adapterWhy + "; its kind is not CPU"; }
+        }
+        this.found.add(name: "window: once its GPU has answered, a renderer made with a window says its adapter, on a leg naming a software GPU the fallback one, the check's device's (adapterInfo())",
+                       why: give adapterWhy);
         println(s: "info window: ${this.blank} renders before the GPU answered");
         this.next(to: 4);
     }
@@ -646,6 +727,9 @@ type resource WindowRun {
         this.found.add(name: "window: a renderer dropped before its next frame fails the window read it holds", why: give why);
 
         Renderer plain = Renderer.withDevice(device: copy this.device, queue: copy this.queue);
+        AdapterInfo deviceSays = this.device.adapterInfo();
+        this.found.add(name: "window: a renderer made withDevice says its device's adapter at once, field by field (adapterInfo())",
+                       why: saysAdapter(said: plain.adapterInfo(), want: deviceSays));
         PixelRead nowhere = plain.readWindowPixels();
         PixelStatus n = nowhere.poll();
         string noWindow = match (n) {

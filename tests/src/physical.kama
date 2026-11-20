@@ -529,9 +529,7 @@ type resource PhysicalRun {
             Renderer r = gpuResolved(device: copy this.device, queue: copy this.queue);
             r.clearColorMut() = Color.fromHex(hex: BACKDROP);
             Shared<RenderTarget> t = new RenderTarget.make(width: WIDE, height: HIGH);
-            Shared<PerspectiveCamera> cam = new PerspectiveCamera.make(fovRad: radians(deg: 50.0),
-                                                                        aspect: cast<float32>(WIDE) / cast<float32>(HIGH),
-                                                                        near: 0.1, far: 100.0);
+            Shared<PerspectiveCamera> cam = new PerspectiveCamera.make(fovRad: radians(deg: 50.0), near: 0.1, far: 100.0);
             cam.toneMappingMut() = ToneMapping::None;
             // off the axis, looking down -Z, so its centre ray still meets the box's front face
             cam.positionMut() = Vec3.of(x: 0.3, y: 0.2, z: 4.0);
@@ -598,9 +596,7 @@ type resource PhysicalRun {
             // the lit box: a fresh camera at (0.35, 0.25, 4) on the scene's root, looking down -Z, so the ray through the
             // centre texel meets the face as it would from (0, 0, 4), but the camera's position from the origin is 6
             // degrees from that ray; one sun, a dielectric of roughness 0.5
-            Shared<PerspectiveCamera> cam = new PerspectiveCamera.make(fovRad: radians(deg: 50.0),
-                                                                        aspect: cast<float32>(WIDE) / cast<float32>(HIGH),
-                                                                        near: 0.1, far: 100.0);
+            Shared<PerspectiveCamera> cam = new PerspectiveCamera.make(fovRad: radians(deg: 50.0), near: 0.1, far: 100.0);
             cam.toneMappingMut() = ToneMapping::None;
             cam.positionMut() = Vec3.of(x: 0.35, y: 0.25, z: 4.0);
             match (this.target) { case Some(value: t): { cam.targetMut() = Optional::Some(value: copy t); } case None: { } };

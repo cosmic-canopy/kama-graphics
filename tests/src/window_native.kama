@@ -1,0 +1,17 @@
+file @compileFor(!ARCH_WASM32);
+// The window cases' reach into the system, natively (tests/src/window.kama): nothing reads a window back whose frames are
+// render attachments alone, as the renderer's window's are (kyoten's rendering.md § Decided, GFX-1's part 6, step 1's
+// third question), so the pass onto the window is held on the web legs alone. Natively a posted Resize gives the
+// window's frame the posted size, the surface taking a size its window's client area does not have (measured on
+// Direct3D 12's WARP and on Vulkan, kyoten's .scratch/s40/probe-resize).
+
+import { std::collections::DynamicArray };
+export { canvasReadable, readCanvas, postedSizeTaken };
+
+fn bool canvasReadable() { return false; }
+
+fn bool postedSizeTaken() { return true; }
+
+unsafe fn string readCanvas(ref DynamicArray<uint8> into, ref isize width, ref isize height) {
+    return "natively nothing reads the window back";
+}

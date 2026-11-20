@@ -236,9 +236,7 @@ type resource LitRun {
     // and `lit` are its boxes and how the reference lights each.
     unsafe fn void draw(Shared<Scene> s, Vec3 eye, uint32 wide, uint32 high, DynamicArray<D3> centres, DynamicArray<Lighting> lit) {
         Shared<RenderTarget> t = new RenderTarget.make(width: wide, height: high);
-        Shared<PerspectiveCamera> cam = new PerspectiveCamera.make(fovRad: radians(deg: 50.0),
-                                                                    aspect: cast<float32>(wide) / cast<float32>(high),
-                                                                    near: 0.1, far: 100.0);
+        Shared<PerspectiveCamera> cam = new PerspectiveCamera.make(fovRad: radians(deg: 50.0), near: 0.1, far: 100.0);
         cam.toneMappingMut() = ToneMapping::None;
         cam.positionMut() = eye;
         cam.lookAt(target: Vec3.zero());

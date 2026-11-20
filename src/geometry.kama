@@ -55,7 +55,7 @@ type resource BufferGeometry implements Geometry {
 
     friend BoxGeometry[empty];
     friend buildPlane[vertex, triangle, group];
-    friend Renderer::render[entryOn, positionsOn, normalsOn, indicesOn, indexFormat];
+    friend Renderer::renderOn[entryOn, positionsOn, normalsOn, indicesOn, indexFormat];
 
     unsafe ctor empty() {
         this.positionList = DynamicArray.empty();

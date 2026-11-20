@@ -176,7 +176,7 @@ type resource StandInRun {
     // with a sun and a dim ambient light and nothing else.
     unsafe fn void stageScene() {
         Shared<RenderTarget> t = new RenderTarget.make(width: WIDE, height: HIGH);
-        Shared<PerspectiveCamera> cam = new PerspectiveCamera.make(fovRad: radians(deg: 50.0), aspect: 32.0 / 24.0, near: 0.1, far: 100.0);
+        Shared<PerspectiveCamera> cam = new PerspectiveCamera.make(fovRad: radians(deg: 50.0), near: 0.1, far: 100.0);
         cam.targetMut() = Optional::Some(value: copy t);
         cam.toneMappingMut() = ToneMapping::None;
         Shared<Scene> s = new Scene.make();

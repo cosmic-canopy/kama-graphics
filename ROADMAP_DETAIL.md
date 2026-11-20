@@ -538,8 +538,63 @@ natively. The library's own `examples/cube` is the same scene without an engine.
   for the next poll reproduced it every time.
 
   **Part 5 is built.**
-- **Next, part 6:** `examples/cube` in a window on both legs, `Renderer.make(window:, options:)`, FLIP, the 150 KB
-  measurement, FEATURES.md's rows and the SPEC.
+- **Decided on 2026-11-19, part 6's step 1's three questions** (kyoten's `docs/design/rendering.md` § Decided), each
+  (A), the owner: "So far I think your recommendations sound good", then of the third, "I'm good with your rec" and,
+  asked again, "yes I will go with your rec":
+  1. **a camera's aspect follows what it draws into unless the program fixes it,** `aspect()` and `aspectMut()` an
+     `Optional<float32>`, `None` following, as Bevy, Godot and Unity follow;
+  2. **vsync is the renderer's property pair,** `presentMode()` and `presentModeMut()`, `Fifo` by default, with
+     `supportsPresentMode(mode:)`; a mode the surface does not offer is reported and `Fifo` kept;
+  3. **a read of the window beside a target's, by Bevy's way:** `readWindowPixels()` hands back a `PixelRead`; a frame
+     read is drawn into a texture of the renderer's own, copied out and drawn onto the window, whose frames ask for
+     `RenderAttachment` alone, so a frame not read costs nothing.
+
+  Taken with them: the creation options hold only the GPU request; the window is opaque; resizing follows the window's
+  `framebufferSize()`; it draws at the window's full device pixels; sRGB comes from the surface's sRGB view.
+- **Built, part 6's step 1, the renderer in a window** (2026-11-19, [SPEC.md](SPEC.md) § The renderer, § Misuse, § The
+  camera, § Reading the window back and § Tests):
+  - the renderer in two halves: its settings, and `RendererGpu`, what its device makes, made at once by `withDevice` and
+    at the render that finds the device answered by `make(window:, options:)`; `RendererOptions`;
+  - into the window: the surface configured, the frame acquired, drawn as a target is with a target's textures made
+    without a colour (`RenderTarget.forWindow`), and presented; the output pass's pipelines keyed by the format they
+    write as well as the tone mapping;
+  - the camera's follow, the vsync pair, the window read and its pass onto the window, and `~Renderer()` failing the
+    reads it holds.
+
+  **Settled while building, and reported:**
+  - before its first render a following camera projects at 1, three.js's default aspect;
+  - the GPU's half is `RendererGpu`, internal;
+  - a failed request is `GraphicsErrorKind::Device` (no adapter, the device refused) or `Window` (no surface on the
+    window, the adapter cannot draw into it), reported once; what the window refuses is `Window`, reported once until a
+    frame is shown again (its configuration, no frame given, no 8-bit sRGB format), and so is a present mode it does
+    not offer, until another is set; an out-of-date or lost surface is configured again, no misuse; a refused pass onto
+    the window is `Pipeline`, and the reads held fail;
+  - no "ready" query: `info()` shows the GPU arrive, `takeErrors()` its failure, as Bevy has none;
+  - `presentMode()` says what was set, as `antialiasing()` does;
+  - the pass onto the window reads the read's texture with `textureLoad` through the sRGB view both share, which brings
+    every 8-bit value back to itself, measured on every leg, hardware and software, for RGBA and BGRA (kyoten's
+    `.scratch/s40/probe-roundtrip`), and the web cases hold the page's canvas to the read;
+  - the read's texture is made for each frame read, as Bevy's, and each read held gets its own copy;
+  - only a render drives the GPU's request: `clear` does nothing before the GPU answers, a target's read fails, and a
+    compile asked before it waits, `Pending`, for the render that finds the GPU, which asks for it;
+  - the window's textures take the frame's size, which natively is the size configured and on the web the canvas's own:
+    a posted `Resize` moves the window's record, which the surface takes natively, while a WebGPU canvas keeps its
+    pixels (kyoten's `.scratch/s40/probe-resize`);
+  - a frame the surface calls suboptimal is drawn: Vulkan says so of a frame whose size is not its window's client
+    area's, and configuring again would do so every frame;
+  - the frame is acquired only when the output pass will write it, so while that pass compiles the window keeps its
+    last frame; while the pass onto the window compiles the frame is drawn directly and the reads wait, and `compile`
+    asks for both for a camera drawing into the window;
+  - the window's format is the first the surface offers with an 8-bit sRGB view, RGBA or BGRA, whose texels a read
+    copies four bytes each; a surface offering none is reported, and nothing drawn.
+
+  Red first, on two stubs of the API: with no GPU ever coming, the device-refused, before-the-GPU and compile cases
+  failed; with the GPU but no window read, every mode offered and no follow, the reads, the size, the target
+  comparison, the posted resize, both present-mode cases, the dropped renderer, a windowless renderer's modes and the
+  camera's follow failed, and the goldens whose cameras now follow their targets. 446 cases natively, 447 in Firefox and in Chrome for Testing, 434 in Edge, each debug and release; the web legs read the page's canvas, and natively a mode the surface offers is taken. 23 of 27 mutations caught (kyoten's `.scratch/s40/kg/list1.py` and `list2.py`), two on the web, where the page's canvas holds the pass onto the window, left out or reading a row off. The first batch found a gap, closed before the second: no case made the window refuse twice, so a refusal reported every frame passed, until a case posted a window larger than the device allows; and one mutation was mis-aimed, leaving `compile`'s ask for the pass onto the window in, and caught once it took the ask out. The four left: every frame drawn through the read's texture, a cost alone, equivalent; a changed present mode not configured, which only frame pacing shows; an out-of-date surface not configured again, which nothing on these legs brings about, since `@kama/window` cannot resize the system window; and a frame not presented, which natively nothing reads, and on the web the browser presents anyway.
+- **Next, part 6's step 2:** `examples/cube`, a lit spinning cube in a window on both legs, its last frame read back by
+  `readWindowPixels()` and held to its golden on each software GPU's leg; then FLIP, the 150 KB measurement,
+  FEATURES.md's rows and the SPEC.
 - **Done:**
   - `examples/cube` draws from one source on both legs;
   - its golden passes on a software GPU on each leg CI has, and perceptually on the reference machines present;

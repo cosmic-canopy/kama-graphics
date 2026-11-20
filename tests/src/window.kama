@@ -1,0 +1,681 @@
+// GFX-1's part 6, step 1: the renderer in a window (kyoten's rendering.md § Decided, GFX-1's part 6, step 1's three
+// questions, the owner's (A) of 2026-11-19). A run of its own, a step a tick, in a window opened unfocused, so a run never
+// takes the keyboard from someone typing: natively a system window, on the web the page's #canvas. Each renderer here
+// requests its own GPU through `Renderer.make(window:, options:)`, the fallback adapter on a leg that names a software
+// GPU, as the check's device is.
+// - **A device refused:** a renderer whose device asks for a limit past the adapter's reports it once, as `Device`, and
+//   draws nothing; a window read on it fails, and a compile on it answers at once.
+// - **Before the GPU answers:** the present mode is Fifo, the only one offered, and a compile is pending; renders draw
+//   nothing and report nothing, and one draws once the GPU has answered, its draws counted by `info()`. The compile is
+//   asked then, and once it is ready a render draws with no miss.
+// - **The window read** (step 1's third question, Bevy's way): a read is pending through a render into a window of no
+//   area, which draws nothing and reports nothing; two reads asked before one render each hand back that frame; the
+//   frame reads as the same scene drawn into a target of its size, byte for byte; on the web the canvas reads as the
+//   window read, so the pass onto the window changed no byte; a read dropped before its frame leaves the render whole.
+// - **A posted Resize** configures the window's surface again at the next render: natively the frame takes the posted
+//   size, and on the web the canvas keeps its own pixels; a camera with no aspect takes the frame's.
+// - **Vsync** (step 1's question 2): a present mode the surface does not offer is reported once, as `Window`, Fifo taken
+//   instead, and the renderer still says what was set; one it offers is taken with no report.
+// - **The read's ends:** a renderer dropped first fails the read it holds; a renderer with no window fails a window read,
+//   and offers Fifo alone.
+// - **The camera's aspect** (step 1's question 1): 1 before a render; a following camera takes a 2:1 target's; a fixed
+//   one is kept; set back to None it follows again.
+
+import {
+    core::println,
+    std::collections::DynamicArray,
+    std::math::Vec3, std::math::Mat4, std::math::abs, std::math::radians,
+    std::time::Instant, std::time::monotonicNow,
+    std::memory::replace,
+    gpu::Device, gpu::Queue, gpu::GpuError, gpu::PresentMode,
+    window::Window, window::WindowOptions, window::WindowError, window::Event, window::Size,
+    image::Image,
+    graphics::Color, graphics::Renderer, graphics::RendererOptions, graphics::RenderInfo, graphics::RenderTarget,
+    graphics::PixelRead, graphics::PixelStatus, graphics::Scene, graphics::Mesh, graphics::PerspectiveCamera,
+    graphics::BoxGeometry, graphics::MeshBasicMaterial, graphics::Euler, graphics::EulerOrder, graphics::RendererErrors,
+    graphics::GraphicsErrorKind, graphics::CompileRequest, graphics::CompileStatus,
+    Verdicts, canvasReadable, readCanvas, postedSizeTaken,
+};
+export { WindowRun };
+
+comptime int64 SETTLE_MS = 20000;   // the most a step waits on the GPU
+comptime int32 WIN_WIDE = 160;      // the window's logical size
+comptime int32 WIN_HIGH = 96;
+
+// The image's texels as one byte array, RGBA.
+fn DynamicArray<uint8> texelsOf(const ref Image img) {
+    DynamicArray<uint8> collected = DynamicArray.empty();
+    borrow img.samples8() as px { for (isize i = 0; i < px.length(); i = i + 1) { collected.add(item: px[i]); } }
+    return collected;
+}
+
+// "" when `a` and `b` hold the same bytes, else where they first differ.
+fn string sameBytes(const ref DynamicArray<uint8> a, const ref DynamicArray<uint8> b) {
+    if (a.length() != b.length()) {
+        isize la = a.length();
+        isize lb = b.length();
+        return "${la} bytes against ${lb}";
+    }
+    isize differ = 0;
+    isize first = -1;
+    for (isize i = 0; i < a.length(); i = i + 1) {
+        if (a[i] != b[i]) { if (first < 0) { first = i; } differ = differ + 1; }
+    }
+    if (differ == 0) { return ""; }
+    int32 at = cast<int32>(a[first]);
+    int32 other = cast<int32>(b[first]);
+    return "${differ} bytes differ, the first at byte ${first}: ${at} against ${other}";
+}
+
+// The aspect a camera's projection is made with: its focal length over its focal length divided by the aspect.
+fn float32 aspectOf(const ref Mat4 p) { return p.get(c: 1, r: 1) / p.get(c: 0, r: 0); }
+
+fn string aspectIs(const ref Mat4 p, float32 want) {
+    float32 got = aspectOf(p: p);
+    return abs(x: got - want) < 0.00001 ? "" : "its projection's aspect is ${got}, not ${want}";
+}
+
+fn string kindName(GraphicsErrorKind k) {
+    return match (k) {
+        case NoTarget: "NoTarget";
+        case Material: "Material";
+        case Light: "Light";
+        case Pipeline: "Pipeline";
+        case Device: "Device";
+        case Window: "Window";
+        case _: "a kind these cases do not know";
+    };
+}
+
+// "" when `errors` holds exactly one report, of `kind`, its words holding `words`.
+fn string oneReport(const ref RendererErrors errors, GraphicsErrorKind kind, const ref string words) {
+    isize n = errors.reports().length();
+    if (n != 1 || errors.dropped() != 0) {
+        string first = n > 0 ? errors.reports()[0].message() : "none";
+        return "${n} reports, the first: " + first;
+    }
+    GraphicsErrorKind got = errors.reports()[0].kind();
+    string said = errors.reports()[0].message();
+    if (got != kind) { return "it is " + kindName(k: got) + ", not " + kindName(k: kind) + ": " + said; }
+    if (!said.contains(substring: words)) { return "its words do not say '" + words + "': " + said; }
+    return "";
+}
+
+fn string noReports(const ref RendererErrors errors) {
+    isize n = errors.reports().length();
+    if (n == 0 && errors.dropped() == 0) { return ""; }
+    string first = n > 0 ? errors.reports()[0].message() : "";
+    return "${n} reports, the first: " + first;
+}
+
+fn string drewNothing(RenderInfo got) {
+    if (got.calls == 0 && got.triangles == 0) { return ""; }
+    return "it drew: calls ${got.calls}, triangles ${got.triangles}";
+}
+
+unsafe fn Shared<MeshBasicMaterial> coloured(uint32 hex) {
+    Shared<MeshBasicMaterial> m = new MeshBasicMaterial.make();
+    m.colorMut() = Color.fromHex(hex: hex);
+    return m;
+}
+
+// Two boxes crossing in depth, red and blue, so a frame whose red and blue were swapped cannot pass as itself.
+unsafe fn Shared<Scene> crossing() {
+    Shared<Scene> s = new Scene.make();
+    Shared<BoxGeometry> box = new BoxGeometry.make(width: 1.0, height: 1.0, depth: 1.0);
+    Shared<Mesh> a = new Mesh.make(geometry: box, material: coloured(hex: 0xcc3333));
+    a.positionMut() = Vec3.of(x: -0.3, y: 0.0, z: 0.0);
+    a.rotationMut() = Euler.fromDegrees(x: 0.0, y: 30.0, z: 0.0, order: EulerOrder::XYZ);
+    Shared<Mesh> b = new Mesh.make(geometry: box, material: coloured(hex: 0x3366cc));
+    b.positionMut() = Vec3.of(x: 0.3, y: 0.0, z: 0.0);
+    b.rotationMut() = Euler.fromDegrees(x: 0.0, y: -30.0, z: 0.0, order: EulerOrder::XYZ);
+    s.add(object: a);
+    s.add(object: b);
+    return s;
+}
+
+unsafe fn Shared<PerspectiveCamera> looking() {
+    Shared<PerspectiveCamera> cam = new PerspectiveCamera.make(fovRad: radians(deg: 50.0), near: 0.1, far: 100.0);
+    cam.positionMut() = Vec3.of(x: 0.0, y: 1.2, z: 3.5);
+    cam.lookAt(target: Vec3.zero());
+    return cam;
+}
+
+// What a polled read came to: its image's bytes and size, or why it has none ("" while it is pending).
+type resource ReadOutcome {
+    bool settled = false;
+    string why = "";
+    DynamicArray<uint8> bytes = DynamicArray.empty();
+    isize wide = 0;
+    isize high = 0;
+
+    friend WindowRun[settled, why, bytes, wide, high];
+    friend settleRead[settled, why, bytes, wide, high];
+
+    public ctor make() { }
+}
+
+// `read` polled into `into`: true once it has settled, or once `late`, when it says it is still pending.
+unsafe fn bool settleRead(ref Optional<PixelRead> read, ref ReadOutcome into, bool late) {
+    if (into.settled) { return true; }
+    PixelStatus s = match (read) {
+        case Some(value: r): r.poll();
+        case None: PixelStatus::Failed(error: GpuError::Refused(words: "no read was asked for"));
+    };
+    bool pending = match (s) { case Pending: true; case _: false; };
+    if (pending) {
+        if (!late) { return false; }
+        into.settled = true;
+        into.why = "still pending after ${SETTLE_MS} ms";
+        return true;
+    }
+    into.settled = true;
+    match (give s) {
+        case Ready(image: img): {
+            into.bytes = texelsOf(img: img);
+            into.wide = img.width();
+            into.high = img.height();
+        }
+        case Failed(error: e): { into.why = "it failed: " + e.message(); }
+        case Pending: { }
+    };
+    return true;
+}
+
+type resource WindowRun {
+    int32 stage = 0;
+    Instant began = monotonicNow();
+    string gpu;
+    Verdicts found;
+    Device device;
+    Queue queue;
+    Optional<Window> window = Optional::None;
+    Optional<Renderer> refusing = Optional::None;
+    Optional<Renderer> renderer = Optional::None;
+    Shared<Scene> scene;
+    Shared<PerspectiveCamera> camera;
+    Optional<CompileRequest> compiling = Optional::None;
+    Optional<PixelRead> firstRead = Optional::None;
+    Optional<PixelRead> secondRead = Optional::None;
+    Optional<PixelRead> targetRead = Optional::None;
+    ReadOutcome first;
+    ReadOutcome second;
+    ReadOutcome targeted;
+    DynamicArray<uint8> canvas = DynamicArray.empty();
+    isize canvasWide = 0;
+    isize canvasHigh = 0;
+    string canvasWhy = "";
+    int32 blank = 0;            // renders before the GPU answered
+    string blankWhy = "";       // ...what any of them did
+    int32 shownWide = 0;        // the window's size in pixels as it opened
+    int32 shownHigh = 0;
+
+    public unsafe ctor make(string gpu, Device device, Queue queue) {
+        this.gpu = give gpu;
+        this.found = Verdicts.make();
+        this.device = give device;
+        this.queue = give queue;
+        this.scene = crossing();
+        this.camera = looking();
+        this.first = ReadOutcome.make();
+        this.second = ReadOutcome.make();
+        this.targeted = ReadOutcome.make();
+    }
+
+    public fn ref Verdicts verdicts() { return this.found; }
+
+    unsafe fn void next(int32 to) { this.stage = to; this.began = monotonicNow(); }
+    unsafe fn bool late() { return this.began.elapsed().asMillis() >= SETTLE_MS; }
+
+    // The options of a renderer here: the leg's software GPU where it names one, and nothing printed, since the cases
+    // read the errors themselves.
+    fn RendererOptions options() {
+        RendererOptions o = RendererOptions.defaults();
+        o.forceFallbackAdapter = !this.gpu.isEmpty();
+        o.device.printErrors = false;
+        return o;
+    }
+
+    unsafe fn void pump() {
+        match (this.window) { case Some(value: w): { w.pump(); } case None: { } };
+    }
+
+    unsafe fn void post(int32 width, int32 height) {
+        match (this.window) {
+            case Some(value: w): { w.post(event: Event::Resize(width: width, height: height)); w.pump(); }
+            case None: { }
+        };
+    }
+
+    // One render into the window by the run's renderer, and what it did.
+    unsafe fn RenderInfo render() {
+        RenderInfo said = RenderInfo.of(calls: -1, triangles: -1, objects: -1, matrices: -1, misses: -1, skipped: -1, general: -1,
+                                        standIn: -1, waited: -1);
+        match (this.renderer) {
+            case Some(value: r): { r.render(scene: copy this.scene, camera: copy this.camera); said = r.info(); }
+            case None: { }
+        };
+        return said;
+    }
+
+    unsafe fn RendererErrors errors() {
+        return match (this.renderer) {
+            case Some(value: r): r.takeErrors();
+            case None: { panic(msg: "the run's renderer is made at stage 2"); }
+        };
+    }
+
+    unsafe fn PixelRead askRead() {
+        return match (this.renderer) {
+            case Some(value: r): r.readWindowPixels();
+            case None: { panic(msg: "the run's renderer is made at stage 2"); }
+        };
+    }
+
+    public unsafe fn bool step() {
+        this.pump();
+        if (this.stage == 0) { this.open(); }
+        else if (this.stage == 1) { this.refusedStep(); }
+        else if (this.stage == 2) { this.makeStep(); }
+        else if (this.stage == 3) { this.awaitGpu(); }
+        else if (this.stage == 4) { this.awaitCompile(); }
+        else if (this.stage == 5) { this.readsStep(); }
+        else if (this.stage == 6) { this.readsSettled(); }
+        else if (this.stage == 7) { this.targetCompiled(); }
+        else if (this.stage == 8) { this.targetSettled(); }
+        else if (this.stage == 9) { this.resizedSettled(); }
+        else if (this.stage == 10) { this.presentStep(); }
+        else if (this.stage == 11) { this.endsStep(); }
+        return this.stage >= 12;
+    }
+
+    // The window, unfocused, and a renderer on it whose device asks for a 2D texture limit past every adapter's.
+    unsafe fn void open() {
+        WindowOptions quiet = WindowOptions.make();
+        quiet.focused = false;
+        Result<Window, WindowError> opened = Window.openIn(canvas: "#canvas", title: "@kama/graphics tests", width: WIN_WIDE,
+                                                           height: WIN_HIGH, options: quiet);
+        match (give opened) {
+            case Ok(value: w): {
+                Size px = w.framebufferSize();
+                this.shownWide = px.width;
+                this.shownHigh = px.height;
+                RendererOptions o = this.options();
+                o.device.limits.maxTextureDimension2D = 1073741824;
+                Renderer r = Renderer.make(window: w, options: o);
+                r.printErrorsMut() = false;
+                this.refusing = Optional::Some(value: give r);
+                this.window = Optional::Some(value: give w);
+                this.next(to: 1);
+            }
+            case Err(error: e): {
+                this.found.add(name: "window: a window for the window cases", why: "none opened: " + e.message());
+                this.stage = 12;
+            }
+        };
+    }
+
+    // The refused device, reported once, then nothing drawn and nothing more reported.
+    unsafe fn void refusedStep() {
+        Renderer r = match (replace(place: this.refusing, with: Optional::None)) {
+            case Some(value: x): give x;
+            case None: { panic(msg: "made at stage 0"); }
+        };
+        r.render(scene: copy this.scene, camera: copy this.camera);
+        RendererErrors said = r.takeErrors();
+        bool none = said.reports().length() == 0 && said.dropped() == 0;
+        if (none && !this.late()) { this.refusing = Optional::Some(value: give r); return; }
+        this.found.add(name: "window: a renderer whose device the adapter refuses reports it once, as Device, and draws nothing",
+                       why: oneReport(errors: said, kind: GraphicsErrorKind::Device, words: "the device was refused") + drewNothing(got: r.info()));
+        r.render(scene: copy this.scene, camera: copy this.camera);
+        RendererErrors again = r.takeErrors();
+        this.found.add(name: "window: ...and a render after reports nothing more and draws nothing",
+                       why: noReports(errors: again) + drewNothing(got: r.info()));
+        PixelRead orphan = r.readWindowPixels();
+        PixelStatus s = orphan.poll();
+        string why = match (s) {
+            case Failed(error: e): e.message().contains(substring: "no GPU") ? "" : "it fails, saying: " + e.message();
+            case _: "it does not fail";
+        };
+        this.found.add(name: "window: ...a window read on it fails at once, saying it has no GPU", why: give why);
+        CompileRequest c = r.compile(scene: copy this.scene, camera: copy this.camera);
+        CompileStatus cs = c.poll();
+        this.found.add(name: "window: ...and a compile on it is Ready at once, having asked for nothing",
+                       why: cs == CompileStatus::Ready ? "" : "it is pending");
+        this.next(to: 2);
+    }
+
+    // The run's renderer, on the leg's GPU, asked about before it has rendered.
+    unsafe fn void makeStep() {
+        Renderer r = match (this.window) {
+            case Some(value: w): Renderer.make(window: w, options: this.options());
+            case None: { panic(msg: "opened at stage 0"); }
+        };
+        r.printErrorsMut() = false;
+        string presentWhy = "";
+        if (r.presentMode() != PresentMode::Fifo) { presentWhy = "presentMode() is not Fifo; "; }
+        if (!r.supportsPresentMode(mode: PresentMode::Fifo)) { presentWhy = presentWhy + "Fifo is not supported; "; }
+        if (r.supportsPresentMode(mode: PresentMode::Mailbox)) { presentWhy = presentWhy + "Mailbox is supported; "; }
+        if (r.supportsPresentMode(mode: PresentMode::Immediate)) { presentWhy = presentWhy + "Immediate is supported; "; }
+        this.found.add(name: "window: before its first render a renderer presents with Fifo, and offers Fifo alone, its surface not yet read",
+                       why: give presentWhy);
+        CompileRequest c = r.compile(scene: copy this.scene, camera: copy this.camera);
+        CompileStatus cs = c.poll();
+        this.found.add(name: "window: a compile asked before the renderer's GPU answered is Pending",
+                       why: cs == CompileStatus::Pending ? "" : "it is Ready");
+        this.compiling = Optional::Some(value: give c);
+        this.renderer = Optional::Some(value: give r);
+        this.next(to: 3);
+    }
+
+    // Renders until one draws: each before it draws nothing and reports nothing.
+    unsafe fn void awaitGpu() {
+        RenderInfo got = this.render();
+        RendererErrors said = this.errors();
+        if (got.calls == 0) {
+            string what = drewNothing(got: got) + noReports(errors: said);
+            if (!what.isEmpty() && this.blankWhy.isEmpty()) { this.blankWhy = copy what; }
+            this.blank = this.blank + 1;
+            if (!this.late()) { return; }
+            this.found.add(name: "window: a renderer made with a window draws once its GPU has answered",
+                           why: "${this.blank} renders drew nothing in ${SETTLE_MS} ms");
+            this.stage = 12;
+            return;
+        }
+        this.found.add(name: "window: renders before the GPU answers draw nothing and report nothing, and one draws once it has",
+                       why: copy this.blankWhy);
+        println(s: "info window: ${this.blank} renders before the GPU answered");
+        this.next(to: 4);
+    }
+
+    // The compile asked before the GPU, asked at the render that found it: Ready once its pipelines are, then a render with
+    // no miss, its draws into the window counted.
+    unsafe fn void awaitCompile() {
+        CompileStatus cs = match (this.compiling) { case Some(value: c): c.poll(); case None: CompileStatus::Ready; };
+        if (cs == CompileStatus::Pending && !this.late()) { RenderInfo meanwhile = this.render(); return; }
+        this.found.add(name: "window: ...the compile asked before it is asked once a render finds the GPU, and is Ready once its pipelines are",
+                       why: cs == CompileStatus::Ready ? "" : "still pending after ${SETTLE_MS} ms");
+        RenderInfo got = this.render();
+        RendererErrors said = this.errors();
+        string why = noReports(errors: said);
+        if (got.misses != 0 || got.calls != 4 || got.triangles != 48) {
+            why = why + "calls ${got.calls}, triangles ${got.triangles}, misses ${got.misses}";
+        }
+        this.found.add(name: "window: ...then a camera naming no target draws into the window with no miss: each box twice, 12 triangles a draw",
+                       why: give why);
+        this.compiling = Optional::None;
+        // a window of no area: nothing drawn, nothing reported, and a read asked meanwhile left pending
+        this.post(width: 0, height: 0);
+        this.firstRead = Optional::Some(value: this.askRead());
+        RenderInfo none = this.render();
+        RendererErrors quiet = this.errors();
+        this.found.add(name: "window: a render into a window of no area draws nothing and reports nothing",
+                       why: drewNothing(got: none) + noReports(errors: quiet));
+        PixelStatus s = match (this.firstRead) { case Some(value: r): r.poll(); case None: PixelStatus::Pending; };
+        bool pending = match (s) { case Pending: true; case _: false; };
+        this.found.add(name: "window: a window read is pending through a render that draws nothing",
+                       why: pending ? "" : "it settled");
+        this.next(to: 5);
+    }
+
+    // The window's size back; a second read asked; one render; on the web the canvas read in this tick.
+    unsafe fn void readsStep() {
+        this.post(width: this.shownWide, height: this.shownHigh);
+        this.secondRead = Optional::Some(value: this.askRead());
+        RenderInfo got = this.render();
+        if (canvasReadable()) {
+            this.canvasWhy = readCanvas(into: ref this.canvas, width: ref this.canvasWide, height: ref this.canvasHigh);
+        }
+        RendererErrors said = this.errors();
+        string why = noReports(errors: said);
+        if (got.calls != 4) { why = why + "calls ${got.calls}"; }
+        this.found.add(name: "window: a render with two window reads held draws as any other and reports nothing", why: give why);
+        this.next(to: 6);
+    }
+
+    unsafe fn void readsSettled() {
+        bool a = settleRead(read: ref this.firstRead, into: ref this.first, late: this.late());
+        bool b = settleRead(read: ref this.secondRead, into: ref this.second, late: this.late());
+        if (!a || !b) { return; }
+        string why = this.first.why + this.second.why;
+        if (why.isEmpty()) {
+            why = sameBytes(a: this.first.bytes, b: this.second.bytes);
+            if (this.first.wide != this.second.wide || this.first.high != this.second.high) {
+                why = why + "their sizes differ";
+            }
+        }
+        this.found.add(name: "window: two window reads asked before one render each hand back that frame", why: copy why);
+        // the frame's size: the window's as it opened, natively and on the web
+        string sized = "";
+        if (this.first.wide != cast<isize>(this.shownWide) || this.first.high != cast<isize>(this.shownHigh)) {
+            sized = "the read is ${this.first.wide} x ${this.first.high}, the window ${this.shownWide} x ${this.shownHigh}";
+        }
+        this.found.add(name: "window: a window read is the window's size in pixels", why: give sized);
+        // the camera followed the frame
+        if (this.first.high > 0) {
+            float32 want = cast<float32>(this.first.wide) / cast<float32>(this.first.high);
+            string aspect = this.camera.aspect().isSome() ? "it has an aspect of its own" : aspectIs(p: this.camera.projectionMatrix(), want: want);
+            this.found.add(name: "window: a camera with no aspect takes the window frame's width over height", why: give aspect);
+        }
+        // on the web, what the page shows
+        if (canvasReadable()) {
+            string shown = copy this.canvasWhy;
+            if (shown.isEmpty()) {
+                shown = sameBytes(a: this.canvas, b: this.first.bytes);
+                if (this.canvasWide != this.first.wide || this.canvasHigh != this.first.high) {
+                    shown = shown + "the canvas is ${this.canvasWide} x ${this.canvasHigh}";
+                }
+            }
+            this.found.add(name: "window: the pass onto the window changes no byte: the page's canvas reads as the window read",
+                           why: give shown);
+        }
+        // the same scene into a target of the frame's size, compiled first, so it draws with no miss
+        if (this.first.wide > 0 && this.first.high > 0) {
+            Shared<RenderTarget> t = new RenderTarget.make(width: cast<uint32>(this.first.wide), height: cast<uint32>(this.first.high));
+            this.camera.targetMut() = Optional::Some(value: give t);
+            match (this.renderer) {
+                case Some(value: r): { this.compiling = Optional::Some(value: r.compile(scene: copy this.scene, camera: copy this.camera)); }
+                case None: { }
+            };
+            this.next(to: 7);
+            return;
+        }
+        this.found.add(name: "window: the window's frame reads as the same scene drawn into a target of its size, byte for byte",
+                       why: "no window frame was read");
+        this.afterTarget();
+    }
+
+    unsafe fn void targetCompiled() {
+        CompileStatus cs = match (this.compiling) { case Some(value: c): c.poll(); case None: CompileStatus::Ready; };
+        if (cs == CompileStatus::Pending && !this.late()) { return; }
+        this.compiling = Optional::None;
+        RenderInfo got = this.render();
+        match (this.renderer) {
+            case Some(value: r): {
+                Optional<Shared<RenderTarget>> into = this.camera.target();
+                match (give into) {
+                    case Some(value: t): { this.targetRead = Optional::Some(value: r.readRenderTargetPixels(target: give t)); }
+                    case None: { }
+                };
+            }
+            case None: { }
+        };
+        this.next(to: 8);
+    }
+
+    unsafe fn void targetSettled() {
+        if (!settleRead(read: ref this.targetRead, into: ref this.targeted, late: this.late())) { return; }
+        string why = this.targeted.why + this.first.why;
+        if (why.isEmpty()) { why = sameBytes(a: this.targeted.bytes, b: this.first.bytes); }
+        this.found.add(name: "window: the window's frame reads as the same scene drawn into a target of its size, byte for byte",
+                       why: give why);
+        this.afterTarget();
+    }
+
+    // Back into the window: a read dropped before its frame, then a posted Resize.
+    unsafe fn void afterTarget() {
+        this.camera.targetMut() = Optional::None;
+        {
+            PixelRead dropped = this.askRead();
+        }
+        RenderInfo got = this.render();
+        RendererErrors said = this.errors();
+        string why = noReports(errors: said);
+        if (got.calls != 4 || got.misses != 0) { why = why + "calls ${got.calls}, misses ${got.misses}"; }
+        this.found.add(name: "window: a window read dropped before its frame leaves the render whole", why: give why);
+        // a posted Resize to half the width
+        int32 half = this.shownWide / 2;
+        this.post(width: half, height: this.shownHigh);
+        this.firstRead = Optional::Some(value: this.askRead());
+        this.first = ReadOutcome.make();
+        RenderInfo resized = this.render();
+        this.next(to: 9);
+    }
+
+    unsafe fn void resizedSettled() {
+        if (!settleRead(read: ref this.firstRead, into: ref this.first, late: this.late())) { return; }
+        string why = copy this.first.why;
+        int32 wantWide = postedSizeTaken() ? this.shownWide / 2 : this.shownWide;
+        if (why.isEmpty() && (this.first.wide != cast<isize>(wantWide) || this.first.high != cast<isize>(this.shownHigh))) {
+            why = "the read is ${this.first.wide} x ${this.first.high}, not ${wantWide} x ${this.shownHigh}";
+        }
+        string named = postedSizeTaken() ? "window: after a posted Resize the next render configures the surface at the window's new size, which the frame takes"
+                                         : "window: after a posted Resize the next render configures the surface again, and the frame keeps the canvas's own pixels";
+        this.found.add(name: give named, why: copy why);
+        if (this.first.high > 0) {
+            float32 want = cast<float32>(this.first.wide) / cast<float32>(this.first.high);
+            this.found.add(name: "window: ...and a camera with no aspect takes the frame's", why: aspectIs(p: this.camera.projectionMatrix(), want: want));
+        }
+        this.post(width: this.shownWide, height: this.shownHigh);
+        this.next(to: 10);
+    }
+
+    // A window the surface refuses, larger than the device allows, then vsync: a mode the surface does not offer,
+    // reported once and Fifo taken; one it offers taken with no report.
+    unsafe fn void presentStep() {
+        this.post(width: 16384, height: this.shownHigh);
+        RenderInfo tooWide = this.render();
+        RenderInfo stillTooWide = this.render();
+        RendererErrors refused = this.errors();
+        this.found.add(name: "window: a window larger than the device allows is refused by its surface, reported once over two renders, as Window, and nothing is drawn",
+                       why: oneReport(errors: refused, kind: GraphicsErrorKind::Window, words: "larger than the device allows")
+                            + drewNothing(got: tooWide) + drewNothing(got: stillTooWide));
+        this.post(width: this.shownWide, height: this.shownHigh);
+        RenderInfo sized = this.render();
+        RendererErrors none = this.errors();
+        string again = noReports(errors: none);
+        if (sized.calls != 4) { again = again + "calls ${sized.calls}"; }
+        this.found.add(name: "window: ...and at its own size again it draws, with no report", why: give again);
+        Renderer r = match (replace(place: this.renderer, with: Optional::None)) {
+            case Some(value: x): give x;
+            case None: { panic(msg: "made at stage 2"); }
+        };
+        string offered = "";
+        DynamicArray<PresentMode> others = DynamicArray.empty();
+        others.add(item: PresentMode::FifoRelaxed);
+        others.add(item: PresentMode::Mailbox);
+        others.add(item: PresentMode::Immediate);
+        Optional<PresentMode> missing = Optional::None;
+        Optional<PresentMode> extra = Optional::None;
+        for (isize i = 0; i < others.length(); i = i + 1) {
+            PresentMode m = others[i];
+            string n = m.name();
+            if (r.supportsPresentMode(mode: m)) { offered = offered + n + " "; if (extra.isNone()) { extra = Optional::Some(value: m); } }
+            else if (missing.isNone()) { missing = Optional::Some(value: m); }
+        }
+        println(s: "info window: the surface offers Fifo " + offered);
+        this.found.add(name: "window: once its surface is read, a renderer offers Fifo, every surface's",
+                       why: r.supportsPresentMode(mode: PresentMode::Fifo) ? "" : "it does not");
+        if (!canvasReadable()) {
+            // natively the surface answers for itself
+        } else {
+            this.found.add(name: "window: on the web a renderer offers Fifo alone", why: offered.isEmpty() ? "" : "it offers " + offered);
+        }
+        match (missing) {
+            case Some(value: m): {
+                string n = m.name();
+                r.presentModeMut() = m;
+                r.render(scene: copy this.scene, camera: copy this.camera);
+                RenderInfo once = r.info();
+                r.render(scene: copy this.scene, camera: copy this.camera);
+                RenderInfo twice = r.info();
+                RendererErrors said = r.takeErrors();
+                string why = oneReport(errors: said, kind: GraphicsErrorKind::Window, words: "does not offer present mode " + n);
+                if (once.calls != 4 || twice.calls != 4) { why = why + "; it drew ${once.calls} and ${twice.calls} calls"; }
+                if (r.presentMode() != m) { why = why + "; presentMode() no longer says " + n; }
+                this.found.add(name: "window: a present mode the surface does not offer, " + n + ", is reported once, as Window, and the window presents with Fifo, presentMode() saying what was set",
+                               why: give why);
+                r.presentModeMut() = PresentMode::Fifo;
+                r.render(scene: copy this.scene, camera: copy this.camera);
+                RendererErrors back = r.takeErrors();
+                this.found.add(name: "window: ...and Fifo set again presents with no report", why: noReports(errors: back));
+            }
+            case None: {
+                this.found.add(name: "window: a present mode the surface does not offer is reported once", why: "the surface offers every mode, so nothing holds it here");
+            }
+        };
+        match (extra) {
+            case Some(value: m): {
+                string n = m.name();
+                r.presentModeMut() = m;
+                r.render(scene: copy this.scene, camera: copy this.camera);
+                RenderInfo got = r.info();
+                RendererErrors said = r.takeErrors();
+                string why = noReports(errors: said);
+                if (got.calls != 4) { why = why + "calls ${got.calls}"; }
+                this.found.add(name: "window: a present mode the surface offers, " + n + ", is taken with no report", why: give why);
+                r.presentModeMut() = PresentMode::Fifo;
+                r.render(scene: copy this.scene, camera: copy this.camera);
+                RendererErrors back = r.takeErrors();
+            }
+            case None: { }
+        };
+        this.renderer = Optional::Some(value: give r);
+        this.next(to: 11);
+    }
+
+    // The read's ends, and the camera's aspect on a renderer with no window.
+    unsafe fn void endsStep() {
+        PixelRead held = this.askRead();
+        this.renderer = Optional::None;
+        PixelStatus s = held.poll();
+        string why = match (s) {
+            case Failed(error: e): e.message().contains(substring: "dropped") ? "" : "it fails, saying: " + e.message();
+            case _: "it does not fail";
+        };
+        this.found.add(name: "window: a renderer dropped before its next frame fails the window read it holds", why: give why);
+
+        Renderer plain = Renderer.withDevice(device: copy this.device, queue: copy this.queue);
+        PixelRead nowhere = plain.readWindowPixels();
+        PixelStatus n = nowhere.poll();
+        string noWindow = match (n) {
+            case Failed(error: e): e.message().contains(substring: "no window") ? "" : "it fails, saying: " + e.message();
+            case _: "it does not fail";
+        };
+        this.found.add(name: "window: a renderer with no window fails a window read at its first poll", why: give noWindow);
+        string modes = "";
+        if (!plain.supportsPresentMode(mode: PresentMode::Fifo)) { modes = modes + "Fifo is not supported; "; }
+        if (plain.supportsPresentMode(mode: PresentMode::Immediate)) { modes = modes + "Immediate is supported; "; }
+        this.found.add(name: "window: a renderer with no window offers Fifo alone", why: give modes);
+
+        // the camera's aspect: 1 before a render; a 2:1 target's followed; a fixed one kept; None following again
+        Shared<PerspectiveCamera> cam = new PerspectiveCamera.make(fovRad: radians(deg: 50.0), near: 0.1, far: 100.0);
+        this.found.add(name: "camera: before its first render a camera with no aspect projects at 1, as three.js's default",
+                       why: aspectIs(p: cam.projectionMatrix(), want: 1.0));
+        Shared<RenderTarget> wide = new RenderTarget.make(width: 32, height: 16);
+        cam.targetMut() = Optional::Some(value: give wide);
+        plain.render(scene: copy this.scene, camera: copy cam);
+        this.found.add(name: "camera: a camera with no aspect takes a 2:1 target's at its render", why: aspectIs(p: cam.projectionMatrix(), want: 2.0));
+        cam.aspectMut() = Optional::Some(value: 0.75);
+        plain.render(scene: copy this.scene, camera: copy cam);
+        string kept = aspectIs(p: cam.projectionMatrix(), want: 0.75);
+        bool reads = match (cam.aspect()) { case Some(value: a): a == 0.75; case None: false; };
+        if (!reads) { kept = kept + "aspect() does not read 0.75"; }
+        this.found.add(name: "camera: a camera's own aspect is kept through a render into a 2:1 target", why: give kept);
+        cam.aspectMut() = Optional::None;
+        plain.render(scene: copy this.scene, camera: copy cam);
+        this.found.add(name: "camera: set back to None, it follows the target again", why: aspectIs(p: cam.projectionMatrix(), want: 2.0));
+        this.window = Optional::None;
+        this.stage = 12;
+    }
+}

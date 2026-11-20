@@ -311,9 +311,7 @@ type resource StandardRun {
             Renderer r = gpuResolved(device: copy this.device, queue: copy this.queue);
             r.clearColorMut() = Color.fromHex(hex: BACKDROP);
             Shared<RenderTarget> t = new RenderTarget.make(width: WIDE, height: HIGH);
-            Shared<PerspectiveCamera> cam = new PerspectiveCamera.make(fovRad: radians(deg: 50.0),
-                                                                        aspect: cast<float32>(WIDE) / cast<float32>(HIGH),
-                                                                        near: 0.1, far: 100.0);
+            Shared<PerspectiveCamera> cam = new PerspectiveCamera.make(fovRad: radians(deg: 50.0), near: 0.1, far: 100.0);
             cam.toneMappingMut() = ToneMapping::None;
             cam.positionMut() = Vec3.of(x: 0.0, y: 0.0, z: 4.0);
             cam.targetMut() = Optional::Some(value: copy t);

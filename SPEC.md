@@ -5,9 +5,10 @@ tested. What comes next is [ROADMAP.md](ROADMAP.md), every feature it will have 
 decided design and the library's departures from kama's are [AGENTS.graphics.md](AGENTS.graphics.md), and its history
 is the git log and [CHANGELOG.md](CHANGELOG.md).
 
-**Where it stands** (2026-11-17, kama 0.9.966): GFX-1's parts 1 to 3. A `Renderer` with no window draws a scene of boxes
-through a perspective camera into a render target, with reversed depth, and reads it back as an `@kama/image` `Image`,
-natively on Windows on wgpu-native v29.0.1.1 and on the web in headless Edge 157, Chrome for Testing 157 and Firefox 160.
+**Where it stands** (2026-11-19, kama 0.9.978): GFX-1's parts 1 to 5 and part 6's first step. A `Renderer` draws a scene
+of boxes through a perspective camera into a window or a render target, with reversed depth, and reads either back as
+an `@kama/image` `Image`, natively on Windows on wgpu-native v29.0.1.1 and on the web in headless Edge 157, Chrome for
+Testing 157 and Firefox 160.
 A box is lit by directional and ambient lights through three.js r187's physical model (`MeshStandardMaterial`), or drawn
 unlit (`MeshBasicMaterial`). A material's shader is typed nodes compiled to WGSL at run time. A misuse the types cannot
 refuse is refused and reported, never ending the program. Every frame in the tests is held to its software GPU's golden.
@@ -21,8 +22,8 @@ dependency only at the top level. Natively kama finds wgpu-native's SDK at `$KAM
 `import { graphics::… }`.
 
 ```kama
-Renderer renderer = Renderer.withDevice(device: copy device, queue: copy queue);
-Shared<RenderTarget> shot = new RenderTarget.make(width: 256, height: 256);
+Window window = …;   // @kama/window's, opened by the program, natively or on the page's canvas
+Renderer renderer = Renderer.make(window: window, options: RendererOptions.defaults());
 
 Shared<Scene> scene = new Scene.make();
 Shared<BoxGeometry> geometry = new BoxGeometry.make(width: 1.0, height: 1.0, depth: 1.0);
@@ -31,17 +32,20 @@ material.colorMut() = Color.fromHex(hex: 0x00ff00);
 Shared<Mesh> cube = new Mesh.make(geometry: geometry, material: material);
 scene.add(object: cube);
 
-Shared<PerspectiveCamera> camera = new PerspectiveCamera.make(fovRad: radians(deg: 75.0), aspect: 1.0, near: 0.1, far: 1000.0);
-camera.positionMut().z = 5.0;
-camera.targetMut() = Optional::Some(value: shot);
+Shared<PerspectiveCamera> camera = new PerspectiveCamera.make(fovRad: radians(deg: 75.0), near: 0.1, far: 1000.0);
+camera.positionMut().z = 5.0;   // it names no target, so it draws into the window, taking its aspect
 
 // each frame:
+window.pump();
 cube.rotationMut().x += 0.01;
 cube.rotationMut().y += 0.01;
-renderer.render(scene: scene, camera: camera);
-PixelRead read = renderer.readRenderTargetPixels(target: shot);
-PixelStatus s = read.poll();   // each frame, until it answers: Pending, Ready(image:) or Failed(error:)
+renderer.render(scene: scene, camera: camera);   // draws nothing until the renderer's GPU has answered
 ```
+
+A program with a device of its own hands it over instead, `Renderer.withDevice(device: copy device, queue: copy queue)`,
+and a camera names a render target, `camera.targetMut() = Optional::Some(value: shot)`, read back with
+`renderer.readRenderTargetPixels(target: shot)`, a `PixelRead` polled each frame until it answers `Pending`,
+`Ready(image:)` or `Failed(error:)`.
 
 **Every object the library shares is a `Shared<T>` made with `new`** (kyoten's rendering.md § Decided, GFX-1's part 2,
 question 3): nodes, geometries, materials and render targets. Handing one on keeps a reference, so one material serves
@@ -61,9 +65,42 @@ a resource the program owns.
 
 ## The renderer
 
-- **`Renderer.withDevice(device:, queue:)` takes a device the program already has** (part 1's question 1). Each is a
-  handle of its own, so a program passes `copy device` to keep its own, and several renderers share one device. A
-  renderer that requests its own device, `make(window:, options:)`, comes with the window.
+- **A renderer gets its GPU both ways** (part 1's question 1):
+  - **`Renderer.withDevice(device:, queue:)` takes a device the program already has.** Each is a handle of its own, so
+    a program passes `copy device` to keep its own, and several renderers share one device. It has no window: a camera
+    names a target.
+  - **`Renderer.make(window:, options:)` draws into `window` and requests its own GPU** (kyoten's rendering.md §
+    Decided, GFX-1's part 6, step 1): it makes a surface on the window, which holds it, and asks for an adapter that
+    can present to it. `RendererOptions`, a `type value` made by `defaults()`, holds the request alone: `power`
+    (`PowerPreference::HighPerformance`), `forceFallbackAdapter` (false) and `device`, `@kama/gpu`'s `DeviceOptions`.
+    Every drawing setting is a property pair on the renderer. **Each render polls the request,** then reads what the
+    window's surface offers the adapter and asks for the device, and once the device answers makes what it draws with;
+    until then a render draws nothing and reports nothing, where three.js r187's `render()` throws before `init()`. A
+    request that fails is reported once, at a render (§ Misuse), and the renderer then draws nothing for good. Nothing
+    else drives the request: `clear` does nothing before the GPU answers, a target's read fails, and a compile waits
+    for the render that finds the GPU (below). `info()` shows when it has: a render's `calls`.
+- **A camera naming no target draws into the window** (part 1's question 4; part 6, step 1). At each such render:
+  - **the window's surface is configured** at the window's `framebufferSize()`, as of the program's last `pump()`, and
+    the present mode in effect, and again whenever either differs from what it was configured with, or an acquire says
+    the surface is out of date or lost, as Bevy and Godot resize, where three.js waits for the program's `setSize`. Its
+    format is the first the surface offers with an 8-bit sRGB view, RGBA or BGRA, drawn through that view, as Bevy
+    takes one, so the output pass writes the window as it writes an 8-bit target. The window is opaque where the surface
+    offers it, and its frames are render attachments alone. A frame the surface calls suboptimal is drawn: Vulkan says
+    so of a frame whose size is not its window's client area's, and configuring again would do so every frame;
+  - **a window of no area (minimised) or a closed one draws nothing and reports nothing;**
+  - **the frame is acquired only when the output pass will write it,** so the window is never shown a frame nothing was
+    written into: while the output pass compiles, the window keeps the frame it showed last;
+  - **the frame is drawn as a target is,** with the window's own scene, samples and depth, a target's textures without
+    its colour, made at the frame's size and again at a new one, and presented. The frame's size is the window's in
+    device pixels: natively the size configured, and on the web the canvas's own, which the window sets;
+  - **a camera with no aspect of its own takes the frame's** (§ The camera).
+- **Vsync is a property pair, `presentMode()` and `presentModeMut()`, `@kama/gpu`'s `PresentMode`, `Fifo` by default**
+  (kyoten's rendering.md § Decided, GFX-1's part 6, step 1's question 2), every peer's default. A change takes effect at
+  the next render into the window, which configures the surface again, and compiles nothing.
+  `supportsPresentMode(mode:)` answers from what the surface offers the adapter, once it has answered; before then, and
+  on a renderer with no window, `Fifo` alone, which every surface offers. On the web it is `Fifo` alone: a WebGPU
+  canvas has no present mode, and the browser paces its frames. A mode the surface does not offer is reported once, at
+  a render, and the window presents with `Fifo`; `presentMode()` still says what was set, as `antialiasing()` does.
 - **The clear colour is a property pair,** `clearColor()` and `clearColorMut()`, black by default. Its alpha is
   `clearAlpha()` and `clearAlphaMut()`, 1 by default (three.js's defaults). The alpha is never sRGB-encoded: 0.4 is 102.
 - **`clear(target:)` fills a target with the clear colour.** On the default target it reads back as written: a target
@@ -174,19 +211,22 @@ a resource the program owns.
     process waits at the submit.
 
   The frame's own passes take the renderer's way, never a mesh's: while the tone-mapped resolve compiles, the GPU
-  resolves, the ladder's next rung, and while the output pass compiles it is left out, the target left as it was;
-  under `Wait` they are made during the render. A refused pipeline of the
+  resolves, the ladder's next rung, and while the output pass compiles it is left out, the target left as it was and
+  the window showing its last frame; under `Wait` they are made during the render. A refused pipeline of the
   renderer's own is handled alike, and reported (§ Misuse).
 - **`compile(scene:, camera:)` asks for every pipeline a scene needs, off the frame,** as three.js's `compileAsync` and
   Unreal's precaching: each mesh's two at the anti-aliasing method's samples a texel, and, where its way (its own, else
   the renderer's) is `General`, its material's general form's two, so a mesh added later as another variant draws by
   it; the stand-in's general form's two, once, where any mesh's way is `StandIn`; the tone-mapped resolve's when
-  the method takes it; and the output pass's for the camera's tone mapping when its target is 8-bit. It places the scene as
-  a render does. It hands back a `CompileRequest`, polled to a `CompileStatus`: `Pending` while any pipeline it asked
+  the method takes it; and the output pass's for the camera's tone mapping when its target is 8-bit, or, for a camera
+  drawing into the window, at the window's format, with the window read's pass onto the window (§ Reading the window
+  back). It places the scene as a render does. It hands back a `CompileRequest`, polled to a `CompileStatus`: `Pending` while any pipeline it asked
   for compiles, `Ready` once each has answered, made or refused. A render then draws everything with no miss, while
   nothing new joins the scene and the method and the camera's tone mapping stay as they were. A loading screen polls
   it, and so does a test before it renders. Dropping it while it is pending is safe: the renderer keeps what it asked
-  for.
+  for. **A compile asked before a renderer made with a window has its GPU is asked for by the first render that finds
+  the GPU,** and is `Pending` until then, so a loading screen that renders while it polls is ready with no miss. On a
+  renderer whose GPU never came it is `Ready` at once, having asked for nothing.
 - **`info()` says what the last render did,** as three.js's `renderer.info`: `calls` and `triangles`, every draw of the
   scene's meshes the GPU was asked for, both passes' (a mesh is two calls, as three.js counts a shadow pass's draws),
   `objects` (the meshes the scene holds a record for) and `matrices` (the world matrices its walk made: 0 when nothing in
@@ -216,6 +256,15 @@ Decided, GFX-1's part 2, question 4), as `@kama/gpu` reports every misuse of Web
 
 - **A camera naming no target, rendered by a renderer with no window, draws nothing.** The renderer records the error,
   of kind `GraphicsErrorKind::NoTarget`, and the scene's walk still runs, so `info()` says 0 calls.
+- **A renderer made with a window that gets no GPU draws nothing, for good,** reported once, at the render that finds
+  it: of kind `GraphicsErrorKind::Device` when no adapter answered or the device was refused, such as one asking for a
+  limit past the adapter's; of kind `GraphicsErrorKind::Window` when the window has no surface, or the adapter cannot
+  draw into it. Its window reads then fail, and its compiles answer `Ready`, having asked for nothing.
+- **What the window refuses is reported, of kind `GraphicsErrorKind::Window`,** and nothing is drawn into it that
+  render: its surface refusing a configuration (larger than the device allows), or giving no frame, or offering no
+  8-bit sRGB format. A refusal is reported once until a frame is shown again, never each frame. A present mode the
+  surface does not offer is reported once, until another mode is set, and the window presents with `Fifo`. An acquire
+  that finds the surface out of date or lost is no misuse: the surface is configured again, and the frame drawn.
 - **`renderer.takeErrors()` hands back what was recorded since the last call,** as `@kama/gpu`'s `device.takeErrors()`
   does: a `RendererErrors`, with `reports()` (each a `GraphicsErrorReport`, its `kind()` and `message()`), `dropped()`
   and `isEmpty()`. It keeps the oldest 64, since the first is usually the cause, and counts the rest in `dropped()`.
@@ -237,8 +286,9 @@ Decided, GFX-1's part 2, question 4), as `@kama/gpu` reports every misuse of Web
   "a material's depth-only pipeline…"): each answers on its own, natively on `@kama/gpu`'s threads, so one may be found
   a poll before the other, and the other is then never reported. The same holds for a general form's two. It is
   recorded by the render that finds it, or by `takeErrors()` when a compile request found it
-  first. A pipeline of the renderer's own that the device refuses, the output pass's or the tone-mapped resolve's, is a
-  fault below the program, recorded as `GraphicsErrorKind::Pipeline`.
+  first. A pipeline of the renderer's own that the device refuses, the output pass's, the tone-mapped resolve's or the
+  window read's pass onto the window, is a fault below the program, recorded as `GraphicsErrorKind::Pipeline`; the
+  window reads held then fail.
 - **A material whose general form alone the device refuses draws by its own pipelines,** and while they compile its
   draws are skipped. A general form takes two more of the values a device passes between the stages than its material
   (§ The compiler), so a material passing 15 or 16 of the 16 a device takes has none. The renderer records it once, of kind `GraphicsErrorKind::Material`, its words
@@ -570,11 +620,16 @@ WGSL's reserved words beyond its keywords are refused by the GPU's own compile, 
 
 ## The camera
 
-- **`PerspectiveCamera.make(fovRad:, aspect:, near:, far:)` is three.js's four,** the vertical field of view in
+- **`PerspectiveCamera.make(fovRad:, near:, far:)` is three.js's four but its aspect,** the vertical field of view in
   radians. Each is a property pair (`fovRadMut()`, …), and the projection follows a change with no update call.
+- **Its aspect follows what it draws into, unless the program fixes it** (kyoten's rendering.md § Decided, GFX-1's part
+  6, step 1's question 1): `aspect()` and `aspectMut()` are an `Optional<float32>`, `None` by default, when each render
+  hands the camera the width over height of the target or window frame it draws into, as Bevy, Godot and Unity follow.
+  Before its first render it is 1, three.js's default. A program that wants a fixed shape, a 2.39 letterbox or a split
+  screen's half, sets one, which every render keeps, and `None` follows again, as Unity's `ResetAspect()`.
 - **Depth is reversed, always** (GFX-1's question 1): `projectionMatrix()` is three.js r187's `makePerspective` with
   `reversedDepth`, mapping the near plane to 1 and the far plane to 0. `PerspectiveCamera.withInfiniteFar(fovRad:,
-  aspect:, near:)` sees to infinity: its far is +infinity, and its projection the limit.
+  near:)` sees to infinity: its far is +infinity, and its projection the limit.
 - **It names the target it draws into,** `target()`/`targetMut()`, an `Optional<Shared<RenderTarget>>`. It looks down
   its -Z, and its view is its world matrix inverted with its scale taken out, as three.js's.
 - **Its exposure is in EV100,** `exposure()`/`exposureMut()` (kyoten's rendering.md § Decided, part 4's question 3), as
@@ -613,6 +668,28 @@ WGSL's reserved words beyond its keywords are refused by the GPU's own compile, 
   - A read polled again after its image was handed over says `Failed(GpuError::Taken)`.
   - A read the device could not finish says the device's words.
 - **Dropping a read while it is pending is safe,** and leaves the next read whole.
+- Before a renderer made with a window has its GPU there is nothing to read, and the read fails.
+
+## Reading the window back
+
+**`readWindowPixels()` starts a read of what the window shows, a `PixelRead`** (kyoten's rendering.md § Decided,
+GFX-1's part 6, step 1's third question, Bevy's way), polled as a target's is, until it hands back the image of the next
+frame a render draws into the window: the window's size in device pixels, `Rgba8Unorm` in sRGB, straight alpha, top row
+first, a BGRA frame's channels put in RGBA's order.
+- **A render that draws nothing into the window leaves it pending:** the GPU not yet answered, a window of no area, or
+  the output pass still compiling. Reads asked before one render each hand back that frame.
+- **The frame read is drawn into a texture of the renderer's own, as Bevy's screenshot is:** the output pass writes it,
+  in the window's size and view format, instead of the frame; it is copied into a buffer for each read held, and a
+  full-screen pass draws it onto the frame, each texel read with `textureLoad` through the sRGB view both share, before
+  the present. The window's frames stay render attachments alone, so a frame not read costs nothing, and no surface fails
+  a read. A frame read costs that texture, made for the frame, and one pass. **The pass changes no byte:** an sRGB view
+  decodes and encodes every 8-bit value back to itself, measured on every leg, hardware and software, for both formats
+  (kyoten's `.scratch/s40/probe-roundtrip`), and on the web the page's canvas reads as the window read (§ Tests). While
+  that pass compiles, the frame is drawn into the window directly and the reads wait, and `compile(scene:, camera:)`
+  asks for it for a camera drawing into the window.
+- **The renderer holds each read weakly,** so a read dropped before its frame costs nothing.
+- **A read fails, at its first poll, on a renderer with no window** ("the renderer has no window"), on one whose GPU
+  never came, and on one dropped before it drew the read's frame, which fails the reads it holds as it is dropped.
 
 ## Tests
 
@@ -623,7 +700,9 @@ WGSL's reserved words beyond its keywords are refused by the GPU's own compile, 
 - then `tests/`, one program, built debug and release and run natively, and built for the web and run under `kama run`
   in Edge, Firefox and the pinned Chrome for Testing, each started as `tools/browsers.mjs` says.
 
-It is 414 cases on each leg that names a software GPU, and 401 in Edge, whose leg names none. Natively on Windows the
+It is 446 cases natively and 447 in Firefox and in Chrome for Testing, each leg that names a software GPU, and 434
+in Edge, whose leg names none: a web leg reads the page's canvas and holds that it offers `Fifo` alone, where natively a
+mode the surface offers is taken. Natively the window run opens a system window, so it needs a display. Natively on Windows the
 legs run with `@kama/gpu`'s `dxcompiler.dll` on the PATH (`tools/legs.sh`), so Direct3D 12 compiles with DXC, as
 Firefox's WebGPU does.
 
@@ -907,6 +986,37 @@ Firefox's WebGPU does.
   That the next render draws by what was applied is held by an image, part 4's step 5's switch back to the tone-mapped
   resolve (above). Whether `applyQuality` hands back the quality in effect, rather than the quality it was handed,
   cannot be told apart until a method can step down: GFX-19's cases hold that.
+- **Part 6's step 1, the renderer in a window, on each leg's GPU** (`tests/src/window.kama`), a run of its own in a
+  window opened unfocused, natively a system window and on the web the page's `#canvas`. Each renderer there requests
+  its own GPU through `make(window:, options:)`, the fallback adapter on a leg that names a software GPU:
+  - **a device refused:** a renderer whose device asks for a 2D texture limit past every adapter's reports it once, as
+    `Device`, and draws nothing, and a render after reports nothing more; a window read on it fails at once, and a
+    compile on it is `Ready`;
+  - **before the GPU answers:** the present mode is `Fifo`, the only one offered, and a compile is `Pending`; renders
+    draw nothing and report nothing (natively about a dozen), and one draws once the GPU has answered. The compile is
+    asked then and is `Ready` once its pipelines are, and the render after draws into the window with no miss, each box
+    twice;
+  - **the window read:** a read is pending through a render into a window of no area (a posted `Resize` to 0 x 0),
+    which draws nothing and reports nothing; two reads asked before one render each hand back that frame, the window's
+    size in pixels; the frame reads as the same scene drawn into a target of its size, byte for byte, on every leg,
+    hardware included, through the BGRA frames of Direct3D 12 and the web; on the web the page's canvas, read through a
+    2D canvas in the tick that rendered (`tests/js/graphicstests.js`), reads as the window read, so the pass onto the
+    window changed no byte; a read dropped before its frame leaves the render whole;
+  - **a posted `Resize`** configures the surface again at the next render: natively the frame, and so the read, takes
+    the posted size, and on the web the canvas keeps its own pixels; a camera with no aspect takes the frame's, there
+    and before;
+  - **a window larger than the device allows** (a posted `Resize` 16384 wide): its surface refuses it, reported once
+    over two renders, as `Window`, and nothing is drawn; at its own size again it draws, with no report;
+  - **vsync:** once the surface is read it offers `Fifo`, and on the web nothing else; the first mode it does not offer
+    is reported once over two renders, as `Window`, each render drawing with `Fifo`, `presentMode()` saying what was
+    set, and `Fifo` set again presents with no report; natively the first mode it does offer is taken with no report;
+  - **the read's ends:** a renderer dropped before its next frame fails the read it holds; a renderer with no window
+    fails a window read at its first poll, and offers `Fifo` alone;
+  - **the camera's aspect:** 1 before a render; a 2:1 target's taken at a render; a fixed 0.75 kept through one, and
+    read back; set back to `None`, the target's again.
+
+  Every other GPU case's camera now follows its target, its aspect dropped (one with no render fixes its own), and no
+  golden moved.
 - **Part 2's golden holds part 3's compiler:** `boxes/<gpu>.png` is matched byte for byte with `MeshBasicMaterial`'s
   nodes, as it was with its WGSL by hand.
 - **Printed from outside the program:** the gate counts each leg's printed lines: one for the render refused by the

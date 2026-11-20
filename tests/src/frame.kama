@@ -106,7 +106,7 @@ type resource FrameRun {
         r.clearColorMut() = clearTo;
         r.clearAlphaMut() = clearAlpha;
         Shared<RenderTarget> t = new RenderTarget.withFormat(width: WIDE, height: HIGH, format: format);
-        Shared<PerspectiveCamera> cam = new PerspectiveCamera.make(fovRad: radians(deg: 50.0), aspect: 16.0 / 12.0, near: 0.1, far: 100.0);
+        Shared<PerspectiveCamera> cam = new PerspectiveCamera.make(fovRad: radians(deg: 50.0), near: 0.1, far: 100.0);
         cam.targetMut() = Optional::Some(value: copy t);
         cam.exposureMut() = ev;
         cam.toneMappingMut() = ToneMapping::None;
@@ -218,7 +218,7 @@ type resource FrameRun {
 
     // The camera's defaults and the named exposures: no GPU.
     fn void defaults() {
-        Shared<PerspectiveCamera> cam = new PerspectiveCamera.make(fovRad: 1.0, aspect: 1.0, near: 0.1, far: 10.0);
+        Shared<PerspectiveCamera> cam = new PerspectiveCamera.make(fovRad: 1.0, near: 0.1, far: 10.0);
         float32 ev = cam.exposure();
         float32 unit = ev100For(exposure: 1.0);
         float32 want = -0.26303440;

@@ -196,9 +196,7 @@ type resource BoxesRun {
             Renderer r = gpuResolved(device: copy this.device, queue: copy this.queue);
             r.clearColorMut() = Color.fromHex(hex: BACKDROP);
             Shared<RenderTarget> t = new RenderTarget.make(width: WIDE, height: HIGH);
-            Shared<PerspectiveCamera> cam = new PerspectiveCamera.make(fovRad: radians(deg: 50.0),
-                                                                        aspect: cast<float32>(WIDE) / cast<float32>(HIGH),
-                                                                        near: 0.1, far: 100.0);
+            Shared<PerspectiveCamera> cam = new PerspectiveCamera.make(fovRad: radians(deg: 50.0), near: 0.1, far: 100.0);
             cam.toneMappingMut() = ToneMapping::None;
             cam.positionMut() = Vec3.of(x: 0.0, y: 1.2, z: 3.5);
             cam.lookAt(target: Vec3.zero());
@@ -358,7 +356,7 @@ type resource BoxesRun {
     // refuses one render here, and the one told not to print refuses 70.
     unsafe fn void refusalCases() {
         Shared<Scene> s = match (this.crossing) { case Some(value: x): copy x; case None: { panic(msg: "made at the first stage"); } };
-        Shared<PerspectiveCamera> aimless = new PerspectiveCamera.make(fovRad: 1.0, aspect: 1.0, near: 0.1, far: 10.0);
+        Shared<PerspectiveCamera> aimless = new PerspectiveCamera.make(fovRad: 1.0, near: 0.1, far: 10.0);
         aimless.toneMappingMut() = ToneMapping::None;
         Renderer told = gpuResolved(device: copy this.device, queue: copy this.queue);
         bool printsByDefault = told.printErrors();
@@ -440,7 +438,7 @@ type resource BoxesRun {
         this.found.add(name: "tree: rotateOnWorldAxis turns about a world axis under a turned parent (world Z is the parent's Y)",
                        why: turned ? "" : "the child's quaternion is ${q.x} ${q.y} ${q.z} ${q.w}");
         // lookAt: a camera at (5, 0, 5) looking at the origin turns its -Z there, 45 degrees about Y
-        Shared<PerspectiveCamera> eye = new PerspectiveCamera.make(fovRad: 1.0, aspect: 1.0, near: 0.1, far: 10.0);
+        Shared<PerspectiveCamera> eye = new PerspectiveCamera.make(fovRad: 1.0, near: 0.1, far: 10.0);
         eye.toneMappingMut() = ToneMapping::None;
         eye.positionMut() = Vec3.of(x: 5.0, y: 0.0, z: 5.0);
         eye.lookAt(target: Vec3.zero());

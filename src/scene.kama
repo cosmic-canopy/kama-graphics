@@ -413,8 +413,8 @@ type resource Walk {
     friend Mesh[push];
     friend DirectionalLight[pushLight, refuse];
     friend AmbientLight[pushLight];
-    friend Renderer::render[matrices, refusals];
-    friend Renderer::compile[refusals];
+    friend Renderer::renderOn[matrices, refusals];
+    friend Renderer::compileOn[refusals];
 
     ctor make(Shared<CoreTable> table, Shared<LightTable> lights) {
         this.table = give table;
@@ -556,7 +556,7 @@ type resource NodePart {
     friend PerspectiveCamera[...];
     friend DirectionalLight[...];
     friend AmbientLight[...];
-    friend Renderer::render[...];
+    friend Renderer::renderOn[...];
 
     unsafe ctor make() {
         this.pos = Vec3.zero();
@@ -787,9 +787,9 @@ type resource Scene implements Object3D {
     Shared<CoreTable> table;
     Shared<LightTable> lightTable;
 
-    friend Renderer::render[walkAll, recordsOn, drawSlots, geometryAt, materialAt, mirroredAt, wayAt, objects, lightsOn,
+    friend Renderer::renderOn[walkAll, recordsOn, drawSlots, geometryAt, materialAt, mirroredAt, wayAt, objects, lightsOn,
                             directionalCount, ambientLight];
-    friend Renderer::compile[walkAll, drawSlots, materialAt, mirroredAt, wayAt];
+    friend Renderer::compileOn[walkAll, drawSlots, materialAt, mirroredAt, wayAt];
 
     public unsafe ctor make() {
         this.part = NodePart.make();
@@ -967,38 +967,43 @@ fn float32 ev100For(float32 exposure) {
 type resource PerspectiveCamera implements Object3D {
     NodePart part;
     float32 fovValue;
-    float32 aspectValue;
+    // Width over height: the program's own, or, with None, what the camera draws into at each render (kyoten's
+    // rendering.md § Decided, GFX-1's part 6, step 1's question 1), 1 before its first render, as three.js's default.
+    Optional<float32> fixedAspect = Optional::None;
+    float32 followed = 1.0;
     float32 nearValue;
     float32 farValue;
     Optional<Shared<RenderTarget>> into = Optional::None;
     float32 ev = ev100For(exposure: 1.0);
     ToneMapping curve = ToneMapping::BlenderAgX;
 
-    friend Renderer::render[placeAlone, viewProjection, exposureScale];
+    friend Renderer::renderOn[placeAlone, viewProjection, exposureScale, follow];
 
-    // three.js's four: the vertical field of view in radians, width over height, and the near and far planes.
-    public unsafe ctor make(float32 fovRad, float32 aspect, float32 near, float32 far) {
+    // three.js's four but its aspect: the vertical field of view in radians, and the near and far planes. Its aspect
+    // follows what it draws into unless the program fixes it (`aspectMut()`).
+    public unsafe ctor make(float32 fovRad, float32 near, float32 far) {
         this.part = NodePart.make();
         this.part.looksBack = true;
         this.fovValue = fovRad;
-        this.aspectValue = aspect;
         this.nearValue = near;
         this.farValue = far;
     }
     // A camera that sees to infinity: its far plane is +infinity.
-    public unsafe ctor withInfiniteFar(float32 fovRad, float32 aspect, float32 near) {
+    public unsafe ctor withInfiniteFar(float32 fovRad, float32 near) {
         this.part = NodePart.make();
         this.part.looksBack = true;
         this.fovValue = fovRad;
-        this.aspectValue = aspect;
         this.nearValue = near;
         this.farValue = bitcast<float32>(0x7f800000);
     }
 
     public const fn float32 fovRad() { return this.fovValue; }
     public fn ref float32 fovRadMut() { return this.fovValue; }
-    public const fn float32 aspect() { return this.aspectValue; }
-    public fn ref float32 aspectMut() { return this.aspectValue; }
+    // Width over height, the program's own, or None, the default, when it follows what the camera draws into: a render
+    // hands it the target's or the window's width over height, as Bevy, Godot and Unity do (step 1's question 1). Set
+    // it to keep an aspect of its own, as for a picture stretched to fit; set it back to None to follow again.
+    public const fn Optional<float32> aspect() { return this.fixedAspect; }
+    public fn ref Optional<float32> aspectMut() { return this.fixedAspect; }
     public const fn float32 near() { return this.nearValue; }
     public fn ref float32 nearMut() { return this.nearValue; }
     public const fn float32 far() { return this.farValue; }
@@ -1030,13 +1035,20 @@ type resource PerspectiveCamera implements Object3D {
             c = this.nearValue / (this.farValue - this.nearValue);
             d = this.farValue * this.nearValue / (this.farValue - this.nearValue);
         }
-        return Mat4.fromCols(c0: Vec4.of(x: f / this.aspectValue, y: 0.0, z: 0.0, w: 0.0),
+        float32 aspect = match (this.fixedAspect) { case Some(value: a): a; case None: this.followed; };
+        return Mat4.fromCols(c0: Vec4.of(x: f / aspect, y: 0.0, z: 0.0, w: 0.0),
                              c1: Vec4.of(x: 0.0, y: f, z: 0.0, w: 0.0),
                              c2: Vec4.of(x: 0.0, y: 0.0, z: c, w: -1.0),
                              c3: Vec4.of(x: 0.0, y: 0.0, z: d, w: 0.0));
     }
 
     unsafe fn void placeAlone() { this.part.placeAlone(); }
+
+    // What a render draws into, `width` by `height`: the aspect a camera with none of its own takes.
+    fn void follow(uint32 width, uint32 height) {
+        if (width == 0 || height == 0) { return; }
+        this.followed = cast<float32>(width) / cast<float32>(height);
+    }
 
     // The projection times the view: the inverse of the camera's world matrix, its scale taken out, as three.js's.
     const fn Mat4 viewProjection() {

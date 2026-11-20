@@ -8,6 +8,8 @@
   "webgpu": true,
   "shellFile": "web/shell.html",
   "assets": "goldens",
+  "jsLibraries": ["js/graphicstests.js"],
+  "cincludes": ["csrc"],
   "modules": {
     ".": { "visibility": "internal" }
   },

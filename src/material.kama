@@ -42,9 +42,9 @@ type resource MaterialGpu {
     uint32 compiledGraph = 0;
     DynamicArray<string> refusals;
 
-    friend Renderer::render[groupOn, staleOn, compiledAt, source, generalSource, refused];
+    friend Renderer::renderOn[groupOn, staleOn, compiledAt, source, generalSource, refused];
     friend Renderer::compileNodes[store];
-    friend Renderer::compile[compiledAt, source, generalSource, refused];
+    friend Renderer::compileOn[compiledAt, source, generalSource, refused];
     friend Renderer::standInEntry[compiledAt, generalSource, refused];
 
     public unsafe ctor make() {

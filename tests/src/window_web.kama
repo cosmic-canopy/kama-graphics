@@ -1,0 +1,39 @@
+file @compileFor(ARCH_WASM32);
+// The window cases' reach into the page, on the web (tests/src/window.kama): the window's canvas read back as the page
+// shows it, through tests/js/graphicstests.js, so a case holds what reached the window and not only what a window read
+// handed back. A page can read a WebGPU canvas exactly while the task that drew it runs, so the case reads in the tick
+// that rendered. On the web a posted Resize moves the window's record but leaves the canvas its own pixels, which the
+// frame then has (measured on every browser, kyoten's .scratch/s40/probe-resize).
+
+import { std::collections::DynamicArray, std::collections::FixedArray };
+export { canvasReadable, readCanvas, postedSizeTaken };
+
+extern "graphicstests.h";
+extern fn int32 graphicstests_canvas_read(UnsafeConstPtr<cchar> sel, UnsafePtr<uint8> dst, int32 capacity, UnsafePtr<int32> width,
+                                          UnsafePtr<int32> height);
+
+comptime int32 CANVAS_BYTES = 4194304;   // a canvas of a million texels at most
+
+fn bool canvasReadable() { return true; }
+
+// Whether a posted Resize gives the window's frame the posted size: natively it does, and on the web the canvas keeps
+// its own pixels.
+fn bool postedSizeTaken() { return false; }
+
+// The canvas `#canvas` into `into`, 8-bit RGBA, top row first, its size into `width` and `height`: "" when read, else why
+// not.
+unsafe fn string readCanvas(ref DynamicArray<uint8> into, ref isize width, ref isize height) {
+    FixedArray<uint8> held = FixedArray.make(size: cast<isize>(CANVAS_BYTES));
+    int32 w = 0;
+    int32 h = 0;
+    string sel = "#canvas";
+    int32 n = graphicstests_canvas_read(sel: sel.cstr(), dst: held.dataPtrMut(), capacity: CANVAS_BYTES, width: addr(of: w),
+                                        height: addr(of: h));
+    if (n == -1) { return "no canvas on the page matches #canvas"; }
+    if (n == -2) { return "the canvas is larger than the read's buffer"; }
+    width = cast<isize>(w);
+    height = cast<isize>(h);
+    into.clear();
+    for (isize i = 0; i < cast<isize>(n) * 4; i = i + 1) { into.add(item: held[i]); }
+    return "";
+}

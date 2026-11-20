@@ -37,7 +37,7 @@
 
 import {
     std::collections::DynamicArray, std::collections::FixedArray,
-    std::io::stderr, std::io::StdErr, std::memory::replace,
+    std::io::stderr, std::io::StdErr, std::memory::replace, std::memory::Weak,
     std::math::Mat4, std::math::Vec3,
     gpu::Device, gpu::Queue, gpu::GpuError, gpu::Texture, gpu::TextureView, gpu::TextureViewDescriptor, gpu::TextureFormat,
     gpu::Buffer, gpu::BufferDescriptor, gpu::BufferUsage, gpu::BufferRead, gpu::ReadStatus, gpu::BufferBinding,
@@ -54,6 +54,10 @@ import {
     gpu::TextureDescriptor, gpu::TextureUsage, gpu::TextureBindingLayout, gpu::SamplerBindingLayout, gpu::Sampler,
     gpu::SamplerDescriptor, gpu::AddressMode, gpu::FilterMode, gpu::MipmapFilterMode, gpu::TexelCopyTextureInfo,
     gpu::TexelCopyBufferLayout, gpu::Extent3D, gpu::TextureDimension, gpu::TextureViewDimension, gpu::TextureSampleType,
+    gpu::Instance, gpu::AdapterOptions, gpu::AdapterRequest, gpu::AdapterStatus, gpu::DeviceOptions, gpu::DeviceRequest,
+    gpu::DeviceStatus, gpu::PowerPreference, gpu::Surface, gpu::SurfaceCapabilities, gpu::SurfaceConfig, gpu::SurfaceTexture,
+    gpu::SurfaceError, gpu::ConfigureError, gpu::PresentMode, gpu::AlphaMode as SurfaceAlpha,
+    window::Window, window::NativeWindow, window::Size,
     image::Image, image::ImageError, image::PixelFormat, image::AlphaMode, image::ColorSpace,
     Color, RenderTarget, Scene, Walk, PerspectiveCamera, Geometry, BufferGeometry, Material, MaterialSettings, NodeBuilder,
     MeshStandardMaterial,
@@ -61,8 +65,8 @@ import {
     Quality,
 };
 export {
-    Renderer, RenderInfo, PixelRead, PixelStatus, GraphicsErrorKind, GraphicsErrorReport, RendererErrors, WhileCompiling,
-    CompileRequest, CompileStatus,
+    Renderer, RendererOptions, RenderInfo, PixelRead, PixelStatus, GraphicsErrorKind, GraphicsErrorReport, RendererErrors,
+    WhileCompiling, CompileRequest, CompileStatus,
 };
 
 // A copied row's bytes, `texel` bytes a texel: WebGPU aligns them to 256.
@@ -193,10 +197,14 @@ comptime uint64 FRAME_BYTES = 96;
 // stand-in's general form, so the draws that would take it are skipped, reported once. `Light`: a light that can light
 // nothing, such as a directional light at its own target, reported when the light is written so. `Pipeline`: the
 // device refused a pipeline of the renderer's own, a fault below the program: the output pass's, which is then left out,
-// or the tone-mapped resolve's, when the GPU resolves instead. A later misuse joins the list, so a program's `match` on
-// it has a `case _:`.
+// or the tone-mapped resolve's, when the GPU resolves instead, or the window read's pass onto the window, when a window
+// read fails. `Device`: a renderer made with a window got no GPU, its adapter or its device refused, so it draws
+// nothing. `Window`: the window refused something: a renderer made with a window has no surface on it, or the adapter
+// cannot draw into it; its surface refused its configuration or gave no frame; or it does not offer the present mode
+// the renderer asks for, which then presents with Fifo. A later misuse joins the list, so a program's `match` on it has
+// a `case _:`.
 @nonExhaustive
-type enum GraphicsErrorKind { NoTarget, Material, Light, Pipeline }
+type enum GraphicsErrorKind { NoTarget, Material, Light, Pipeline, Device, Window }
 
 // One misuse a renderer refused, in its words, whole, as @kama/gpu's `GpuErrorReport`.
 type resource GraphicsErrorReport {
@@ -300,6 +308,7 @@ type resource PipelineSlot {
     GraphicsErrorKind sort;  // ...and the kind it is reported as
 
     friend Renderer[make, ready, refusedNow, wanted, ask, makeNow, settle, untold, silence, kind, pipeline];
+    friend RendererGpu[make];
     friend CompileRequest[settle];
 
     ctor make(string what, GraphicsErrorKind kind) {
@@ -355,30 +364,134 @@ type resource PipelineSlot {
 // answered, made or refused. A refusal is the renderer's to report, by its next render or `takeErrors()`.
 type enum CompileStatus { Pending, Ready }
 
+// What a compile request asked for, shared with its renderer: a compile asked before a renderer made with a window has
+// its GPU waits, unasked, for the first render that finds the GPU (kyoten's rendering.md § Decided, GFX-1's part 6, step
+// 1), and is asked for then.
+type resource CompileSlots {
+    DynamicArray<Shared<PipelineSlot>> slots;
+    bool asked;
+
+    friend Renderer[make, fill];
+    friend CompileRequest[isAsked, count, at];
+
+    ctor make(DynamicArray<Shared<PipelineSlot>> slots, bool asked) {
+        this.slots = give slots;
+        this.asked = asked;
+    }
+    const fn bool isAsked() { return this.asked; }
+    const fn isize count() { return this.slots.length(); }
+    unsafe const fn Shared<PipelineSlot> at(isize i) { return copy this.slots[i]; }
+    // Asked for at last: these pipelines, none when the renderer's GPU never came.
+    fn void fill(DynamicArray<Shared<PipelineSlot>> slots) {
+        this.slots = give slots;
+        this.asked = true;
+    }
+}
+
 // The pipelines a scene needs, asked for off the frame by `renderer.compile(scene:, camera:)`, polled until each has
 // answered, as @kama/gpu's requests are. Dropping it while it is pending is safe: the renderer keeps what it asked for.
+// One asked before a renderer made with a window has its GPU is `Pending` until a render finds the GPU and asks for them.
 type resource CompileRequest {
-    DynamicArray<Shared<PipelineSlot>> slots;
+    Shared<CompileSlots> state;
 
-    friend Renderer::compile[make];
+    friend Renderer[make];
 
-    ctor make(DynamicArray<Shared<PipelineSlot>> slots) { this.slots = give slots; }
+    ctor make(Shared<CompileSlots> state) { this.state = give state; }
 
     public unsafe fn CompileStatus poll() {
+        if (!this.state.isAsked()) { return CompileStatus::Pending; }
         bool all = true;
-        for (isize i = 0; i < this.slots.length(); i = i + 1) {
-            Shared<PipelineSlot> slot = copy this.slots[i];
+        for (isize i = 0; i < this.state.count(); i = i + 1) {
+            Shared<PipelineSlot> slot = this.state.at(i: i);
             if (!slot.settle()) { all = false; }
         }
         return all ? CompileStatus::Ready : CompileStatus::Pending;
     }
 }
 
-type resource Renderer {
+// A compile asked before the renderer's GPU, kept until a render finds it.
+type resource DeferredCompile {
+    Shared<Scene> scene;
+    Shared<PerspectiveCamera> camera;
+    Shared<CompileSlots> state;
+
+    friend Renderer[make, scene, camera, state];
+
+    ctor make(Shared<Scene> scene, Shared<PerspectiveCamera> camera, Shared<CompileSlots> state) {
+        this.scene = give scene;
+        this.camera = give camera;
+        this.state = give state;
+    }
+}
+
+// How `Renderer.make(window:, options:)` asks for its GPU (kyoten's rendering.md § Decided, GFX-1's part 6, step 1's
+// details): the request alone, as WebGPU's `GPURequestAdapterOptions` and `GPUDeviceDescriptor` are. Everything a render
+// draws by is the renderer's own, a property pair set at any time.
+type value RendererOptions {
+    public PowerPreference power = PowerPreference::HighPerformance;
+    // WebGPU's `forceFallbackAdapter`: only a software GPU may answer, as a test held to a golden asks.
+    public bool forceFallbackAdapter = false;
+    // The device asked for: WebGPU's limits and features, and whether its errors are printed.
+    public DeviceOptions device = DeviceOptions.defaults();
+
+    public ctor defaults() { }
+}
+
+// The window read's pass onto the window (kyoten's rendering.md § Decided, GFX-1's part 6, step 1's third question, Bevy's
+// way): one full-screen triangle writing each texel of the read's texture onto the window's frame, read with
+// `textureLoad` through the sRGB view both share, which decodes and encodes every 8-bit value back to itself (measured
+// on every leg, kyoten's .scratch/s40/probe-roundtrip).
+fn string blitWgsl() {
+    return "@group(0) @binding(0) var frame: texture_2d<f32>;\n"
+        + "@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {\n"
+        + "  var corner = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));\n"
+        + "  return vec4f(corner[i], 0.0, 1.0);\n"
+        + "}\n"
+        + "@fragment fn fs(@builtin(position) at: vec4f) -> @location(0) vec4f {\n"
+        + "  return textureLoad(frame, vec2i(at.xy), 0);\n"
+        + "}\n";
+}
+
+// The window's configuration from what its surface offers, presenting with `mode` (`Renderer.windowConfig`): the first
+// format drawn through an 8-bit sRGB view, RGBA or BGRA, which a window read copies four bytes a texel; an opaque window
+// where the surface offers one, else its first alpha mode; a render attachment alone. None when the surface offers no
+// such format.
+fn Optional<SurfaceConfig> configFrom(const ref SurfaceCapabilities caps, PresentMode mode) {
+    SurfaceConfig c = caps.preferred();
+    bool found = false;
+    for (isize i = 0; i < caps.formats().length() && !found; i = i + 1) {
+        TextureFormat f = caps.formats()[i];
+        Optional<TextureFormat> s = f.srgb();
+        TextureFormat view = match (s) { case Some(value: v): v; case None: f; };
+        if (view == TextureFormat::RGBA8UnormSrgb || view == TextureFormat::BGRA8UnormSrgb) {
+            c.format = f;
+            c.viewFormat = view;
+            found = true;
+        }
+    }
+    if (!found) { return Optional::None; }
+    c.present = mode;
+    for (isize i = 0; i < caps.alphaModes().length(); i = i + 1) {
+        if (caps.alphaModes()[i] == SurfaceAlpha::Opaque) { c.alpha = SurfaceAlpha::Opaque; }
+    }
+    c.usage = TextureUsage::RenderAttachment;
+    return Optional::Some(value: c);
+}
+
+// Whether the surface offers present mode `mode`.
+fn bool offersMode(const ref SurfaceCapabilities caps, PresentMode mode) {
+    for (isize i = 0; i < caps.presentModes().length(); i = i + 1) {
+        if (caps.presentModes()[i] == mode) { return true; }
+    }
+    return false;
+}
+
+// What the renderer's device makes, on the renderer while it has one: made at once by `withDevice`, and by
+// `make(window:, options:)` at the render that finds its device answered (kyoten's rendering.md § Decided, GFX-1's part
+// 6, step 1). The layouts, the frame's buffer, the DFG table and every pipeline the renderer asks for.
+type resource RendererGpu {
     Device device;
     Queue queue;
-    Color clearTo = Color.fromHex(hex: 0x000000);
-    float32 alpha = 1.0;
     BindGroupLayout frameLayout;      // group 0: the frame, the object records, the DFG table and its sampler, the lights
     BindGroupLayout materialLayout;   // group 1: a material's settings
     PipelineLayout layout;
@@ -402,31 +515,25 @@ type resource Renderer {
     PipelineLayout tablePipelineLayout;
     Optional<TextureView> agxTableView = Optional::None;   // Blender's AgX table, made the first time a camera uses it
     DynamicArray<ToneMapping> outputCurves;     // the output pass's pipelines, by the tone mapping they apply
+    DynamicArray<TextureFormat> outputFormats;  // ...and the format they write: a target's, or the window's view's
     DynamicArray<Shared<PipelineSlot>> outputs;
-    RenderInfo last = RenderInfo.of(calls: 0, triangles: 0, objects: 0, matrices: 0, misses: 0, skipped: 0, general: 0, standIn: 0,
-                                    waited: 0);
     BindGroupLayout resolveLayout;              // the tone-mapped resolve's one binding: the multisampled scene
     PipelineLayout resolvePipelineLayout;
     Shared<PipelineSlot> resolving;             // the tone-mapped resolve's pipeline, asked for the first time a render takes it
-    // How a render anti-aliases (antialiasing.kama; kyoten's rendering.md § Decided, part 4's question 1 and the owner's
-    // (A) of 2026-11-18): 4x MSAA by default, the one count above 1 WebGPU guarantees on every device, resolved by the
-    // tone-mapped resolve, the ladder's best rung. Its samples a texel are what the pipelines and a target's
-    // multisampled textures are made at. Set by `antialiasingMut()` or by `applyQuality` (quality.kama), which will take
-    // the next method down where the device lacks one once a method a device may lack exists (GFX-19).
-    Antialiasing method = Antialiasing::Msaa4ToneMapped;
-    // What a draw does while its pipelines compile (`WhileCompiling`; kyoten's rendering.md § Decided, GFX-1's part 5,
-    // question 1): the material's general form by default, a draw never waiting.
-    WhileCompiling way = WhileCompiling::General;
-    // What a draw under `WhileCompiling::StandIn` is drawn with (kyoten's rendering.md § Decided, GFX-1's part 5, step 3's
-    // question 2): the library's lit grey by default, which a program replaces.
-    Shared<Material> standing;
-    bool printing = true;                       // printErrors
-    DynamicArray<GraphicsErrorReport> errors;   // the misuses refused since the last takeErrors, at most KEPT
-    int64 overflow = 0;                         // those past KEPT, counted
+    // The window's: its scene, samples and depth, a target's textures without its colour, at the frame's size
+    Optional<Shared<RenderTarget>> windowTarget = Optional::None;
+    BindGroupLayout blitLayout;                 // the window read's pass onto the window: the read's texture
+    PipelineLayout blitPipelineLayout;
+    DynamicArray<TextureFormat> blitFormats;    // ...its pipelines, by the window's view format
+    DynamicArray<Shared<PipelineSlot>> blits;
 
-    // A renderer on a device the program already has, with its queue: each a handle of its own, so the program keeps
-    // its own (`copy device`) and several renderers share one device.
-    public unsafe ctor withDevice(Device device, Queue queue) {
+    friend Renderer[make, device, queue, frameLayout, materialLayout, layout, frame, dfgView, dfgSampling, sources, flipped,
+                    drawnAt, pipelines, prepasses, generalOf, generalSources, generalAt, generalShaded, generalDepth,
+                    generalStandIn, outputLayout, outputPipelineLayout, tableLayout, tablePipelineLayout, agxTableView,
+                    outputCurves, outputFormats, outputs, resolveLayout, resolvePipelineLayout, resolving, windowTarget,
+                    blitLayout, blitPipelineLayout, blitFormats, blits];
+
+    unsafe ctor make(Device device, Queue queue) {
         BindGroupLayoutDescriptor g0 = BindGroupLayoutDescriptor.make();
         // the frame, read by both stages: the camera by the vertex stage, the ambient light, the count and the camera's
         // position by a lit one, or by any stage a material reads them in
@@ -526,12 +633,523 @@ type resource Renderer {
         Shared<PipelineSlot> resolve = new PipelineSlot.make(what: "the tone-mapped resolve's pipeline was refused by the device, so the GPU resolves instead: ",
                                                              kind: GraphicsErrorKind::Pipeline);
         this.resolving = give resolve;
-        this.errors = DynamicArray.empty();
+        BindGroupLayoutDescriptor read = BindGroupLayoutDescriptor.make();
+        read.entry(binding: 0, visibility: ShaderStage::Fragment, layout: BindingLayout::Texture(layout: TextureBindingLayout.make()));
+        read.label(text: "the window read's frame");
+        this.blitLayout = device.createBindGroupLayout(descriptor: give read);
+        PipelineLayoutDescriptor readGroups = PipelineLayoutDescriptor.make();
+        readGroups.group(layout: copy this.blitLayout);
+        readGroups.label(text: "the window read's group");
+        this.blitPipelineLayout = device.createPipelineLayout(descriptor: give readGroups);
+        this.outputFormats = DynamicArray.empty();
+        this.blitFormats = DynamicArray.empty();
+        this.blits = DynamicArray.empty();
+        this.device = give device;
+        this.queue = give queue;
+    }
+}
+
+// What a window read waits on, shared by the read and its renderer, which holds it weakly (kyoten's rendering.md §
+// Decided, GFX-1's part 6, step 1's third question): waiting until the next render that draws into the window copies its
+// frame out, then that copy's map, or why there will be none.
+type resource FrameCapture {
+    Optional<CopiedFrame> copied = Optional::None;
+    string failure = "";
+
+    friend Renderer[make, fill, fail, waiting];
+    friend PixelRead[answer];
+
+    ctor make() { }
+    const fn bool waiting() { return this.copied.isNone() && this.failure.isEmpty(); }
+    fn void fill(CopiedFrame copied) { this.copied = Optional::Some(value: give copied); }
+    fn void fail(string words) {
+        if (this.waiting()) { this.failure = give words; } else { string later = give words; }
+    }
+    unsafe fn PixelStatus answer() {
+        if (!this.failure.isEmpty()) { return PixelStatus::Failed(error: GpuError::Refused(words: copy this.failure)); }
+        match (this.copied) {
+            case Some(value: f): { return f.poll(); }
+            case None: { return PixelStatus::Pending; }
+        };
+    }
+}
+
+type resource Renderer {
+    // What the device makes: at once by `withDevice`, and for a renderer made with a window, once its device answers.
+    Optional<RendererGpu> gpu = Optional::None;
+    Color clearTo = Color.fromHex(hex: 0x000000);
+    float32 alpha = 1.0;
+    RenderInfo last = RenderInfo.of(calls: 0, triangles: 0, objects: 0, matrices: 0, misses: 0, skipped: 0, general: 0, standIn: 0,
+                                    waited: 0);
+    // How a render anti-aliases (antialiasing.kama; kyoten's rendering.md § Decided, part 4's question 1 and the owner's
+    // (A) of 2026-11-18): 4x MSAA by default, the one count above 1 WebGPU guarantees on every device, resolved by the
+    // tone-mapped resolve, the ladder's best rung. Its samples a texel are what the pipelines and a target's
+    // multisampled textures are made at. Set by `antialiasingMut()` or by `applyQuality` (quality.kama), which will take
+    // the next method down where the device lacks one once a method a device may lack exists (GFX-19).
+    Antialiasing method = Antialiasing::Msaa4ToneMapped;
+    // What a draw does while its pipelines compile (`WhileCompiling`; kyoten's rendering.md § Decided, GFX-1's part 5,
+    // question 1): the material's general form by default, a draw never waiting.
+    WhileCompiling way = WhileCompiling::General;
+    // What a draw under `WhileCompiling::StandIn` is drawn with (kyoten's rendering.md § Decided, GFX-1's part 5, step 3's
+    // question 2): the library's lit grey by default, which a program replaces.
+    Shared<Material> standing;
+    bool printing = true;                       // printErrors
+    DynamicArray<GraphicsErrorReport> errors = DynamicArray.empty();   // the misuses refused since the last takeErrors, at most KEPT
+    int64 overflow = 0;                         // those past KEPT, counted
+    DynamicArray<DeferredCompile> deferred = DynamicArray.empty();     // compiles asked before the GPU, asked once it is
+    // When the window's frames reach the screen (kyoten's rendering.md § Decided, GFX-1's part 6, step 1's question 2):
+    // Fifo, vsync, by default, as every peer's.
+    PresentMode present = PresentMode::Fifo;
+
+    // The window's, for a renderer made with `make(window:, options:)`; none for one made `withDevice`.
+    Optional<NativeWindow> onWindow = Optional::None;   // the window's size in pixels, as of the program's last pump()
+    Optional<Instance> instance = Optional::None;
+    Optional<Surface> surface = Optional::None;
+    RendererOptions requested = RendererOptions.defaults();
+    Optional<AdapterRequest> adapterAsked = Optional::None;
+    Optional<DeviceRequest> deviceAsked = Optional::None;
+    Optional<SurfaceCapabilities> offered = Optional::None;   // what the surface offers the adapter, read when it answers
+    string startWords = "";                       // why the window has no surface, reported at the first render
+    bool noGpu = false;                           // the GPU never came, reported once: renders draw nothing for good
+    bool configured = false;                      // the surface is configured, at this size and present mode
+    int32 configuredWidth = 0;
+    int32 configuredHeight = 0;
+    PresentMode configuredMode = PresentMode::Fifo;
+    TextureFormat windowView = TextureFormat::BGRA8UnormSrgb;   // the format the window is drawn through, once configured
+    Optional<PresentMode> toldOf = Optional::None;   // a present mode the surface does not offer, reported once
+    string windowTold = "";                       // the last refusal of the window reported, so a repeat is not
+    DynamicArray<Weak<FrameCapture>> captures = DynamicArray.empty();   // the window reads asked, for the next frame
+
+    // A renderer on a device the program already has, with its queue: each a handle of its own, so the program keeps
+    // its own (`copy device`) and several renderers share one device. It has no window: a camera names a target.
+    public unsafe ctor withDevice(Device device, Queue queue) {
+        this.gpu = Optional::Some(value: RendererGpu.make(device: give device, queue: give queue));
         Shared<MeshStandardMaterial> grey = new MeshStandardMaterial.make();
         grey.colorMut() = Color.fromHex(hex: 0x808080);
         this.standing = give grey;
-        this.device = give device;
-        this.queue = give queue;
+    }
+
+    // A renderer that draws into `window` and requests its own GPU, as `options` say (kyoten's rendering.md § Decided,
+    // GFX-1's part 1, question 1, and part 6, step 1): it makes a surface on the window, which holds it, and asks for an
+    // adapter that can present to it. Each render polls the request, then asks for the device; until the device has
+    // answered a render draws nothing and reports nothing, and a request that fails is reported once, at a render. A
+    // camera naming no target draws into the window.
+    public unsafe ctor make(const ref Window window, RendererOptions options) {
+        Shared<MeshStandardMaterial> grey = new MeshStandardMaterial.make();
+        grey.colorMut() = Color.fromHex(hex: 0x808080);
+        this.standing = give grey;
+        this.requested = options;
+        this.onWindow = Optional::Some(value: window.nativeHandle());
+        Result<Instance, GpuError> made = Instance.make();
+        match (give made) {
+            case Ok(value: inst): {
+                Result<Surface, GpuError> onIt = Surface.make(instance: inst, window: window);
+                match (give onIt) {
+                    case Ok(value: s): {
+                        AdapterOptions wanted = AdapterOptions.withSurface(surface: s, power: options.power);
+                        wanted.forceFallbackAdapter(on: options.forceFallbackAdapter);
+                        this.adapterAsked = Optional::Some(value: inst.requestAdapter(options: wanted));
+                        this.surface = Optional::Some(value: give s);
+                    }
+                    case Err(error: e): { this.startWords = "the renderer draws nothing: no surface on its window: " + e.message(); }
+                };
+                this.instance = Optional::Some(value: give inst);
+            }
+            case Err(error: e): { this.startWords = "the renderer draws nothing: no WebGPU instance: " + e.message(); }
+        };
+    }
+
+    // Each window read the renderer still holds fails, so none waits for ever.
+    unsafe ~Renderer() {
+        for (isize i = 0; i < this.captures.length(); i = i + 1) {
+            Optional<Shared<FrameCapture>> held = this.captures[i].tryUpgrade();
+            match (give held) {
+                case Some(value: c): { c.derefMut().fail(words: "the renderer was dropped before it drew a frame into its window"); }
+                case None: { }
+            };
+        }
+    }
+
+    // A render's start, for a renderer made with a window: its adapter request polled, then its device asked for and
+    // polled, and once the device answers, what it makes made and the compiles asked before it asked for. Its failure is
+    // reported once, and the renderer then draws nothing for good.
+    unsafe fn void start() {
+        if (this.gpu.isSome() || this.noGpu) { return; }
+        if (!this.startWords.isEmpty()) {
+            string why = copy this.startWords;
+            this.giveUp(kind: GraphicsErrorKind::Window, words: give why);
+            return;
+        }
+        if (this.adapterAsked.isSome()) {
+            AdapterStatus s = match (this.adapterAsked) { case Some(value: r): r.poll(); case None: AdapterStatus::Failed(error: GpuError::Taken); };
+            bool pending = match (s) { case Pending: true; case _: false; };
+            if (pending) { return; }
+            this.adapterAsked = Optional::None;
+            match (give s) {
+                case Ready(adapter: a): {
+                    Result<SurfaceCapabilities, GpuError> caps = match (this.surface) {
+                        case Some(value: w): w.capabilities(adapter: a);
+                        case None: Result::Err(error: GpuError::Taken);
+                    };
+                    match (give caps) {
+                        case Ok(value: c): { this.offered = Optional::Some(value: give c); }
+                        case Err(error: e): {
+                            this.giveUp(kind: GraphicsErrorKind::Window, words: "the renderer draws nothing: the adapter cannot draw into its window: " + e.message());
+                            return;
+                        }
+                    };
+                    DeviceOptions device = this.requested.device;
+                    this.deviceAsked = Optional::Some(value: a.requestDevice(options: device));
+                }
+                case Failed(error: e): {
+                    this.giveUp(kind: GraphicsErrorKind::Device, words: "the renderer draws nothing: no adapter: " + e.message());
+                    return;
+                }
+                case Pending: { }
+            };
+        }
+        if (this.deviceAsked.isNone()) { return; }
+        DeviceStatus d = match (this.deviceAsked) { case Some(value: r): r.poll(); case None: DeviceStatus::Failed(error: GpuError::Taken); };
+        bool waiting = match (d) { case Pending: true; case _: false; };
+        if (waiting) { return; }
+        this.deviceAsked = Optional::None;
+        match (give d) {
+            case Ready(device: dev, queue: q): {
+                RendererGpu made = RendererGpu.make(device: give dev, queue: give q);
+                this.askDeferred(gpu: ref made);
+                this.gpu = Optional::Some(value: give made);
+            }
+            case Failed(error: e): {
+                this.giveUp(kind: GraphicsErrorKind::Device, words: "the renderer draws nothing: the device was refused: " + e.message());
+            }
+            case Pending: { }
+        };
+    }
+
+    // The GPU never comes: reported once; the compiles waiting on it answer, having asked for nothing; the window reads
+    // fail.
+    unsafe fn void giveUp(GraphicsErrorKind kind, string words) {
+        this.noGpu = true;
+        this.refuse(kind: kind, message: copy words);
+        DynamicArray<DeferredCompile> none = DynamicArray.empty();
+        DynamicArray<DeferredCompile> waiting = replace(place: this.deferred, with: give none);
+        for (isize i = 0; i < waiting.length(); i = i + 1) {
+            Shared<CompileSlots> state = copy waiting[i].state;
+            state.derefMut().fill(slots: DynamicArray.empty());
+        }
+        this.failCaptures(words: give words);
+    }
+
+    unsafe fn void failCaptures(string words) {
+        for (isize i = 0; i < this.captures.length(); i = i + 1) {
+            Optional<Shared<FrameCapture>> held = this.captures[i].tryUpgrade();
+            match (give held) { case Some(value: c): { c.derefMut().fail(words: copy words); } case None: { } };
+        }
+        this.captures.clear();
+    }
+
+    // The compiles asked before the GPU, asked for now that it has answered.
+    unsafe fn void askDeferred(ref RendererGpu gpu) {
+        DynamicArray<DeferredCompile> none = DynamicArray.empty();
+        DynamicArray<DeferredCompile> waiting = replace(place: this.deferred, with: give none);
+        for (isize i = 0; i < waiting.length(); i = i + 1) {
+            Shared<Scene> scene = copy waiting[i].scene;
+            Shared<PerspectiveCamera> camera = copy waiting[i].camera;
+            Shared<CompileSlots> state = copy waiting[i].state;
+            DynamicArray<Shared<PipelineSlot>> slots = this.compileOn(gpu: ref gpu, scene: give scene, camera: give camera);
+            state.derefMut().fill(slots: give slots);
+        }
+    }
+
+    // The window's configuration with present mode `mode`, from what its surface offers: the first format with an sRGB
+    // view, drawn through it, as every peer draws a window (step 1's details); an opaque window where the surface offers
+    // one; the frame a render attachment alone (step 1's third question, Bevy's way). None when the surface offers no
+    // 8-bit sRGB format, which no surface measured does.
+    const fn Optional<SurfaceConfig> windowConfig(PresentMode mode) {
+        return match (this.offered) {
+            case Some(value: caps): configFrom(caps: caps, mode: mode);
+            case None: Optional::None;
+        };
+    }
+
+    // The present mode a configure takes: the renderer's, when the surface offers it, else Fifo, every surface's, the
+    // mode not offered reported once (step 1's question 2).
+    unsafe fn PresentMode presentInEffect() {
+        PresentMode mode = this.present;
+        if (this.supportsPresentMode(mode: mode)) {
+            this.toldOf = Optional::None;
+            return mode;
+        }
+        bool told = match (this.toldOf) { case Some(value: m): m == mode; case None: false; };
+        if (!told) {
+            string name = mode.name();
+            this.refuse(kind: GraphicsErrorKind::Window,
+                        message: "the window's surface does not offer present mode " + name + ", so it presents with Fifo");
+            this.toldOf = Optional::Some(value: mode);
+        }
+        return PresentMode::Fifo;
+    }
+
+    // A refusal of the window reported, unless it is the one reported last.
+    unsafe fn void refuseWindow(string words) {
+        if (words == this.windowTold) { return; }
+        this.windowTold = copy words;
+        this.refuse(kind: GraphicsErrorKind::Window, message: give words);
+    }
+
+    // The window's surface configured at the window's size as of the program's last pump() and the present mode in
+    // effect, when either differs from what it was configured with: whether a frame can be drawn. A window of no area
+    // (minimised) or a closed one draws nothing and reports nothing; anything else the surface refuses is reported.
+    unsafe fn bool configureWindow(ref RendererGpu gpu) {
+        Size px = match (this.onWindow) { case Some(value: n): n.framebufferSize(); case None: Size.of(width: 0, height: 0); };
+        if (px.width <= 0 || px.height <= 0) { return false; }
+        PresentMode mode = this.presentInEffect();
+        if (this.configured && px.width == this.configuredWidth && px.height == this.configuredHeight && mode == this.configuredMode) {
+            return true;
+        }
+        Optional<SurfaceConfig> wanted = this.windowConfig(mode: mode);
+        SurfaceConfig config = match (wanted) {
+            case Some(value: c): c;
+            case None: {
+                this.refuseWindow(words: "the renderer draws nothing into its window: its surface offers no 8-bit sRGB format");
+                return false;
+            }
+        };
+        Result<Unit, ConfigureError> done = match (this.surface) {
+            case Some(value: s): s.configure(device: gpu.device, config: config);
+            case None: Result::Err(error: ConfigureError::Closed);
+        };
+        match (done) {
+            case Ok(value: u): { }
+            case Err(error: e): {
+                this.configured = false;
+                match (e) {
+                    case NoArea: { return false; }
+                    case Closed: { return false; }
+                    case _: {
+                        string why = e.message();
+                        this.refuseWindow(words: "the window's surface refused its configuration, so nothing is drawn into it: " + why);
+                        return false;
+                    }
+                };
+            }
+        };
+        this.configured = true;
+        this.windowView = config.viewFormat;
+        this.configuredWidth = px.width;
+        this.configuredHeight = px.height;
+        this.configuredMode = mode;
+        return true;
+    }
+
+    // The window's next frame, its surface configured again once when it is out of date or lost; None when there is none
+    // to draw into this render. A frame the surface failed to give is reported.
+    unsafe fn Optional<SurfaceTexture> acquireWindow(ref RendererGpu gpu) {
+        for (int32 attempt = 0; attempt < 2; attempt = attempt + 1) {
+            Result<SurfaceTexture, SurfaceError> got = match (this.surface) {
+                case Some(value: s): s.acquire();
+                case None: Result::Err(error: SurfaceError::Closed);
+            };
+            match (give got) {
+                case Ok(value: f): { return Optional::Some(value: give f); }
+                case Err(error: e): {
+                    bool again = match (e) { case Outdated: true; case Lost: true; case _: false; };
+                    if (!again) {
+                        match (e) {
+                            case Failed: { this.refuseWindow(words: "the window's surface gave no frame, so nothing was drawn into it: " + e.message()); }
+                            case _: { }
+                        };
+                        return Optional::None;
+                    }
+                    this.configured = false;
+                    if (!this.configureWindow(gpu: ref gpu)) { return Optional::None; }
+                }
+            };
+        }
+        return Optional::None;
+    }
+
+    // The window's textures at `width` by `height`: a target's without its colour, made again at a new size.
+    unsafe fn Shared<RenderTarget> windowTargetAt(ref RendererGpu gpu, uint32 width, uint32 height) {
+        bool fits = match (gpu.windowTarget) {
+            case Some(value: t): t.width() == width && t.height() == height;
+            case None: false;
+        };
+        if (!fits) {
+            Shared<RenderTarget> made = new RenderTarget.forWindow(width: width, height: height);
+            gpu.windowTarget = Optional::Some(value: give made);
+        }
+        return match (gpu.windowTarget) { case Some(value: t): copy t; case None: { panic(msg: "made above"); } };
+    }
+
+    // The window read's pass onto the window for `format`: its slot, added the first time, none asked for yet.
+    unsafe fn isize blitFor(ref RendererGpu gpu, TextureFormat format) {
+        for (isize i = 0; i < gpu.blitFormats.length(); i = i + 1) {
+            if (gpu.blitFormats[i] == format) { return i; }
+        }
+        Shared<PipelineSlot> slot = new PipelineSlot.make(what: "the window read's pass onto the window was refused by the device, so a window read fails: ",
+                                                          kind: GraphicsErrorKind::Pipeline);
+        gpu.blitFormats.add(item: format);
+        gpu.blits.add(item: give slot);
+        return gpu.blits.length() - 1;
+    }
+
+    unsafe fn RenderPipelineDescriptor blitDescriptor(ref RendererGpu gpu, TextureFormat format) {
+        ShaderModuleDescriptor described = ShaderModuleDescriptor.make(wgsl: blitWgsl());
+        described.label(text: "the window read's pass onto the window");
+        ShaderModule shader = gpu.device.createShaderModule(descriptor: give described);
+        FragmentState fragment = FragmentState.make(module: copy shader, entryPoint: "fs");
+        fragment.target(state: ColorTargetState.make(format: format));
+        RenderPipelineDescriptor pipeline = RenderPipelineDescriptor.make(layout: Layout::Explicit(layout: copy gpu.blitPipelineLayout),
+                                                                          vertex: VertexState.make(module: give shader, entryPoint: "vs"));
+        pipeline.fragment(state: give fragment);
+        pipeline.label(text: "the window read's pass onto the window");
+        return pipeline;
+    }
+
+    // Slot `b`'s pass onto the window: asked for off the frame if it is still wanted, or, `now`, made during this render.
+    unsafe fn int32 provideBlit(ref RendererGpu gpu, isize b, TextureFormat format, bool now) {
+        Shared<PipelineSlot> slot = copy gpu.blits[b];
+        if (slot.ready() || slot.refusedNow()) { return 0; }
+        if (now) {
+            RenderPipelineDescriptor d = this.blitDescriptor(gpu: ref gpu, format: format);
+            slot.makeNow(device: ref gpu.device, descriptor: give d);
+            return 1;
+        }
+        if (slot.wanted()) {
+            RenderPipelineDescriptor d = this.blitDescriptor(gpu: ref gpu, format: format);
+            slot.ask(device: ref gpu.device, descriptor: give d);
+        }
+        return 0;
+    }
+
+    // The window reads still held, the dropped ones let go.
+    unsafe fn DynamicArray<Shared<FrameCapture>> heldCaptures() {
+        DynamicArray<Shared<FrameCapture>> held = DynamicArray.empty();
+        for (isize i = 0; i < this.captures.length(); i = i + 1) {
+            Optional<Shared<FrameCapture>> c = this.captures[i].tryUpgrade();
+            match (give c) { case Some(value: x): { held.add(item: give x); } case None: { } };
+        }
+        return held;
+    }
+
+    // When the window's frames reach the screen (@kama/gpu's `PresentMode`): Fifo, vsync, by default. A property pair, as
+    // `clearColor`; a change takes effect at the next render, which configures the window's surface again. A mode the
+    // surface does not offer is reported once, at a render, and Fifo, which every surface offers, is taken instead;
+    // `presentMode()` still says what was set, as `antialiasing()` does.
+    public const fn PresentMode presentMode() { return this.present; }
+    public fn ref PresentMode presentModeMut() { return this.present; }
+
+    // Whether the window's surface offers `mode`: answered from what it offers the adapter, once the adapter has
+    // answered. Before then, and on a renderer with no window, Fifo alone, which every surface offers. On the web, Fifo
+    // alone.
+    public unsafe const fn bool supportsPresentMode(PresentMode mode) {
+        if (mode == PresentMode::Fifo) { return true; }
+        return match (this.offered) { case Some(value: caps): offersMode(caps: caps, mode: mode); case None: false; };
+    }
+
+    // Start reading what the window shows (kyoten's rendering.md § Decided, GFX-1's part 6, step 1's third question):
+    // poll the read until it hands back the image of the next frame a render draws into the window, in device pixels,
+    // 8-bit RGBA, sRGB, top row first, as a target's read hands back. A render that draws nothing into the window leaves
+    // it pending. Reads asked before one render are each that frame. The renderer holds a read weakly, so a read dropped
+    // before its frame costs nothing; a renderer dropped first, one with no window and one whose GPU never came each
+    // fail the read, with words of their own.
+    public unsafe fn PixelRead readWindowPixels() {
+        Shared<FrameCapture> made = new FrameCapture.make();
+        if (this.onWindow.isNone()) {
+            made.derefMut().fail(words: "the renderer has no window: a camera names a render target, read with readRenderTargetPixels");
+        } else if (this.noGpu) {
+            made.derefMut().fail(words: "the renderer has no GPU, so it draws nothing into its window");
+        } else {
+            this.captures.add(item: made.downgrade());
+        }
+        return PixelRead.ofWindow(capture: give made);
+    }
+
+    // Ask for every pipeline `scene` needs as `camera` sees it, off the frame (kyoten's rendering.md § Decided, GFX-1's
+    // part 5, question 1), as three.js's `compileAsync` and Unreal's precaching: each mesh's two at the anti-aliasing
+    // method's samples a texel, and, where its way (its own, else the renderer's) is `WhileCompiling::General`, its
+    // material's general form's two, so a variant new at run time draws by it; the stand-in's general form's two, once,
+    // where any mesh's way is `StandIn`; the tone-mapped resolve's when the method takes it, and the output pass's for the
+    // camera's tone mapping when its target is 8-bit, or for the window's format, with the window read's pass onto the
+    // window, when the camera draws into the window. The scene is placed as a render places it. Poll the request until it
+    // is `Ready`: a render then draws everything with no miss, while nothing new joins the scene and the method and the
+    // camera's tone mapping stay as they were. A loading screen polls it, and so does a test before it renders. Asked
+    // before a renderer made with a window has its GPU, it is asked for by the first render that finds the GPU, and is
+    // `Pending` until then.
+    public unsafe fn CompileRequest compile(Shared<Scene> scene, Shared<PerspectiveCamera> camera) {
+        Optional<RendererGpu> taken = replace(place: this.gpu, with: Optional::None);
+        match (give taken) {
+            case Some(value: g): {
+                RendererGpu half = give g;
+                DynamicArray<Shared<PipelineSlot>> slots = this.compileOn(gpu: ref half, scene: give scene, camera: give camera);
+                this.gpu = Optional::Some(value: give half);
+                Shared<CompileSlots> state = new CompileSlots.make(slots: give slots, asked: true);
+                return CompileRequest.make(state: give state);
+            }
+            case None: {
+                Shared<CompileSlots> state = new CompileSlots.make(slots: DynamicArray.empty(), asked: this.noGpu);
+                if (!this.noGpu) {
+                    this.deferred.add(item: DeferredCompile.make(scene: give scene, camera: give camera, state: copy state));
+                } else {
+                    Shared<Scene> unused = give scene;
+                    Shared<PerspectiveCamera> unseen = give camera;
+                }
+                return CompileRequest.make(state: give state);
+            }
+        };
+    }
+
+    // Draw `scene` as `camera` sees it, into the target the camera names, or with none into the window.
+    public unsafe fn void render(Shared<Scene> scene, Shared<PerspectiveCamera> camera) {
+        this.start();
+        Optional<RendererGpu> taken = replace(place: this.gpu, with: Optional::None);
+        match (give taken) {
+            case Some(value: g): {
+                RendererGpu half = give g;
+                this.renderOn(gpu: ref half, scene: give scene, camera: give camera);
+                this.gpu = Optional::Some(value: give half);
+            }
+            case None: {
+                Shared<Scene> unused = give scene;
+                Shared<PerspectiveCamera> unseen = give camera;
+                this.last = RenderInfo.of(calls: 0, triangles: 0, objects: 0, matrices: 0, misses: 0, skipped: 0, general: 0,
+                                          standIn: 0, waited: 0);
+            }
+        };
+    }
+
+    // Fill the target with the clear colour. On the default 8-bit sRGB target it reads back as written: a target
+    // cleared to #336699 reads 0x33 0x66 0x99. Before a renderer made with a window has its GPU, nothing.
+    public unsafe fn void clear(Shared<RenderTarget> target) {
+        Optional<RendererGpu> taken = replace(place: this.gpu, with: Optional::None);
+        match (give taken) {
+            case Some(value: g): {
+                RendererGpu half = give g;
+                this.clearOn(gpu: ref half, target: give target);
+                this.gpu = Optional::Some(value: give half);
+            }
+            case None: { Shared<RenderTarget> unused = give target; }
+        };
+    }
+
+    // Start reading the target back, as three.js's `readRenderTargetPixelsAsync`: poll the read until it hands back its
+    // image, the target's size in 8-bit RGBA, sRGB, top row first. Before a renderer made with a window has its GPU,
+    // there is nothing to read, and the read fails.
+    public unsafe fn PixelRead readRenderTargetPixels(Shared<RenderTarget> target) {
+        Optional<RendererGpu> taken = replace(place: this.gpu, with: Optional::None);
+        match (give taken) {
+            case Some(value: g): {
+                RendererGpu half = give g;
+                PixelRead read = this.readTargetOn(gpu: ref half, target: give target);
+                this.gpu = Optional::Some(value: give half);
+                return read;
+            }
+            case None: {
+                Shared<RenderTarget> unused = give target;
+                return PixelRead.failed(words: "the renderer has no GPU yet, so it has drawn nothing into the target");
+            }
+        };
     }
 
     // The colour `clear` and `render` fill a target with, written in sRGB: black, as three.js's.
@@ -582,16 +1200,9 @@ type resource Renderer {
     public unsafe const fn Shared<Material> standIn() { return copy this.standing; }
     public fn ref Shared<Material> standInMut() { return this.standing; }
 
-    // Ask for every pipeline `scene` needs as `camera` sees it, off the frame (kyoten's rendering.md § Decided, GFX-1's
-    // part 5, question 1), as three.js's `compileAsync` and Unreal's precaching: each mesh's two at the anti-aliasing
-    // method's samples a texel, and, where its way (its own, else the renderer's) is `WhileCompiling::General`, its
-    // material's general form's two, so a variant new at run time draws by it; the stand-in's general form's two, once,
-    // where any mesh's way is `StandIn`; the tone-mapped resolve's when the method takes it, and the output pass's for the
-    // camera's tone mapping when its target is 8-bit. The scene is placed as a render places it. Poll the request until it is
-    // `Ready`: a render then draws everything with no miss, while nothing new joins the scene and the method and the
-    // camera's tone mapping stay as they were. A loading screen polls it, and so does a test before it renders.
-    public unsafe fn CompileRequest compile(Shared<Scene> scene, Shared<PerspectiveCamera> camera) {
-        this.settleAll();
+    // `compile`'s pipelines, asked for on the GPU's half (see `compile`).
+    unsafe fn DynamicArray<Shared<PipelineSlot>> compileOn(ref RendererGpu gpu, Shared<Scene> scene, Shared<PerspectiveCamera> camera) {
+        this.settleAll(gpu: ref gpu);
         Walk walk = scene.walkAll();
         DynamicArray<string> found = walk.refusals();
         for (isize i = 0; i < found.length(); i = i + 1) { this.refuse(kind: GraphicsErrorKind::Light, message: copy found[i]); }
@@ -611,66 +1222,86 @@ type resource Renderer {
             if (drawWay == WhileCompiling::StandIn) { standInWanted = true; }
             string source = material.gpuMut().source();
             string general = material.gpuMut().generalSource();
-            isize e = this.pipelineFor(source: source, general: general, mirrored: scene.mirroredAt(slot: slot), count: perTexel);
-            int32 madeNone = this.provide(i: e, now: false);
-            asked.add(item: copy this.pipelines[e]);
-            asked.add(item: copy this.prepasses[e]);
+            isize e = this.pipelineFor(gpu: ref gpu, source: source, general: general, mirrored: scene.mirroredAt(slot: slot), count: perTexel);
+            int32 madeNone = this.provide(gpu: ref gpu, i: e, now: false);
+            asked.add(item: copy gpu.pipelines[e]);
+            asked.add(item: copy gpu.prepasses[e]);
             if (drawWay == WhileCompiling::General) {
-                isize g = this.generalOf[e];
-                this.provideGeneral(g: g);
-                asked.add(item: copy this.generalShaded[g]);
-                asked.add(item: copy this.generalDepth[g]);
+                isize g = gpu.generalOf[e];
+                this.provideGeneral(gpu: ref gpu, g: g);
+                asked.add(item: copy gpu.generalShaded[g]);
+                asked.add(item: copy gpu.generalDepth[g]);
             }
         }
         // the stand-in's general form, once, when any draw's way is `StandIn`
         if (standInWanted) {
-            isize g = this.standInEntry(count: perTexel);
+            isize g = this.standInEntry(gpu: ref gpu, count: perTexel);
             if (g >= 0) {
-                this.provideGeneral(g: g);
-                asked.add(item: copy this.generalShaded[g]);
-                asked.add(item: copy this.generalDepth[g]);
+                this.provideGeneral(gpu: ref gpu, g: g);
+                asked.add(item: copy gpu.generalShaded[g]);
+                asked.add(item: copy gpu.generalDepth[g]);
             }
         }
         if (this.method == Antialiasing::Msaa4ToneMapped) {
-            int32 resolveMadeNone = this.provideResolve(now: false);
-            asked.add(item: copy this.resolving);
+            int32 resolveMadeNone = this.provideResolve(gpu: ref gpu, now: false);
+            asked.add(item: copy gpu.resolving);
         }
         Optional<Shared<RenderTarget>> named = camera.target();
+        ToneMapping curve = camera.toneMapping();
         match (give named) {
             case Some(value: t): {
                 if (!t.holdsScene()) {
-                    ToneMapping curve = camera.toneMapping();
-                    isize o = this.outputFor(curve: curve);
-                    int32 outputMadeNone = this.provideOutput(o: o, curve: curve, now: false);
-                    asked.add(item: copy this.outputs[o]);
+                    isize o = this.outputFor(gpu: ref gpu, curve: curve, format: TextureFormat::RGBA8UnormSrgb);
+                    int32 outputMadeNone = this.provideOutput(gpu: ref gpu, o: o, curve: curve, format: TextureFormat::RGBA8UnormSrgb,
+                                                              now: false);
+                    asked.add(item: copy gpu.outputs[o]);
                 }
             }
-            case None: { }
+            case None: {
+                // into the window: the output pass at the window's view format, and the window read's pass onto it
+                Optional<SurfaceConfig> config = this.windowConfig(mode: PresentMode::Fifo);
+                match (config) {
+                    case Some(value: c): {
+                        TextureFormat view = c.viewFormat;
+                        isize o = this.outputFor(gpu: ref gpu, curve: curve, format: view);
+                        int32 outputMadeNone = this.provideOutput(gpu: ref gpu, o: o, curve: curve, format: view, now: false);
+                        asked.add(item: copy gpu.outputs[o]);
+                        isize b = this.blitFor(gpu: ref gpu, format: view);
+                        int32 blitMadeNone = this.provideBlit(gpu: ref gpu, b: b, format: view, now: false);
+                        asked.add(item: copy gpu.blits[b]);
+                    }
+                    case None: { }
+                };
+            }
         };
-        return CompileRequest.make(slots: give asked);
+        return asked;
     }
 
     // Every pipeline's request polled, once, at the start of a render (and of a compile and `takeErrors()`), before any
     // draw asks for one, so a render never draws with a pipeline it asked for itself, even where natively @kama/gpu's
     // own threads answer before a later draw sharing it. What a draw asks for is polled at the next render.
-    unsafe fn void settleAll() {
-        for (isize i = 0; i < this.pipelines.length(); i = i + 1) {
-            Shared<PipelineSlot> shaded = copy this.pipelines[i];
-            Shared<PipelineSlot> depth = copy this.prepasses[i];
+    unsafe fn void settleAll(ref RendererGpu gpu) {
+        for (isize i = 0; i < gpu.pipelines.length(); i = i + 1) {
+            Shared<PipelineSlot> shaded = copy gpu.pipelines[i];
+            Shared<PipelineSlot> depth = copy gpu.prepasses[i];
             bool shadedAnswered = shaded.settle();
             bool depthAnswered = depth.settle();
         }
-        for (isize i = 0; i < this.generalShaded.length(); i = i + 1) {
-            Shared<PipelineSlot> shaded = copy this.generalShaded[i];
-            Shared<PipelineSlot> depth = copy this.generalDepth[i];
+        for (isize i = 0; i < gpu.generalShaded.length(); i = i + 1) {
+            Shared<PipelineSlot> shaded = copy gpu.generalShaded[i];
+            Shared<PipelineSlot> depth = copy gpu.generalDepth[i];
             bool shadedAnswered = shaded.settle();
             bool depthAnswered = depth.settle();
         }
-        for (isize i = 0; i < this.outputs.length(); i = i + 1) {
-            Shared<PipelineSlot> slot = copy this.outputs[i];
+        for (isize i = 0; i < gpu.outputs.length(); i = i + 1) {
+            Shared<PipelineSlot> slot = copy gpu.outputs[i];
             bool answered = slot.settle();
         }
-        bool resolveAnswered = this.resolving.settle();
+        for (isize i = 0; i < gpu.blits.length(); i = i + 1) {
+            Shared<PipelineSlot> slot = copy gpu.blits[i];
+            bool answered = slot.settle();
+        }
+        bool resolveAnswered = gpu.resolving.settle();
     }
 
     // A pair's refusal, the shaded pipeline's and the depth-only one's, reported once, as the first of the two found, and
@@ -693,31 +1324,36 @@ type resource Renderer {
     // Each pipeline's refusal found since the last, reported once: a mesh's two as one, since both fail on its material,
     // whether they are found at one poll or two (`refusePair`). A render reports what it found as it ends, and
     // `takeErrors()` what a compile request found.
-    unsafe fn void reportRefusals() {
-        for (isize i = 0; i < this.pipelines.length(); i = i + 1) {
-            this.refusePair(shaded: copy this.pipelines[i], depth: copy this.prepasses[i]);
+    unsafe fn void reportRefusals(ref RendererGpu gpu) {
+        for (isize i = 0; i < gpu.pipelines.length(); i = i + 1) {
+            this.refusePair(shaded: copy gpu.pipelines[i], depth: copy gpu.prepasses[i]);
         }
         // a general form's refusal, once its material's own pipelines are made, so a material the device refuses outright,
         // its general form too, is reported once, as its own pipeline's refusal
-        for (isize i = 0; i < this.pipelines.length(); i = i + 1) {
-            Shared<PipelineSlot> shadedOwn = copy this.pipelines[i];
-            Shared<PipelineSlot> depthOwn = copy this.prepasses[i];
+        for (isize i = 0; i < gpu.pipelines.length(); i = i + 1) {
+            Shared<PipelineSlot> shadedOwn = copy gpu.pipelines[i];
+            Shared<PipelineSlot> depthOwn = copy gpu.prepasses[i];
             if (!shadedOwn.ready() || !depthOwn.ready()) { continue; }
-            isize g = this.generalOf[i];
-            this.refusePair(shaded: copy this.generalShaded[g], depth: copy this.generalDepth[g]);
+            isize g = gpu.generalOf[i];
+            this.refusePair(shaded: copy gpu.generalShaded[g], depth: copy gpu.generalDepth[g]);
         }
         // a stand-in's general form, which its draws take alone, its own pipelines never asked for
-        for (isize g = 0; g < this.generalShaded.length(); g = g + 1) {
-            if (!this.generalStandIn[g]) { continue; }
-            this.refusePair(shaded: copy this.generalShaded[g], depth: copy this.generalDepth[g]);
+        for (isize g = 0; g < gpu.generalShaded.length(); g = g + 1) {
+            if (!gpu.generalStandIn[g]) { continue; }
+            this.refusePair(shaded: copy gpu.generalShaded[g], depth: copy gpu.generalDepth[g]);
         }
-        for (isize i = 0; i < this.outputs.length(); i = i + 1) {
-            Shared<PipelineSlot> slot = copy this.outputs[i];
+        for (isize i = 0; i < gpu.outputs.length(); i = i + 1) {
+            Shared<PipelineSlot> slot = copy gpu.outputs[i];
             string words = slot.untold();
             if (!words.isEmpty()) { this.refuse(kind: slot.kind(), message: copy words); }
         }
-        string resolveWords = this.resolving.untold();
-        if (!resolveWords.isEmpty()) { this.refuse(kind: this.resolving.kind(), message: copy resolveWords); }
+        for (isize i = 0; i < gpu.blits.length(); i = i + 1) {
+            Shared<PipelineSlot> slot = copy gpu.blits[i];
+            string words = slot.untold();
+            if (!words.isEmpty()) { this.refuse(kind: slot.kind(), message: copy words); }
+        }
+        string resolveWords = gpu.resolving.untold();
+        if (!resolveWords.isEmpty()) { this.refuse(kind: gpu.resolving.kind(), message: copy resolveWords); }
     }
 
     // What the last render did.
@@ -731,8 +1367,16 @@ type resource Renderer {
 
     // The misuses refused since the last call, the oldest first, with how many past the 64 kept were counted.
     public unsafe fn RendererErrors takeErrors() {
-        this.settleAll();
-        this.reportRefusals();
+        Optional<RendererGpu> held = replace(place: this.gpu, with: Optional::None);
+        match (give held) {
+            case Some(value: g): {
+                RendererGpu half = give g;
+                this.settleAll(gpu: ref half);
+                this.reportRefusals(gpu: ref half);
+                this.gpu = Optional::Some(value: give half);
+            }
+            case None: { }
+        };
         DynamicArray<GraphicsErrorReport> fresh = DynamicArray.empty();
         DynamicArray<GraphicsErrorReport> taken = replace(place: this.errors, with: give fresh);
         int64 counted = this.overflow;
@@ -759,25 +1403,27 @@ type resource Renderer {
                            b: cast<float64>(this.clearTo.linearB()) * s, a: cast<float64>(this.alpha));
     }
 
-    // The output pass's pipeline for `curve`: its slot, added the first time, none asked for yet.
-    unsafe fn isize outputFor(ToneMapping curve) {
-        for (isize i = 0; i < this.outputCurves.length(); i = i + 1) {
-            if (this.outputCurves[i] == curve) { return i; }
+    // The output pass's pipeline for `curve`, writing `format`, a target's or the window's view's: its slot, added the
+    // first time, none asked for yet.
+    unsafe fn isize outputFor(ref RendererGpu gpu, ToneMapping curve, TextureFormat format) {
+        for (isize i = 0; i < gpu.outputCurves.length(); i = i + 1) {
+            if (gpu.outputCurves[i] == curve && gpu.outputFormats[i] == format) { return i; }
         }
         Shared<PipelineSlot> slot = new PipelineSlot.make(what: "the output pass's pipeline was refused by the device, so the output pass is left out: ",
                                                           kind: GraphicsErrorKind::Pipeline);
-        this.outputCurves.add(item: curve);
-        this.outputs.add(item: give slot);
-        return this.outputs.length() - 1;
+        gpu.outputCurves.add(item: curve);
+        gpu.outputFormats.add(item: format);
+        gpu.outputs.add(item: give slot);
+        return gpu.outputs.length() - 1;
     }
 
-    unsafe fn RenderPipelineDescriptor outputDescriptor(ToneMapping curve) {
+    unsafe fn RenderPipelineDescriptor outputDescriptor(ref RendererGpu gpu, ToneMapping curve, TextureFormat format) {
         ShaderModuleDescriptor described = ShaderModuleDescriptor.make(wgsl: outputWgsl(curve: curve));
         described.label(text: "the output pass");
-        ShaderModule shader = this.device.createShaderModule(descriptor: give described);
+        ShaderModule shader = gpu.device.createShaderModule(descriptor: give described);
         FragmentState fragment = FragmentState.make(module: copy shader, entryPoint: "fs");
-        fragment.target(state: ColorTargetState.make(format: TextureFormat::RGBA8UnormSrgb));
-        PipelineLayout groups = readsTable(curve: curve) ? copy this.tablePipelineLayout : copy this.outputPipelineLayout;
+        fragment.target(state: ColorTargetState.make(format: format));
+        PipelineLayout groups = readsTable(curve: curve) ? copy gpu.tablePipelineLayout : copy gpu.outputPipelineLayout;
         RenderPipelineDescriptor pipeline = RenderPipelineDescriptor.make(layout: Layout::Explicit(layout: give groups),
                                                                           vertex: VertexState.make(module: give shader, entryPoint: "vs"));
         pipeline.fragment(state: give fragment);
@@ -787,32 +1433,32 @@ type resource Renderer {
 
     // Slot `o`'s output pass for `curve`: asked for off the frame if it is still wanted, or, `now`, made during this
     // render. How many pipelines it made now.
-    unsafe fn int32 provideOutput(isize o, ToneMapping curve, bool now) {
-        Shared<PipelineSlot> slot = copy this.outputs[o];
+    unsafe fn int32 provideOutput(ref RendererGpu gpu, isize o, ToneMapping curve, TextureFormat format, bool now) {
+        Shared<PipelineSlot> slot = copy gpu.outputs[o];
         if (slot.ready() || slot.refusedNow()) { return 0; }
         if (now) {
-            RenderPipelineDescriptor d = this.outputDescriptor(curve: curve);
-            slot.makeNow(device: ref this.device, descriptor: give d);
+            RenderPipelineDescriptor d = this.outputDescriptor(gpu: ref gpu, curve: curve, format: format);
+            slot.makeNow(device: ref gpu.device, descriptor: give d);
             return 1;
         }
         if (slot.wanted()) {
-            RenderPipelineDescriptor d = this.outputDescriptor(curve: curve);
-            slot.ask(device: ref this.device, descriptor: give d);
+            RenderPipelineDescriptor d = this.outputDescriptor(gpu: ref gpu, curve: curve, format: format);
+            slot.ask(device: ref gpu.device, descriptor: give d);
         }
         return 0;
     }
 
     // Blender's AgX table, made the first time a camera uses it (agx.kama): 57³ texels of four half floats, a 3D texture
     // the output pass reads at its grid points and interpolates itself, as OpenColorIO does.
-    unsafe fn TextureView agxTable() {
-        if (this.agxTableView.isNone()) {
+    unsafe fn TextureView agxTable(ref RendererGpu gpu) {
+        if (gpu.agxTableView.isNone()) {
             uint32 side = cast<uint32>(blenderAgxSize());
             TextureDescriptor made = TextureDescriptor.make(width: side, height: side, format: TextureFormat::RGBA16Float,
                                                             usage: TextureUsage::TextureBinding | TextureUsage::CopyDst);
             made.dimension(kind: TextureDimension::D3);
             made.depthOrArrayLayers(count: side);
             made.label(text: "Blender's AgX table");
-            Texture table = this.device.createTexture(descriptor: give made);
+            Texture table = gpu.device.createTexture(descriptor: give made);
             DynamicArray<uint16> halves = blenderAgxTable();
             DynamicArray<uint8> bytes = DynamicArray.empty();
             for (isize i = 0; i < halves.length(); i = i + 1) {
@@ -822,22 +1468,22 @@ type resource Renderer {
             TexelCopyBufferLayout rows = TexelCopyBufferLayout.make();
             rows.bytesPerRow(bytes: side * 8);
             rows.rowsPerImage(count: side);
-            this.queue.writeTexture(destination: TexelCopyTextureInfo.make(texture: copy table), data: bytes.view(), layout: rows,
+            gpu.queue.writeTexture(destination: TexelCopyTextureInfo.make(texture: copy table), data: bytes.view(), layout: rows,
                                     size: Extent3D.of(width: side, height: side, depthOrArrayLayers: side));
-            this.agxTableView = Optional::Some(value: table.createView(descriptor: TextureViewDescriptor.make()));
+            gpu.agxTableView = Optional::Some(value: table.createView(descriptor: TextureViewDescriptor.make()));
         }
-        return match (this.agxTableView) { case Some(value: v): copy v; case None: { panic(msg: "made above"); } };
+        return match (gpu.agxTableView) { case Some(value: v): copy v; case None: { panic(msg: "made above"); } };
     }
 
     // The tone-mapped resolve's pipeline (antialiasing.kama): it writes the scene's 16-bit float texture at one sample a
     // texel.
-    unsafe fn RenderPipelineDescriptor resolveDescriptor() {
+    unsafe fn RenderPipelineDescriptor resolveDescriptor(ref RendererGpu gpu) {
         ShaderModuleDescriptor described = ShaderModuleDescriptor.make(wgsl: resolveWgsl());
         described.label(text: "the tone-mapped resolve");
-        ShaderModule shader = this.device.createShaderModule(descriptor: give described);
+        ShaderModule shader = gpu.device.createShaderModule(descriptor: give described);
         FragmentState fragment = FragmentState.make(module: copy shader, entryPoint: "fs");
         fragment.target(state: ColorTargetState.make(format: TextureFormat::RGBA16Float));
-        RenderPipelineDescriptor pipeline = RenderPipelineDescriptor.make(layout: Layout::Explicit(layout: copy this.resolvePipelineLayout),
+        RenderPipelineDescriptor pipeline = RenderPipelineDescriptor.make(layout: Layout::Explicit(layout: copy gpu.resolvePipelineLayout),
                                                                           vertex: VertexState.make(module: give shader, entryPoint: "vs"));
         pipeline.fragment(state: give fragment);
         pipeline.label(text: "the tone-mapped resolve");
@@ -846,16 +1492,16 @@ type resource Renderer {
 
     // ...asked for off the frame if it is still wanted, or, `now`, made during this render. How many pipelines it made
     // now.
-    unsafe fn int32 provideResolve(bool now) {
-        if (this.resolving.ready() || this.resolving.refusedNow()) { return 0; }
+    unsafe fn int32 provideResolve(ref RendererGpu gpu, bool now) {
+        if (gpu.resolving.ready() || gpu.resolving.refusedNow()) { return 0; }
         if (now) {
-            RenderPipelineDescriptor d = this.resolveDescriptor();
-            this.resolving.makeNow(device: ref this.device, descriptor: give d);
+            RenderPipelineDescriptor d = this.resolveDescriptor(gpu: ref gpu);
+            gpu.resolving.makeNow(device: ref gpu.device, descriptor: give d);
             return 1;
         }
-        if (this.resolving.wanted()) {
-            RenderPipelineDescriptor d = this.resolveDescriptor();
-            this.resolving.ask(device: ref this.device, descriptor: give d);
+        if (gpu.resolving.wanted()) {
+            RenderPipelineDescriptor d = this.resolveDescriptor(gpu: ref gpu);
+            gpu.resolving.ask(device: ref gpu.device, descriptor: give d);
         }
         return 0;
     }
@@ -867,115 +1513,115 @@ type resource Renderer {
 
     // Fill the target with the clear colour. On the default 8-bit sRGB target it reads back as written: a target
     // cleared to #336699 reads 0x33 0x66 0x99.
-    public unsafe fn void clear(Shared<RenderTarget> target) {
-        Texture texture = target.textureOn(device: ref this.device, count: samplesOf(method: this.method));
+    unsafe fn void clearOn(ref RendererGpu gpu, Shared<RenderTarget> target) {
+        Texture texture = target.textureOn(device: ref gpu.device, count: samplesOf(method: this.method));
         TextureView view = texture.createView(descriptor: TextureViewDescriptor.make());
         RenderPassDescriptor pass = RenderPassDescriptor.make();
         pass.color(attachment: ColorAttachment.clearing(view: give view, color: this.clearing()));
         pass.label(text: "a render target cleared");
-        CommandEncoder encoder = this.device.createCommandEncoder();
+        CommandEncoder encoder = gpu.device.createCommandEncoder();
         RenderPass rp = encoder.beginRenderPass(descriptor: give pass);
         give rp.end();
         CommandBuffer commands = give encoder.finish();
-        this.queue.submit(commands: give commands);
+        gpu.queue.submit(commands: give commands);
     }
 
     // The pipelines that run `source`, a material's WGSL, for a mirrored mesh or not, at `count` samples a texel: their
     // entry, added the first time with a slot for the shaded one and one for its depth-only twin, none asked for yet, and
     // the entry of its general form, `general`.
-    unsafe fn isize pipelineFor(const ref string source, const ref string general, bool mirrored, uint32 count) {
-        for (isize i = 0; i < this.sources.length(); i = i + 1) {
-            if (this.sources[i] == source && this.flipped[i] == mirrored && this.drawnAt[i] == count) { return i; }
+    unsafe fn isize pipelineFor(ref RendererGpu gpu, const ref string source, const ref string general, bool mirrored, uint32 count) {
+        for (isize i = 0; i < gpu.sources.length(); i = i + 1) {
+            if (gpu.sources[i] == source && gpu.flipped[i] == mirrored && gpu.drawnAt[i] == count) { return i; }
         }
-        this.generalOf.add(item: this.generalFor(source: general, count: count));
+        gpu.generalOf.add(item: this.generalFor(gpu: ref gpu, source: general, count: count));
         Shared<PipelineSlot> shaded = new PipelineSlot.make(what: "a material's pipeline was refused by the device, so nothing draws with it: ",
                                                             kind: GraphicsErrorKind::Material);
         Shared<PipelineSlot> depth = new PipelineSlot.make(what: "a material's depth-only pipeline was refused by the device, so nothing draws with it: ",
                                                            kind: GraphicsErrorKind::Material);
-        this.sources.add(item: copy source);
-        this.flipped.add(item: mirrored);
-        this.drawnAt.add(item: count);
-        this.pipelines.add(item: give shaded);
-        this.prepasses.add(item: give depth);
-        return this.pipelines.length() - 1;
+        gpu.sources.add(item: copy source);
+        gpu.flipped.add(item: mirrored);
+        gpu.drawnAt.add(item: count);
+        gpu.pipelines.add(item: give shaded);
+        gpu.prepasses.add(item: give depth);
+        return gpu.pipelines.length() - 1;
     }
 
     // The pipelines that run a material's general form, `source`, at `count` samples a texel, mirrored meshes or not:
     // their entry, added the first time, none asked for yet.
-    unsafe fn isize generalFor(const ref string source, uint32 count) {
-        for (isize i = 0; i < this.generalSources.length(); i = i + 1) {
-            if (this.generalSources[i] == source && this.generalAt[i] == count) { return i; }
+    unsafe fn isize generalFor(ref RendererGpu gpu, const ref string source, uint32 count) {
+        for (isize i = 0; i < gpu.generalSources.length(); i = i + 1) {
+            if (gpu.generalSources[i] == source && gpu.generalAt[i] == count) { return i; }
         }
         Shared<PipelineSlot> shaded = new PipelineSlot.make(what: "a material's general form was refused by the device, so its draws are skipped while its own pipelines compile: ",
                                                             kind: GraphicsErrorKind::Material);
         Shared<PipelineSlot> depth = new PipelineSlot.make(what: "a material's general form was refused by the device, so its draws are skipped while its own pipelines compile: ",
                                                            kind: GraphicsErrorKind::Material);
-        this.generalSources.add(item: copy source);
-        this.generalAt.add(item: count);
-        this.generalShaded.add(item: give shaded);
-        this.generalDepth.add(item: give depth);
-        this.generalStandIn.add(item: false);
-        return this.generalSources.length() - 1;
+        gpu.generalSources.add(item: copy source);
+        gpu.generalAt.add(item: count);
+        gpu.generalShaded.add(item: give shaded);
+        gpu.generalDepth.add(item: give depth);
+        gpu.generalStandIn.add(item: false);
+        return gpu.generalSources.length() - 1;
     }
 
     // The stand-in's general form's entry at `count` samples a texel, its nodes compiled the first time, as any
     // material's; -1 when its compile refused them, which `compileNodes` reported.
-    unsafe fn isize standInEntry(uint32 count) {
+    unsafe fn isize standInEntry(ref RendererGpu gpu, uint32 count) {
         Shared<Material> look = copy this.standing;
         uint32 graph = look.graphVersion();
         if (!look.gpuMut().compiledAt(graph: graph)) { this.compileNodes(material: copy look); }
         DynamicArray<string> refused = look.gpuMut().refused();
         if (refused.length() > 0) { return -1; }
         string general = look.gpuMut().generalSource();
-        isize g = this.generalFor(source: general, count: count);
-        this.generalStandIn[g] = true;
+        isize g = this.generalFor(gpu: ref gpu, source: general, count: count);
+        gpu.generalStandIn[g] = true;
         return g;
     }
 
     // General entry `g`'s two pipelines, each asked for off the frame if it is still wanted, one shader module serving
     // both; neither once either is refused. Never made during a render: under `Wait` a draw makes its own.
-    unsafe fn void provideGeneral(isize g) {
-        Shared<PipelineSlot> shaded = copy this.generalShaded[g];
-        Shared<PipelineSlot> depth = copy this.generalDepth[g];
+    unsafe fn void provideGeneral(ref RendererGpu gpu, isize g) {
+        Shared<PipelineSlot> shaded = copy gpu.generalShaded[g];
+        Shared<PipelineSlot> depth = copy gpu.generalDepth[g];
         if (shaded.refusedNow() || depth.refusedNow()) { return; }
         if (!shaded.wanted() && !depth.wanted()) { return; }
-        ShaderModuleDescriptor described = ShaderModuleDescriptor.make(wgsl: copy this.generalSources[g]);
+        ShaderModuleDescriptor described = ShaderModuleDescriptor.make(wgsl: copy gpu.generalSources[g]);
         described.label(text: "a material's general form");
-        ShaderModule shader = this.device.createShaderModule(descriptor: give described);
+        ShaderModule shader = gpu.device.createShaderModule(descriptor: give described);
         if (shaded.wanted()) {
-            shaded.ask(device: ref this.device, descriptor: generalShadedDescriptor(layout: copy this.layout, shader: copy shader,
-                                                                                   count: this.generalAt[g]));
+            shaded.ask(device: ref gpu.device, descriptor: generalShadedDescriptor(layout: copy gpu.layout, shader: copy shader,
+                                                                                   count: gpu.generalAt[g]));
         }
         if (depth.wanted()) {
-            depth.ask(device: ref this.device, descriptor: generalDepthDescriptor(layout: copy this.layout, shader: copy shader,
-                                                                                 count: this.generalAt[g]));
+            depth.ask(device: ref gpu.device, descriptor: generalDepthDescriptor(layout: copy gpu.layout, shader: copy shader,
+                                                                                 count: gpu.generalAt[g]));
         }
     }
 
     // Entry `i`'s two pipelines: each asked for off the frame if it is still wanted, or, `now`, made during this render,
     // one shader module serving both. Neither, once either is refused. How many pipelines it made now.
-    unsafe fn int32 provide(isize i, bool now) {
-        Shared<PipelineSlot> shaded = copy this.pipelines[i];
-        Shared<PipelineSlot> depth = copy this.prepasses[i];
+    unsafe fn int32 provide(ref RendererGpu gpu, isize i, bool now) {
+        Shared<PipelineSlot> shaded = copy gpu.pipelines[i];
+        Shared<PipelineSlot> depth = copy gpu.prepasses[i];
         if (shaded.refusedNow() || depth.refusedNow()) { return 0; }
         bool shadedNeeded = now ? !shaded.ready() : shaded.wanted();
         bool depthNeeded = now ? !depth.ready() : depth.wanted();
         if (!shadedNeeded && !depthNeeded) { return 0; }
-        ShaderModuleDescriptor described = ShaderModuleDescriptor.make(wgsl: copy this.sources[i]);
+        ShaderModuleDescriptor described = ShaderModuleDescriptor.make(wgsl: copy gpu.sources[i]);
         described.label(text: "a material's shader");
-        ShaderModule shader = this.device.createShaderModule(descriptor: give described);
+        ShaderModule shader = gpu.device.createShaderModule(descriptor: give described);
         int32 made = 0;
         if (shadedNeeded) {
-            RenderPipelineDescriptor d = shadedDescriptor(layout: copy this.layout, shader: copy shader, mirrored: this.flipped[i],
-                                                          count: this.drawnAt[i]);
-            if (now) { shaded.makeNow(device: ref this.device, descriptor: give d); made = made + 1; }
-            else { shaded.ask(device: ref this.device, descriptor: give d); }
+            RenderPipelineDescriptor d = shadedDescriptor(layout: copy gpu.layout, shader: copy shader, mirrored: gpu.flipped[i],
+                                                          count: gpu.drawnAt[i]);
+            if (now) { shaded.makeNow(device: ref gpu.device, descriptor: give d); made = made + 1; }
+            else { shaded.ask(device: ref gpu.device, descriptor: give d); }
         }
         if (depthNeeded) {
-            RenderPipelineDescriptor d = depthDescriptor(layout: copy this.layout, shader: copy shader, mirrored: this.flipped[i],
-                                                         count: this.drawnAt[i]);
-            if (now) { depth.makeNow(device: ref this.device, descriptor: give d); made = made + 1; }
-            else { depth.ask(device: ref this.device, descriptor: give d); }
+            RenderPipelineDescriptor d = depthDescriptor(layout: copy gpu.layout, shader: copy shader, mirrored: gpu.flipped[i],
+                                                         count: gpu.drawnAt[i]);
+            if (now) { depth.makeNow(device: ref gpu.device, descriptor: give d); made = made + 1; }
+            else { depth.ask(device: ref gpu.device, descriptor: give d); }
         }
         return made;
     }
@@ -1002,25 +1648,33 @@ type resource Renderer {
         material.gpuMut().store(wgsl: give wgsl, general: give general, problems: give problems, graph: graph);
     }
 
-    // Draw `scene` as `camera` sees it, into the target the camera names.
-    public unsafe fn void render(Shared<Scene> scene, Shared<PerspectiveCamera> camera) {
-        this.settleAll();
+    // Draw `scene` as `camera` sees it, into the target the camera names, or with none into the window.
+    unsafe fn void renderOn(ref RendererGpu gpu, Shared<Scene> scene, Shared<PerspectiveCamera> camera) {
+        this.settleAll(gpu: ref gpu);
         Walk walk = scene.walkAll();
         int32 made = walk.matrices();
         DynamicArray<string> found = walk.refusals();
         for (isize i = 0; i < found.length(); i = i + 1) { this.refuse(kind: GraphicsErrorKind::Light, message: copy found[i]); }
         camera.placeAlone();
         int32 objects = cast<int32>(scene.objects());
+        RenderInfo nothing = RenderInfo.of(calls: 0, triangles: 0, objects: objects, matrices: made, misses: 0, skipped: 0, general: 0,
+                                           standIn: 0, waited: 0);
         Optional<Shared<RenderTarget>> named = camera.target();
-        if (named.isNone()) {
-            // no target, and no window to draw into until part 6 gives the renderer one
-            this.last = RenderInfo.of(calls: 0, triangles: 0, objects: objects, matrices: made, misses: 0, skipped: 0, general: 0,
-                                      standIn: 0, waited: 0);
+        bool toWindow = named.isNone();
+        if (toWindow && this.onWindow.isNone()) {
+            this.last = nothing;
             this.refuse(kind: GraphicsErrorKind::NoTarget,
                         message: "render drew nothing: the camera names no render target, and this renderer has no window to draw into (name a target with the camera's targetMut())");
             return;
         }
-        Shared<RenderTarget> target = match (give named) { case Some(value: t): give t; case None: { panic(msg: "checked above"); } };
+        // into the window (kyoten's rendering.md § Decided, GFX-1's part 6, step 1): its surface configured at the window's
+        // size and the present mode in effect. A window of no area, a closed one, or one whose surface refused draws
+        // nothing this render.
+        TextureFormat outputFormat = TextureFormat::RGBA8UnormSrgb;
+        if (toWindow) {
+            if (!this.configureWindow(gpu: ref gpu)) { this.last = nothing; return; }
+            outputFormat = this.windowView;
+        }
         // the method, as set now: its samples a texel, and how they become the scene (antialiasing.kama)
         uint32 perTexel = samplesOf(method: this.method);
         bool byGpu = this.method == Antialiasing::Msaa4;
@@ -1036,31 +1690,86 @@ type resource Renderer {
         int32 byStandIn = 0;
         isize standInAt = -2;   // the stand-in's general entry, found by the first draw that takes it: -1 refused
         // the frame's own passes: while the tone-mapped resolve compiles the GPU resolves, the ladder's next rung, and
-        // while the output pass compiles it is left out, the target left as it was. Neither is a miss once refused.
+        // while the output pass compiles it is left out, the target left as it was, and the window showing the frame it
+        // showed last. Neither is a miss once refused.
         if (toneMappedResolve) {
-            waited = waited + this.provideResolve(now: now);
-            if (!this.resolving.ready()) {
-                if (!this.resolving.refusedNow()) { misses = misses + 1; }
+            waited = waited + this.provideResolve(gpu: ref gpu, now: now);
+            if (!gpu.resolving.ready()) {
+                if (!gpu.resolving.refusedNow()) { misses = misses + 1; }
                 toneMappedResolve = false;
                 byGpu = true;
             }
         }
-        bool output = !target.holdsScene();
+        bool output = match (named) { case Some(value: t): !t.holdsScene(); case None: true; };
         ToneMapping curve = camera.toneMapping();
         isize o = -1;
         if (output) {
-            o = this.outputFor(curve: curve);
-            waited = waited + this.provideOutput(o: o, curve: curve, now: now);
-            Shared<PipelineSlot> outputSlot = copy this.outputs[o];
+            o = this.outputFor(gpu: ref gpu, curve: curve, format: outputFormat);
+            waited = waited + this.provideOutput(gpu: ref gpu, o: o, curve: curve, format: outputFormat, now: now);
+            Shared<PipelineSlot> outputSlot = copy gpu.outputs[o];
             if (!outputSlot.ready()) {
                 if (!outputSlot.refusedNow()) { misses = misses + 1; }
                 output = false;
             }
         }
-        Texture colour = target.textureOn(device: ref this.device, count: perTexel);
-        Texture depth = target.depthOn(device: ref this.device, count: perTexel);
-        Texture sceneTexture = target.sceneOn(device: ref this.device, count: perTexel);
-        Texture sampled = target.samplesOn(device: ref this.device, count: perTexel);
+        // the window's frame, acquired only when the output pass will write it, so the window is never shown a frame
+        // nothing was written into; with none to draw into this render, nothing is drawn
+        Optional<SurfaceTexture> frame = Optional::None;
+        uint32 wide = cast<uint32>(this.configuredWidth);
+        uint32 high = cast<uint32>(this.configuredHeight);
+        if (toWindow && output) {
+            frame = this.acquireWindow(gpu: ref gpu);
+            if (frame.isNone()) { this.last = nothing; return; }
+            match (frame) {
+                case Some(value: f): { Texture shown = f.texture(); wide = shown.width(); high = shown.height(); }
+                case None: { }
+            };
+        }
+        Shared<RenderTarget> target = match (give named) {
+            case Some(value: t): give t;
+            case None: this.windowTargetAt(gpu: ref gpu, width: wide, height: high);
+        };
+        // the window reads held (step 1's third question, Bevy's way): this frame is drawn into a texture of its own,
+        // copied out for each, and drawn onto the window by the pass onto it, once that pass is compiled. While it
+        // compiles the frame is drawn into the window as ever, and the reads wait; where the device refused it, they fail.
+        DynamicArray<Shared<FrameCapture>> held = DynamicArray.empty();
+        bool reading = false;
+        isize b = -1;
+        if (frame.isSome()) {
+            held = this.heldCaptures();
+            if (held.length() == 0) { this.captures.clear(); }
+            else {
+                b = this.blitFor(gpu: ref gpu, format: outputFormat);
+                waited = waited + this.provideBlit(gpu: ref gpu, b: b, format: outputFormat, now: now);
+                Shared<PipelineSlot> blitSlot = copy gpu.blits[b];
+                if (blitSlot.ready()) { reading = true; }
+                else if (blitSlot.refusedNow()) {
+                    this.failCaptures(words: "the device refused the window read's pass onto the window, so the window cannot be read");
+                    held.clear();
+                }
+            }
+        }
+        Texture colour = target.textureOn(device: ref gpu.device, count: perTexel);
+        Optional<Texture> readTexture = Optional::None;
+        if (reading) {
+            TextureDescriptor r = TextureDescriptor.make(width: wide, height: high, format: outputFormat,
+                                                         usage: TextureUsage::RenderAttachment | TextureUsage::CopySrc | TextureUsage::TextureBinding);
+            r.label(text: "a window read's frame");
+            readTexture = Optional::Some(value: gpu.device.createTexture(descriptor: give r));
+        }
+        // what the output pass writes: the target's colour, the read's texture, or the window's frame
+        TextureView drawnInto = match (readTexture) {
+            case Some(value: x): x.createView(descriptor: TextureViewDescriptor.make());
+            case None: match (frame) {
+                case Some(value: f): f.view();
+                case None: colour.createView(descriptor: TextureViewDescriptor.make());
+            };
+        };
+        Texture depth = target.depthOn(device: ref gpu.device, count: perTexel);
+        Texture sceneTexture = target.sceneOn(device: ref gpu.device, count: perTexel);
+        Texture sampled = target.samplesOn(device: ref gpu.device, count: perTexel);
+        // a camera with no aspect of its own takes what it draws into's, width over height (step 1's question 1)
+        camera.follow(width: target.width(), height: target.height());
         float32 exposure = camera.exposureScale();
 
         DynamicArray<uint8> frameBytes = DynamicArray.empty();
@@ -1085,17 +1794,17 @@ type resource Renderer {
         putFloat(into: ref frameBytes, value: seen.get(c: 3, r: 2));
         // the camera's exposure, what every material's light is scaled by before it is stored (part 4, question 3)
         putFloat(into: ref frameBytes, value: exposure);
-        this.queue.writeBuffer(buffer: this.frame, offset: 0, data: frameBytes.view());
-        Buffer records = scene.recordsOn(device: ref this.device, queue: ref this.queue);
-        Buffer lights = scene.lightsOn(device: ref this.device, queue: ref this.queue);
-        BindGroupDescriptor bound = BindGroupDescriptor.make(layout: copy this.frameLayout);
-        bound.entry(binding: 0, resource: BindingResource::Buffer(binding: BufferBinding.whole(buffer: copy this.frame)));
+        gpu.queue.writeBuffer(buffer: gpu.frame, offset: 0, data: frameBytes.view());
+        Buffer records = scene.recordsOn(device: ref gpu.device, queue: ref gpu.queue);
+        Buffer lights = scene.lightsOn(device: ref gpu.device, queue: ref gpu.queue);
+        BindGroupDescriptor bound = BindGroupDescriptor.make(layout: copy gpu.frameLayout);
+        bound.entry(binding: 0, resource: BindingResource::Buffer(binding: BufferBinding.whole(buffer: copy gpu.frame)));
         bound.entry(binding: 1, resource: BindingResource::Buffer(binding: BufferBinding.whole(buffer: give records)));
-        bound.entry(binding: 2, resource: BindingResource::Texture(view: copy this.dfgView));
-        bound.entry(binding: 3, resource: BindingResource::Sampler(sampler: copy this.dfgSampling));
+        bound.entry(binding: 2, resource: BindingResource::Texture(view: copy gpu.dfgView));
+        bound.entry(binding: 3, resource: BindingResource::Sampler(sampler: copy gpu.dfgSampling));
         bound.entry(binding: 4, resource: BindingResource::Buffer(binding: BufferBinding.whole(buffer: give lights)));
         bound.label(text: "the frame, the object records, the DFG table and the lights");
-        BindGroup frameGroup = this.device.createBindGroup(descriptor: give bound);
+        BindGroup frameGroup = gpu.device.createBindGroup(descriptor: give bound);
 
         // Each mesh's draw, gathered once: its material compiled the first time, its pipelines ready or asked for, its
         // settings and buffers written when they changed. The depth prepass and the shaded pass then draw the same list.
@@ -1122,11 +1831,11 @@ type resource Renderer {
             WhileCompiling drawWay = match (scene.wayAt(slot: slot)) { case Some(value: w): w; case None: this.way; };
             string source = material.gpuMut().source();
             string general = material.gpuMut().generalSource();
-            isize e = this.pipelineFor(source: source, general: general, mirrored: scene.mirroredAt(slot: slot), count: perTexel);
-            waited = waited + this.provide(i: e, now: drawWay == WhileCompiling::Wait);
+            isize e = this.pipelineFor(gpu: ref gpu, source: source, general: general, mirrored: scene.mirroredAt(slot: slot), count: perTexel);
+            waited = waited + this.provide(gpu: ref gpu, i: e, now: drawWay == WhileCompiling::Wait);
             Shared<Material> drawnWith = copy material;
-            Shared<PipelineSlot> shadedSlot = copy this.pipelines[e];
-            Shared<PipelineSlot> depthSlot = copy this.prepasses[e];
+            Shared<PipelineSlot> shadedSlot = copy gpu.pipelines[e];
+            Shared<PipelineSlot> depthSlot = copy gpu.prepasses[e];
             if (shadedSlot.ready() && depthSlot.ready()) {
                 chosen.add(item: e);
                 shadedWith.add(item: shadedSlot.pipeline());
@@ -1138,10 +1847,10 @@ type resource Renderer {
                 // it is not yet; under `StandIn`, by the stand-in's, its look the stand-in's; else skipped
                 bool drawable = false;
                 if (drawWay == WhileCompiling::General) {
-                    isize g = this.generalOf[e];
-                    this.provideGeneral(g: g);
-                    Shared<PipelineSlot> shadedGeneral = copy this.generalShaded[g];
-                    Shared<PipelineSlot> depthGeneral = copy this.generalDepth[g];
+                    isize g = gpu.generalOf[e];
+                    this.provideGeneral(gpu: ref gpu, g: g);
+                    Shared<PipelineSlot> shadedGeneral = copy gpu.generalShaded[g];
+                    Shared<PipelineSlot> depthGeneral = copy gpu.generalDepth[g];
                     if (shadedGeneral.ready() && depthGeneral.ready()) {
                         drawable = true;
                         chosen.add(item: -2 - g);
@@ -1151,11 +1860,11 @@ type resource Renderer {
                     }
                 }
                 if (drawWay == WhileCompiling::StandIn) {
-                    if (standInAt == -2) { standInAt = this.standInEntry(count: perTexel); }
+                    if (standInAt == -2) { standInAt = this.standInEntry(gpu: ref gpu, count: perTexel); }
                     if (standInAt >= 0) {
-                        this.provideGeneral(g: standInAt);
-                        Shared<PipelineSlot> shadedStandIn = copy this.generalShaded[standInAt];
-                        Shared<PipelineSlot> depthStandIn = copy this.generalDepth[standInAt];
+                        this.provideGeneral(gpu: ref gpu, g: standInAt);
+                        Shared<PipelineSlot> shadedStandIn = copy gpu.generalShaded[standInAt];
+                        Shared<PipelineSlot> depthStandIn = copy gpu.generalDepth[standInAt];
                         if (shadedStandIn.ready() && depthStandIn.ready()) {
                             drawable = true;
                             chosen.add(item: -2 - standInAt);
@@ -1169,16 +1878,16 @@ type resource Renderer {
                 if (!drawable) { skipped = skipped + 1; continue; }
             }
             DynamicArray<uint8> settings = DynamicArray.empty();
-            if (drawnWith.gpuMut().staleOn(device: this.device, version: drawnWith.version())) {
+            if (drawnWith.gpuMut().staleOn(device: gpu.device, version: drawnWith.version())) {
                 MaterialSettings declared = MaterialSettings.make();
                 drawnWith.settings(into: ref declared);
                 settings = declared.bytes();
             }
-            looks.add(item: drawnWith.gpuMut().groupOn(device: ref this.device, queue: ref this.queue, layout: this.materialLayout,
+            looks.add(item: drawnWith.gpuMut().groupOn(device: ref gpu.device, queue: ref gpu.queue, layout: gpu.materialLayout,
                                                        settings: settings, version: drawnWith.version()));
-            positionsOf.add(item: geometry.buffersMut().positionsOn(device: ref this.device, queue: ref this.queue));
-            normalsOf.add(item: geometry.buffersMut().normalsOn(device: ref this.device, queue: ref this.queue));
-            indicesOf.add(item: geometry.buffersMut().indicesOn(device: ref this.device, queue: ref this.queue));
+            positionsOf.add(item: geometry.buffersMut().positionsOn(device: ref gpu.device, queue: ref gpu.queue));
+            normalsOf.add(item: geometry.buffersMut().normalsOn(device: ref gpu.device, queue: ref gpu.queue));
+            indicesOf.add(item: geometry.buffersMut().indicesOn(device: ref gpu.device, queue: ref gpu.queue));
             formats.add(item: geometry.buffers().indexFormat());
             isize count = geometry.buffers().indexCount();
             counts.add(item: cast<uint32>(count));
@@ -1186,7 +1895,7 @@ type resource Renderer {
             triangles = triangles + cast<int32>(count / 3);
         }
 
-        CommandEncoder encoder = this.device.createCommandEncoder();
+        CommandEncoder encoder = gpu.device.createCommandEncoder();
         // the depth prepass (kyoten's rendering.md § Decided, area 3; part 4): every mesh's nearest depth, cleared to 0
         // first since depth is reversed, so the shaded pass shades each texel once
         RenderPassDescriptor depthPass = RenderPassDescriptor.make();
@@ -1223,16 +1932,16 @@ type resource Renderer {
         // channel), averaged and the weight undone, so it stays linear (antialiasing.kama). The frame's own pass, as the
         // output pass is, so `info()` does not count it
         if (toneMappedResolve) {
-            BindGroupDescriptor samplesRead = BindGroupDescriptor.make(layout: copy this.resolveLayout);
+            BindGroupDescriptor samplesRead = BindGroupDescriptor.make(layout: copy gpu.resolveLayout);
             samplesRead.entry(binding: 0, resource: BindingResource::Texture(view: sampled.createView(descriptor: TextureViewDescriptor.make())));
             samplesRead.label(text: "the tone-mapped resolve's samples");
-            BindGroup resolveGroup = this.device.createBindGroup(descriptor: give samplesRead);
+            BindGroup resolveGroup = gpu.device.createBindGroup(descriptor: give samplesRead);
             RenderPassDescriptor resolvePass = RenderPassDescriptor.make();
             resolvePass.color(attachment: ColorAttachment.clearing(view: sceneTexture.createView(descriptor: TextureViewDescriptor.make()),
                                                             color: GpuColor.of(r: 0.0, g: 0.0, b: 0.0, a: 0.0)));
             resolvePass.label(text: "the tone-mapped resolve");
             RenderPass tp = encoder.beginRenderPass(descriptor: give resolvePass);
-            tp.setPipeline(pipeline: this.resolving.pipeline());
+            tp.setPipeline(pipeline: gpu.resolving.pipeline());
             tp.setBindGroup(index: 0, group: resolveGroup);
             tp.draw(vertexCount: 3, instanceCount: 1, firstVertex: 0, firstInstance: 0);
             give tp.end();
@@ -1241,37 +1950,81 @@ type resource Renderer {
         // the scene itself, so it has none.
         if (output) {
             bool table = readsTable(curve: curve);
-            BindGroupDescriptor sceneRead = BindGroupDescriptor.make(layout: table ? copy this.tableLayout : copy this.outputLayout);
+            BindGroupDescriptor sceneRead = BindGroupDescriptor.make(layout: table ? copy gpu.tableLayout : copy gpu.outputLayout);
             sceneRead.entry(binding: 0, resource: BindingResource::Texture(view: sceneTexture.createView(descriptor: TextureViewDescriptor.make())));
-            if (table) { sceneRead.entry(binding: 1, resource: BindingResource::Texture(view: this.agxTable())); }
+            if (table) { sceneRead.entry(binding: 1, resource: BindingResource::Texture(view: this.agxTable(gpu: ref gpu))); }
             sceneRead.label(text: "the output pass's scene");
-            BindGroup readGroup = this.device.createBindGroup(descriptor: give sceneRead);
+            BindGroup readGroup = gpu.device.createBindGroup(descriptor: give sceneRead);
             RenderPassDescriptor outputPass = RenderPassDescriptor.make();
-            outputPass.color(attachment: ColorAttachment.clearing(view: colour.createView(descriptor: TextureViewDescriptor.make()),
-                                                           color: GpuColor.of(r: 0.0, g: 0.0, b: 0.0, a: 0.0)));
+            outputPass.color(attachment: ColorAttachment.clearing(view: copy drawnInto, color: GpuColor.of(r: 0.0, g: 0.0, b: 0.0, a: 0.0)));
             outputPass.label(text: "the output pass");
             RenderPass op = encoder.beginRenderPass(descriptor: give outputPass);
-            Shared<PipelineSlot> outputSlot = copy this.outputs[o];
+            Shared<PipelineSlot> outputSlot = copy gpu.outputs[o];
             op.setPipeline(pipeline: outputSlot.pipeline());
             op.setBindGroup(index: 0, group: readGroup);
             op.draw(vertexCount: 3, instanceCount: 1, firstVertex: 0, firstInstance: 0);
             give op.end();
         }
+        // the window read: the frame copied out of the read's texture for each read held, then drawn onto the window's
+        // frame, each texel as it is, by the pass onto the window
+        uint32 row = rowBytes(width: wide, texel: 4);
+        uint64 size = cast<uint64>(row) * cast<uint64>(high);
+        DynamicArray<Buffer> copies = DynamicArray.empty();
+        if (reading) {
+            Texture readFrom = match (readTexture) { case Some(value: x): copy x; case None: { panic(msg: "made above"); } };
+            for (isize i = 0; i < held.length(); i = i + 1) {
+                BufferDescriptor described = BufferDescriptor.make(size: size, usage: BufferUsage::MapRead | BufferUsage::CopyDst);
+                described.label(text: "a window read");
+                Buffer copied = gpu.device.createBuffer(descriptor: give described);
+                encoder.copyTextureToBuffer(texture: readFrom, buffer: copied, width: wide, height: high, bytesPerRow: row);
+                copies.add(item: give copied);
+            }
+            BindGroupDescriptor frameRead = BindGroupDescriptor.make(layout: copy gpu.blitLayout);
+            frameRead.entry(binding: 0, resource: BindingResource::Texture(view: readFrom.createView(descriptor: TextureViewDescriptor.make())));
+            frameRead.label(text: "the window read's frame");
+            BindGroup readGroup = gpu.device.createBindGroup(descriptor: give frameRead);
+            TextureView onto = match (frame) { case Some(value: f): f.view(); case None: { panic(msg: "a frame is read only when one was acquired"); } };
+            RenderPassDescriptor blitPass = RenderPassDescriptor.make();
+            blitPass.color(attachment: ColorAttachment.clearing(view: give onto, color: GpuColor.of(r: 0.0, g: 0.0, b: 0.0, a: 1.0)));
+            blitPass.label(text: "the window read's pass onto the window");
+            RenderPass wp = encoder.beginRenderPass(descriptor: give blitPass);
+            Shared<PipelineSlot> blitSlot = copy gpu.blits[b];
+            wp.setPipeline(pipeline: blitSlot.pipeline());
+            wp.setBindGroup(index: 0, group: readGroup);
+            wp.draw(vertexCount: 3, instanceCount: 1, firstVertex: 0, firstInstance: 0);
+            give wp.end();
+        }
         CommandBuffer commands = give encoder.finish();
-        this.queue.submit(commands: give commands);
+        gpu.queue.submit(commands: give commands);
+        if (reading) {
+            bool bgra = outputFormat == TextureFormat::BGRA8UnormSrgb;
+            for (isize i = 0; i < held.length(); i = i + 1) {
+                Buffer copied = copy copies[i];
+                BufferRead read = copied.mapRead(offset: 0, size: size);
+                Shared<FrameCapture> c = copy held[i];
+                c.derefMut().fill(copied: CopiedFrame.make(device: copy gpu.device, buffer: give copied, read: give read, width: wide,
+                                                           height: high, row: row, wide: false, bgra: bgra));
+            }
+            this.captures.clear();
+        }
+        // the window's frame shown
+        match (give frame) {
+            case Some(value: f): { give f.present(); this.windowTold = ""; }
+            case None: { }
+        };
         // every draw of the scene's meshes the GPU was asked for, both passes', as three.js's `renderer.info` counts a
         // shadow pass's; the frame's own pass, the output, is not the scene's
         int32 calls = cast<int32>(chosen.length()) * 2;
         this.last = RenderInfo.of(calls: calls, triangles: triangles * 2, objects: objects, matrices: made,
                                   misses: misses + skipped + byGeneral + byStandIn, skipped: skipped, general: byGeneral,
                                   standIn: byStandIn, waited: waited);
-        this.reportRefusals();
+        this.reportRefusals(gpu: ref gpu);
     }
 
     // Start reading the target back, as three.js's `readRenderTargetPixelsAsync`: poll the read until it hands back its
     // image, the target's size in 8-bit RGBA, sRGB, top row first.
-    public unsafe fn PixelRead readRenderTargetPixels(Shared<RenderTarget> target) {
-        Texture texture = target.textureOn(device: ref this.device, count: samplesOf(method: this.method));
+    unsafe fn PixelRead readTargetOn(ref RendererGpu gpu, Shared<RenderTarget> target) {
+        Texture texture = target.textureOn(device: ref gpu.device, count: samplesOf(method: this.method));
         uint32 width = target.width();
         uint32 height = target.height();
         bool wide = target.holdsScene();       // 16-bit float: 8 bytes a texel
@@ -1279,14 +2032,14 @@ type resource Renderer {
         uint64 size = cast<uint64>(row) * cast<uint64>(height);
         BufferDescriptor described = BufferDescriptor.make(size: size, usage: BufferUsage::MapRead | BufferUsage::CopyDst);
         described.label(text: "a render target read back");
-        Buffer buffer = this.device.createBuffer(descriptor: give described);
-        CommandEncoder encoder = this.device.createCommandEncoder();
+        Buffer buffer = gpu.device.createBuffer(descriptor: give described);
+        CommandEncoder encoder = gpu.device.createCommandEncoder();
         encoder.copyTextureToBuffer(texture: texture, buffer: buffer, width: width, height: height, bytesPerRow: row);
         CommandBuffer commands = give encoder.finish();
-        this.queue.submit(commands: give commands);
+        gpu.queue.submit(commands: give commands);
         BufferRead read = buffer.mapRead(offset: 0, size: size);
-        return PixelRead.start(device: copy this.device, buffer: give buffer, read: give read, width: width, height: height, row: row,
-                               wide: wide);
+        return PixelRead.ofTarget(copied: CopiedFrame.make(device: copy gpu.device, buffer: give buffer, read: give read, width: width,
+                                                           height: height, row: row, wide: wide, bgra: false));
     }
 }
 
@@ -1294,8 +2047,9 @@ type resource Renderer {
 // image was handed over, it says `Taken`, as @kama/gpu's requests do.
 type enum PixelStatus { Pending, Ready(Image image), Failed(GpuError error) }
 
-// A read of a render target, under way. Dropping it while it is pending is safe: the map is left to finish and be freed.
-type resource PixelRead {
+// A frame copied into a buffer and its map under way, a target's or the window's. Dropping it while it is pending is
+// safe: the map is left to finish and be freed.
+type resource CopiedFrame {
     Device device;
     Buffer buffer;     // kept alive while it is mapped
     BufferRead read;
@@ -1303,11 +2057,14 @@ type resource PixelRead {
     uint32 h;
     uint32 row;
     bool float16;      // a 16-bit float target's texels: the linear scene
+    bool bgra;         // a window frame whose format orders its channels blue, green, red, alpha
     bool handed = false;
 
-    friend Renderer::readRenderTargetPixels[start];
+    friend Renderer[make];
+    friend PixelRead[poll];
+    friend FrameCapture[poll];
 
-    ctor start(Device device, Buffer buffer, BufferRead read, uint32 width, uint32 height, uint32 row, bool wide) {
+    ctor make(Device device, Buffer buffer, BufferRead read, uint32 width, uint32 height, uint32 row, bool wide, bool bgra) {
         this.device = give device;
         this.buffer = give buffer;
         this.read = give read;
@@ -1315,9 +2072,10 @@ type resource PixelRead {
         this.h = height;
         this.row = row;
         this.float16 = wide;
+        this.bgra = bgra;
     }
 
-    public unsafe fn PixelStatus poll() {
+    unsafe fn PixelStatus poll() {
         if (this.handed) { return PixelStatus::Failed(error: GpuError::Taken); }
         this.device.poll(wait: false);
         ReadStatus s = this.read.poll();
@@ -1352,6 +2110,14 @@ type resource PixelRead {
         for (isize y = 0; y < height; y = y + 1) {
             for (isize x = 0; x < width * 4; x = x + 1) { samples[y * width * 4 + x] = mapped[y * stride + x]; }
         }
+        if (this.bgra) {
+            // a window frame in BGRA order, each texel's blue and red put in RGBA's places
+            for (isize i = 0; i < width * height * 4; i = i + 4) {
+                uint8 blue = samples[i];
+                samples[i] = samples[i + 2];
+                samples[i + 2] = blue;
+            }
+        }
         Result<Image, ImageError> made = Image.fromSamples8(width: width, height: height, format: PixelFormat::Rgba8Unorm,
                                                             alpha: AlphaMode::Straight, colorSpace: ColorSpace.srgb(),
                                                             samples: give samples);
@@ -1359,5 +2125,35 @@ type resource PixelRead {
             case Ok(value: img): PixelStatus::Ready(image: give img);
             case Err(error: e): PixelStatus::Failed(error: GpuError::Refused(words: "the read's image: " + e.message()));
         };
+    }
+}
+
+// A read under way: a target's, its copy made at once (`readRenderTargetPixels`), or the window's, its copy made by the
+// next render that draws into the window (`readWindowPixels`), or one that failed before it began. Dropping it while it
+// is pending is safe.
+type resource PixelRead {
+    Optional<CopiedFrame> copied = Optional::None;
+    Optional<Shared<FrameCapture>> capture = Optional::None;
+    string failure = "";
+
+    friend Renderer[ofTarget, ofWindow, failed];
+
+    ctor ofTarget(CopiedFrame copied) { this.copied = Optional::Some(value: give copied); }
+    ctor ofWindow(Shared<FrameCapture> capture) { this.capture = Optional::Some(value: give capture); }
+    ctor failed(string words) { this.failure = give words; }
+
+    // Pending until the image is copied and mapped; then Ready once, handing the image over, or Failed, with why. Polled
+    // again after its image was handed over, it says `Taken`, as @kama/gpu's requests do.
+    public unsafe fn PixelStatus poll() {
+        if (!this.failure.isEmpty()) { return PixelStatus::Failed(error: GpuError::Refused(words: copy this.failure)); }
+        match (this.copied) {
+            case Some(value: c): { return c.poll(); }
+            case None: { }
+        };
+        match (this.capture) {
+            case Some(value: k): { return k.derefMut().answer(); }
+            case None: { }
+        };
+        return PixelStatus::Failed(error: GpuError::Taken);
     }
 }

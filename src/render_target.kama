@@ -38,10 +38,12 @@ type resource RenderTarget {
     DynamicArray<Texture> samples;     // the multisampled 16-bit float scene a render draws: the scene's texture itself
                                        // at one sample a texel
     DynamicArray<Texture> depths;      // ...and the depth it draws against, at the same samples
+    bool windowed = false;             // the window's: no colour of its own, the window's frame taking its place
 
-    friend Renderer::clear[textureOn, entryOn];
-    friend Renderer::readRenderTargetPixels[textureOn, entryOn];
-    friend Renderer::render[textureOn, depthOn, sceneOn, samplesOn, entryOn];
+    friend Renderer::clearOn[textureOn, entryOn];
+    friend Renderer::readTargetOn[textureOn, entryOn];
+    friend Renderer::renderOn[textureOn, depthOn, sceneOn, samplesOn, entryOn];
+    friend Renderer[forWindow];
 
     // A target `width` by `height` texels, 8-bit sRGB.
     public unsafe ctor make(uint32 width, uint32 height) {
@@ -61,6 +63,21 @@ type resource RenderTarget {
         this.w = width;
         this.h = height;
         this.kind = format;
+        this.devices = DynamicArray.empty();
+        this.colours = DynamicArray.empty();
+        this.scenes = DynamicArray.empty();
+        this.sampleCounts = DynamicArray.empty();
+        this.samples = DynamicArray.empty();
+        this.depths = DynamicArray.empty();
+    }
+
+    // The window's textures, `width` by `height` (kyoten's rendering.md § Decided, GFX-1's part 6, step 1): an 8-bit
+    // target's scene, samples and depth, with no colour of its own, since the output pass writes the window's frame.
+    unsafe ctor forWindow(uint32 width, uint32 height) {
+        this.w = width;
+        this.h = height;
+        this.kind = TargetFormat::Rgba8UnormSrgb;
+        this.windowed = true;
         this.devices = DynamicArray.empty();
         this.colours = DynamicArray.empty();
         this.scenes = DynamicArray.empty();
@@ -109,6 +126,8 @@ type resource RenderTarget {
         TextureDescriptor c = TextureDescriptor.make(width: this.w, height: this.h, format: format,
                                                      usage: TextureUsage::RenderAttachment | TextureUsage::CopySrc | TextureUsage::TextureBinding);
         c.label(text: "a render target");
+        // the window's has none: a one-texel stand-in keeps the entry's lists in step, never drawn into or read
+        if (this.windowed) { c = TextureDescriptor.make(width: 1, height: 1, format: format, usage: TextureUsage::RenderAttachment); }
         Texture colour = device.createTexture(descriptor: give c);
         if (this.holdsScene()) {
             this.scenes.add(item: copy colour);

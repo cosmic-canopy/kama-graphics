@@ -254,7 +254,8 @@ fn float32 depthAt(const ref Mat4 p, float32 distance) {
 
 unsafe fn void cameraCases(ref Verdicts found) {
     {
-        PerspectiveCamera cam = PerspectiveCamera.make(fovRad: radians(deg: 90.0), aspect: 2.0, near: 1.0, far: 101.0);
+        PerspectiveCamera cam = PerspectiveCamera.make(fovRad: radians(deg: 90.0), near: 1.0, far: 101.0);
+        cam.aspectMut() = Optional::Some(value: 2.0);
         Mat4 p = cam.projectionMatrix();
         Mat4 want = Mat4.fromCols(c0: Vec4.of(x: 0.5, y: 0.0, z: 0.0, w: 0.0), c1: Vec4.of(x: 0.0, y: 1.0, z: 0.0, w: 0.0),
                                   c2: Vec4.of(x: 0.0, y: 0.0, z: 0.01, w: -1.0), c3: Vec4.of(x: 0.0, y: 0.0, z: 1.01, w: 0.0));
@@ -271,7 +272,7 @@ unsafe fn void cameraCases(ref Verdicts found) {
                   why: close(a: sy, b: 1.0 / 0.57735027) ? "" : "y scale ${sy}");
     }
     {
-        PerspectiveCamera cam = PerspectiveCamera.withInfiniteFar(fovRad: radians(deg: 90.0), aspect: 1.0, near: 0.5);
+        PerspectiveCamera cam = PerspectiveCamera.withInfiniteFar(fovRad: radians(deg: 90.0), near: 0.5);
         Mat4 p = cam.projectionMatrix();
         float32 c = p.get(c: 2, r: 2);
         float32 d = p.get(c: 3, r: 2);

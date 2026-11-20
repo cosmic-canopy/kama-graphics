@@ -189,7 +189,7 @@ type resource AntialiasRun {
     // its square, drawn into `target` on `backdrop` of alpha 0.25, with no tone mapping, by the run's renderer as it is
     // set; its read started.
     unsafe fn void draw(Shared<RenderTarget> target, float32 r, float32 g, float32 b, bool squared, Color backdrop) {
-        Shared<PerspectiveCamera> cam = new PerspectiveCamera.make(fovRad: radians(deg: 50.0), aspect: 16.0 / 12.0, near: 0.1, far: 100.0);
+        Shared<PerspectiveCamera> cam = new PerspectiveCamera.make(fovRad: radians(deg: 50.0), near: 0.1, far: 100.0);
         cam.targetMut() = Optional::Some(value: copy target);
         cam.toneMappingMut() = ToneMapping::None;
         float64 scale = defaultScale(ev: cam.exposure());
@@ -230,7 +230,7 @@ type resource AntialiasRun {
     // turned 30 degrees in front of a dim, larger one, on the dark; its read started.
     unsafe fn void drawGolden() {
         Shared<RenderTarget> t = new RenderTarget.make(width: GOLD_WIDE, height: GOLD_HIGH);
-        Shared<PerspectiveCamera> cam = new PerspectiveCamera.make(fovRad: radians(deg: 50.0), aspect: 2.0, near: 0.1, far: 100.0);
+        Shared<PerspectiveCamera> cam = new PerspectiveCamera.make(fovRad: radians(deg: 50.0), near: 0.1, far: 100.0);
         cam.targetMut() = Optional::Some(value: copy t);
         Shared<Scene> s = new Scene.make();
         Shared<BoxGeometry> small = new BoxGeometry.make(width: 0.8, height: 0.8, depth: 0.8);

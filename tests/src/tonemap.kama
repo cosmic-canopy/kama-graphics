@@ -265,8 +265,7 @@ type resource ToneMapRun {
             case Golden(curve: c): c;
         };
         Shared<RenderTarget> t = new RenderTarget.withFormat(width: wide, height: high, format: format);
-        Shared<PerspectiveCamera> cam = new PerspectiveCamera.make(fovRad: radians(deg: 50.0), aspect: cast<float32>(wide) / cast<float32>(high),
-                                                                   near: 0.1, far: 100.0);
+        Shared<PerspectiveCamera> cam = new PerspectiveCamera.make(fovRad: radians(deg: 50.0), near: 0.1, far: 100.0);
         cam.targetMut() = Optional::Some(value: copy t);
         cam.toneMappingMut() = curve;
         Shared<Scene> s = new Scene.make();

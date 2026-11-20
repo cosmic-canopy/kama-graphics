@@ -161,8 +161,13 @@ compile. Step 3 (SPEC § The renderer and § The scene graph): `StandIn`, the re
 unless a program names its own, drawn by its general form, and a mesh's own way over the renderer's. Step 4 (SPEC §
 The renderer): `Quality`, a value the game owns with the library's four presets as starting points, `applyQuality`
 handing back the quality in effect, `quality()`, and `supportsAntialiasing(method:)`; the step-down comes with the
-first method a device may lack (GFX-19). Next, part 6: `examples/cube` in a window on both legs, FLIP, the 150 KB
-measurement, FEATURES.md's rows and the SPEC.
+first method a device may lack (GFX-19).
+
+**Part 6 is under way** (2026-11-19): its first step's three questions were decided (ROADMAP_DETAIL § GFX-1), and step 1
+is built (SPEC § The renderer, § The camera and § Reading the window back): `Renderer.make(window:, options:)`, a
+renderer in a window requesting its own GPU, a camera's aspect following what it draws into, vsync as a property pair,
+and `readWindowPixels()`, a read of the window by Bevy's way. Next, its step 2: `examples/cube` in a window on both
+legs; then FLIP, the 150 KB measurement, FEATURES.md's rows and the SPEC.
 GFX-1 is built depth-first, and every example is a test: a headless readback and a golden image, on web and native. A
 feature a program does not use drops out at link time. [SPEC.md](SPEC.md) is what is built so far, and grows with each
 part.

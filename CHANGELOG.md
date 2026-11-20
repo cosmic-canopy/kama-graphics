@@ -185,3 +185,14 @@ package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   back the quality in effect; `renderer.quality()` reads it at any time, a technique set directly included;
   `renderer.supportsAntialiasing(method:)`, true for every method, each core WebGPU. The step-down where a device lacks
   a method comes with the first method a device may lack, 8x MSAA natively (GFX-19).
+- GFX-1's part 6, step 1: the renderer in a window. `Renderer.make(window:, options:)` draws into an `@kama/window`
+  `Window` and requests its own GPU as `RendererOptions` say (`power`, `forceFallbackAdapter`, `device`); each render
+  polls the request, and until the device answers draws nothing and reports nothing. A camera naming no target draws
+  into the window: its surface configured at the window's `framebufferSize()`, and again when that or the present mode
+  changes or the surface is out of date or lost, and the frame drawn as a target is and presented. `presentMode()` and
+  `presentModeMut()`, `Fifo` by default, and `supportsPresentMode(mode:)`; a mode the surface does not offer is reported
+  once and `Fifo` taken. `readWindowPixels()`, a `PixelRead` of the next frame drawn into the window, by Bevy's way: the
+  frame drawn into a texture of its own, copied out and drawn onto the window. A compile asked before the GPU is asked
+  by the render that finds it. `GraphicsErrorKind::Device` and `Window`. **Changed:** `PerspectiveCamera.make(fovRad:,
+  near:, far:)` and `withInfiniteFar(fovRad:, near:)` take no aspect: `aspect()` and `aspectMut()` are an
+  `Optional<float32>`, `None` by default, when a render hands the camera what it draws into's.

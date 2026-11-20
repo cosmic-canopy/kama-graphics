@@ -129,7 +129,7 @@ type resource ShaderRun {
     unsafe fn void refusedMaterial() {
         Renderer r = gpuResolved(device: copy this.device, queue: copy this.queue);
         Shared<RenderTarget> t = new RenderTarget.make(width: 32, height: 24);
-        Shared<PerspectiveCamera> cam = new PerspectiveCamera.make(fovRad: radians(deg: 50.0), aspect: 32.0 / 24.0, near: 0.1, far: 100.0);
+        Shared<PerspectiveCamera> cam = new PerspectiveCamera.make(fovRad: radians(deg: 50.0), near: 0.1, far: 100.0);
         cam.toneMappingMut() = ToneMapping::None;
         cam.positionMut() = Vec3.of(x: 0.0, y: 0.0, z: 4.0);
         cam.targetMut() = Optional::Some(value: copy t);
@@ -179,7 +179,7 @@ type resource ShaderRun {
         Renderer r = gpuResolved(device: copy this.device, queue: copy this.queue);
         r.clearColorMut() = Color.fromHex(hex: 0x202020);
         Shared<RenderTarget> t = new RenderTarget.make(width: 32, height: 24);
-        Shared<PerspectiveCamera> cam = new PerspectiveCamera.make(fovRad: radians(deg: 50.0), aspect: 32.0 / 24.0, near: 0.1, far: 100.0);
+        Shared<PerspectiveCamera> cam = new PerspectiveCamera.make(fovRad: radians(deg: 50.0), near: 0.1, far: 100.0);
         cam.toneMappingMut() = ToneMapping::None;
         cam.targetMut() = Optional::Some(value: copy t);
         Shared<Scene> s = new Scene.make();
@@ -213,7 +213,7 @@ type resource ShaderRun {
         Renderer r = gpuResolved(device: copy this.device, queue: copy this.queue);
         r.clearColorMut() = Color.fromHex(hex: 0x202020);
         Shared<RenderTarget> t = new RenderTarget.make(width: 32, height: 24);
-        Shared<PerspectiveCamera> cam = new PerspectiveCamera.make(fovRad: radians(deg: 50.0), aspect: 32.0 / 24.0, near: 0.1, far: 100.0);
+        Shared<PerspectiveCamera> cam = new PerspectiveCamera.make(fovRad: radians(deg: 50.0), near: 0.1, far: 100.0);
         cam.toneMappingMut() = ToneMapping::None;
         cam.targetMut() = Optional::Some(value: copy t);
         Shared<Scene> s = new Scene.make();

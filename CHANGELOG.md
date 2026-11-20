@@ -212,3 +212,8 @@ package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `examples/cube/web-size.json`'s last entry for the emcc that built it; `tools/update-web-size.sh "<why>"` writes the
   record. 169.1 KB on kama 0.9.978 and emcc 6.0.13, 6.8 KB of it the goldens' file packager (kyoten's KY-63). The cube's
   manifest sets `ENVIRONMENT=web`. The gate fails a run that printed a FAIL line, whatever its status said.
+- GFX-1's part 6, step 4, its second part: a golden for each feature GFX-1 built that draws something of its own,
+  named as FEATURES.md names its test, each on WARP and SwiftShader: `scene-graph`, `camera-perspective`,
+  `depth-precision`, `geometry-primitives`, `render-target`, `nodes`, `nodes-override`, `material-unlit`, `light-units`
+  and `exposure` (`tests/src/features.kama`), `tone-mapping-none` beside the curves', and `resize` among the window's
+  cases.

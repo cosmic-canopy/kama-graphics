@@ -12,7 +12,8 @@
 // (tests/src/frame.kama), tone mapping (tests/src/tonemap.kama) and anti-aliasing methods (tests/src/antialias.kama),
 // and part 5's pipelines compiled off the frame (tests/src/compiling.kama), a material's general form
 // (tests/src/general.kama), the stand-in and a mesh's own way (tests/src/standin.kama) and a renderer's quality
-// (tests/src/quality.kama), each on its own handle to the one device.
+// (tests/src/quality.kama), then a golden for each feature GFX-1 built that had none (tests/src/features.kama), each on its
+// own handle to the one device.
 // `MeshStandardMaterial`'s values and settings, the DFG table, the lights' defaults and the library's quality presets
 // are checked with no GPU, beside part 2's.
 //
@@ -37,6 +38,7 @@ import {
     Verdicts, harnessCases, colorCases, partCases, nodeCases, ShaderCase, GpuOpen, GoldenRun, RendererRun, BoxesRun,
     ShaderRun, NormalsRun, standardCases, StandardRun, dfgCases, DfgRun, lightCases, LightsRun, physicalCases, PhysicalRun,
     LitRun, FrameRun, ToneMapRun, AntialiasRun, CompilingRun, GeneralRun, StandInRun, qualityCases, QualityRun, WindowRun,
+    FeaturesRun,
 };
 
 // The software GPUs a leg can name: WARP, natively on Windows and as Firefox's fallback adapter, and SwiftShader, as
@@ -61,7 +63,7 @@ unsafe fn string goldenArgument() {
 
 // The stage that finishes the run: the last GPU case's step moves to it, and so does a leg whose device never opened,
 // named once so that a stage added before it cannot leave either pointing at a step that needs the device.
-comptime int32 DONE = 19;
+comptime int32 DONE = 20;
 
 type resource Check implements App {
     int32 runs = 0;
@@ -73,8 +75,8 @@ type resource Check implements App {
                          // 6 the standard material, 7 the DFG table, 8 the lights, 9 the physical model, 10 the lit,
                          // 11 the frame, 12 the tone mapping
                          // goldens, 13 the anti-aliasing methods, 14 the pipelines compiled off the frame, 15 the
-                         // general form, 16 the stand-in and a mesh's way, 17 a renderer's quality, 18 the renderer in
-                         // a window, DONE
+                         // general form, 16 the stand-in and a mesh's way, 17 a renderer's quality, 18 the features'
+                         // goldens, 19 the renderer in a window, DONE
     Optional<GpuOpen> opening = Optional::None;
     Optional<Device> device = Optional::None;
     Optional<Queue> queue = Optional::None;
@@ -96,6 +98,7 @@ type resource Check implements App {
     Optional<GeneralRun> generalRun = Optional::None;
     Optional<StandInRun> standInRun = Optional::None;
     Optional<QualityRun> qualityRun = Optional::None;
+    Optional<FeaturesRun> featuresRun = Optional::None;
     Optional<WindowRun> windowRun = Optional::None;
 
     public unsafe ctor make() {
@@ -164,7 +167,8 @@ type resource Check implements App {
         if (this.stage == 15) { this.generalStep(); }
         if (this.stage == 16) { this.standInStep(); }
         if (this.stage == 17) { this.qualityStep(); }
-        if (this.stage == 18) { this.windowStep(); }
+        if (this.stage == 18) { this.featuresStep(); }
+        if (this.stage == 19) { this.windowStep(); }
         if (this.stage == DONE) { return this.finish(); }
         return 1;
     }
@@ -439,18 +443,36 @@ type resource Check implements App {
         this.stage = 18;
     }
 
+    // A golden for each feature GFX-1 built that draws something of its own (tests/src/features.kama).
+    unsafe fn void featuresStep() {
+        Optional<FeaturesRun> taken = replace(place: this.featuresRun, with: Optional::None);
+        FeaturesRun pending = match (give taken) {
+            case Some(value: r): give r;
+            case None: FeaturesRun.make(gpu: copy this.gpu, software: this.software, device: this.deviceCopy(), queue: this.queueCopy());
+        };
+        bool done = pending.step();
+        this.report(found: pending.verdicts());
+        pending.verdicts().clear();
+        if (!done) { this.featuresRun = Optional::Some(value: give pending); return; }
+        this.declared = this.declared + pending.declared();
+        this.matched = this.matched + pending.matched();
+        this.stage = 19;
+    }
+
     // The renderer in a window (tests/src/window.kama), a step a tick: each renderer there requests its own GPU, and the
     // device the check opened serves a renderer with no window.
     unsafe fn void windowStep() {
         Optional<WindowRun> taken = replace(place: this.windowRun, with: Optional::None);
         WindowRun pending = match (give taken) {
             case Some(value: r): give r;
-            case None: WindowRun.make(gpu: copy this.gpu, device: this.deviceCopy(), queue: this.queueCopy());
+            case None: WindowRun.make(gpu: copy this.gpu, software: this.software, device: this.deviceCopy(), queue: this.queueCopy());
         };
         bool done = pending.step();
         this.report(found: pending.verdicts());
         pending.verdicts().clear();
         if (!done) { this.windowRun = Optional::Some(value: give pending); return; }
+        this.declared = this.declared + pending.declared();
+        this.matched = this.matched + pending.matched();
         this.queue = Optional::None;
         this.device = Optional::None;
         println(s: "gpu cases: all run");

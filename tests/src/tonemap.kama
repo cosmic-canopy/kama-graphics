@@ -10,8 +10,9 @@
 // - **`AgX`, three.js r187's,** shows each colour within a step of r187's formulas worked here in float64;
 // - **`None`** shows each colour clamped and sRGB-encoded;
 // - **a camera drawing into a 16-bit float target ignores its tone mapping;**
-// - **the goldens** `tone-mapping-blender-agx` and `tone-mapping-agx`: a box whose colour runs from red to blue across it
-//   and over about nine stops up it, through Blender's AgX and through r187's. r187's needs DXC natively, as Firefox
+// - **the goldens** `tone-mapping-blender-agx`, `tone-mapping-agx` and `tone-mapping-none`: a box whose colour runs from
+//   red to blue across it and over about nine stops up it, through Blender's AgX, through r187's, and clamped with no
+//   curve (step 4 of part 6, one golden per method). r187's needs DXC natively, as Firefox
 //   compiles with it: under FXC, WARP's two legs round 2 of its 2,048 texels a step apart (kyoten's rendering.md §
 //   Decided, DXC).
 
@@ -227,6 +228,7 @@ type resource ToneMapRun {
         this.jobs.add(item: Job::Ignored);
         this.jobs.add(item: Job::Golden(curve: ToneMapping::BlenderAgX));
         this.jobs.add(item: Job::Golden(curve: ToneMapping::AgX));
+        this.jobs.add(item: Job::Golden(curve: ToneMapping::None));
     }
 
     public fn ref Verdicts verdicts() { return this.found; }
@@ -341,7 +343,8 @@ type resource ToneMapRun {
                     + halfWithin(got: img.samples16()[at + 1], want: cast<float64>(w.g), what: "green");
             }
             case Golden(curve: c): {
-                string test = c == ToneMapping::BlenderAgX ? "tone-mapping-blender-agx" : "tone-mapping-agx";
+                string test = c == ToneMapping::BlenderAgX ? "tone-mapping-blender-agx"
+                            : (c == ToneMapping::AgX ? "tone-mapping-agx" : "tone-mapping-none");
                 this.frame = DynamicArray.empty();
                 borrow img.samples8() as px {
                     for (isize k = 0; k < px.length(); k = k + 1) { this.frame.add(item: px[k]); }

@@ -714,10 +714,10 @@ natively. The library's own `examples/cube` is the same scene without an engine.
      from the next example on, a feature's budget is what it adds to the first example that uses it, that example built
      with and without it. The rule goes into FEATURES.md § How to read a row and `tools/check-features.sh`. GPU time
      waits on `@kama/gpu`'s timestamps (GPU-6).
-- **Next, part 6's step 4:** the build flag and the player's build in the gate, its measurement the ratchet; FEATURES.md's
-  22 cube rows with their status (`built`, or `partial` with ✓ where a ladder's methods are not all built) and the
-  shared budget, with the rule in § How to read a row and `tools/check-features.sh`; and the SPEC. Then kyoten's join
-  draws the hello cube through it.
+- **Next, part 6's step 4:** the build flag and the player's build in the gate, its measurement the ratchet;
+  FEATURES.md's 22 cube rows with their status (`built`, or `partial` with ✓ where a ladder's methods are not all
+  built) and the shared budget, with the rule in § How to read a row and `tools/check-features.sh`; and the SPEC. Then
+  kyoten's join draws the hello cube through it.
 - **Done:**
   - `examples/cube` draws from one source on both legs;
   - its golden passes on a software GPU on each leg CI has, and perceptually on the reference machines present;
@@ -934,13 +934,15 @@ kama's floor for a first publish is `tests/` green on every target the library c
 When, among the slices, is the owner's call when the row comes up.
 
 <a id="web-size"></a>
-## GFX-20: the cube's web code under its 150 KB gauge
+## GFX-20: the cube's web code against its gauge
 
-**What drives it:** kyoten's hello cube has a gauge of 150 KB of code on the web (wasm plus JS, release, brotli; kyoten's
-`docs/design/web-and-native.md` question 4), and a player's build of `examples/cube` measured 158.7 KB on 2026-11-20,
-with `ENVIRONMENT=web` and emmalloc, on kyoten's 0.9.978 pin (kyoten's `.scratch/s42/size/`). The gauge shows growth and
-holds nothing back (the owner, 2026-11-20: "the gauge is just a budget we want to identify growth"), so this row waits
-for the owner's call, and the cube's ratchet holds it from growing meanwhile.
+**What drives it:** kyoten's hello cube has a gauge of 150 KB of code on the web (wasm plus JS, release, brotli;
+kyoten's `docs/design/web-and-native.md` question 4), and a player's build of `examples/cube` measured 158.7 KB on
+2026-11-20, with `ENVIRONMENT=web` and emmalloc, on kyoten's 0.9.978 pin (kyoten's `.scratch/s42/size/`). The gauge
+shows growth and holds nothing back (the owner, 2026-11-20: "the gauge is just a budget we want to identify growth"),
+and confirming: "Yes we should not hold a slice back due to our arbitrary guage.  we likely will increase the guage and
+determine if there is something that can be done to lower and get back into range.  but that is arbitrary." So this
+row is that finding, when the owner calls it, and the cube's ratchet holds the cube from growing meanwhile.
 
 **Where to look first,** from a build with `--profiling-funcs`: of 426 KB of raw code, this library holds 199 KB, the
 example's own seven functions 91 KB with what `-Oz` inlined into them, libc and the rest 65 KB, `@kama/gpu` 39 KB,

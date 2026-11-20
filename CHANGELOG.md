@@ -202,3 +202,7 @@ package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   GPU the renderer draws with, `None` until its GPU has answered, read from `@kama/gpu`'s `Device.adapterInfo()`, so it
   needs `@kama/gpu` at `7ff6ea6` or later. The gate builds and runs the example on every leg, debug and release, and
   `tools/update-goldens.sh` writes its goldens too.
+- GFX-1's part 6, step 3: `examples/cube --flip-against <gpu>`: the cube on a player's GPU held to that software GPU's golden by NVIDIA's FLIP,
+  from `@kama/imagediff`, on its mean and its share of pixels above an error of 0.1, its limits measured; the gate holds
+  the GPU natively against WARP's golden and Edge, at a scale of 1.5, against SwiftShader's. The tests' and the cube's
+  golden comparisons are `@kama/imagediff`'s exact one.

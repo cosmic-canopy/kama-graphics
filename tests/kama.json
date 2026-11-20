@@ -17,6 +17,7 @@
     "@kama/graphics": { "path": ".." },
     "@kama/gpu": { "path": "../../kama-gpu" },
     "@kama/window": { "path": "../../kama-window" },
-    "@kama/image": { "path": "../../kama-image" }
+    "@kama/image": { "path": "../../kama-image" },
+    "@kama/imagediff": { "path": "../../kama-imagediff" }
   }
 }

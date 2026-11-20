@@ -10,7 +10,8 @@
 // writes those lines into tests/goldens/, and the change is reviewed in its diff.
 //
 // The comparison is `compareGolden`, with the golden's bytes handed in, so the harness's own cases hold it to frames made
-// in memory; `checkGolden` reads the golden through std::asset and prints the line.
+// in memory; `checkGolden` reads the golden through std::asset and prints the line. The frame is held to the golden by
+// @kama/imagediff's exact comparison, which examples/cube's check.kama calls too, and these words are the harness's.
 
 import {
     core::println,
@@ -20,6 +21,7 @@ import {
     std::asset::read as readAsset,
     image::Image, image::ImageError, image::PixelFormat, image::AlphaMode, image::ColorSpace, image::DecodeOptions,
     image::png::decode as pngDecode, image::png::encode as pngEncode, image::png::EncodeOptions,
+    imagediff::compareExact, imagediff::ExactDiff, imagediff::ExactVerdict, imagediff::PixelAt, imagediff::formatName,
 };
 export { GoldenVerdict, compareGolden, checkGolden, goldenAsset, framePng, isGoldenName };
 
@@ -56,72 +58,63 @@ fn bool isGoldenName(const ref string name) {
     return true;
 }
 
-// The frame as a PNG: tight RGBA8 rows, top first, `width` by `height`, alpha kept as it is, at archival().
-fn Result<DynamicArray<uint8>, ImageError> framePng(isize width, isize height, const ref DynamicArray<uint8> frame) {
+// The frame as an image: tight RGBA8 rows, top first, `width` by `height`, alpha kept as it is, in sRGB.
+fn Result<Image, ImageError> frameImage(isize width, isize height, const ref DynamicArray<uint8> frame) {
     FixedArray<uint8> samples = FixedArray.make(size: frame.length());
     for (isize i = 0; i < frame.length(); i = i + 1) { samples[i] = frame[i]; }
-    Result<Image, ImageError> made = Image.fromSamples8(width: width, height: height, format: PixelFormat::Rgba8Unorm,
-                                                         alpha: AlphaMode::Straight, colorSpace: ColorSpace.srgb(),
-                                                         samples: give samples);
+    return Image.fromSamples8(width: width, height: height, format: PixelFormat::Rgba8Unorm, alpha: AlphaMode::Straight,
+                              colorSpace: ColorSpace.srgb(), samples: give samples);
+}
+
+// The frame as a PNG at archival().
+fn Result<DynamicArray<uint8>, ImageError> framePng(isize width, isize height, const ref DynamicArray<uint8> frame) {
+    Result<Image, ImageError> made = frameImage(width: width, height: height, frame: frame);
     return match (give made) {
         case Ok(value: img): pngEncode(image: img, options: EncodeOptions.archival());
         case Err(error: e): Result::Err(error: e);
     };
 }
 
-fn string formatName(PixelFormat f) {
-    return match (f) {
-        case R8Unorm: "R8Unorm";
-        case Rg8Unorm: "Rg8Unorm";
-        case Rgba8Unorm: "Rgba8Unorm";
-        case R16Unorm: "R16Unorm";
-        case Rg16Unorm: "Rg16Unorm";
-        case Rgba16Unorm: "Rgba16Unorm";
-        case Rgba16Float: "Rgba16Float";
-        case Rgba32Float: "Rgba32Float";
-        case _: "a format this harness does not name";
+// How the decoded golden differs from the frame: "" when it does not.
+fn string differs(const ref Image golden, isize width, isize height, const ref DynamicArray<uint8> frame) {
+    Result<Image, ImageError> made = frameImage(width: width, height: height, frame: frame);
+    return match (give made) {
+        case Ok(value: img): {
+            ExactDiff d = compareExact(reference: golden, test: img);
+            := wordsOf(d: d, golden: golden, width: width, height: height);
+        }
+        case Err(error: e): "the frame is not an image: " + e.message();
     };
 }
 
-// How the decoded golden differs from the frame: "" when it does not.
-fn string differs(const ref Image golden, isize width, isize height, const ref DynamicArray<uint8> frame) {
+// The exact comparison's answer in the harness's words: the golden is the reference, the frame the test.
+fn string wordsOf(const ref ExactDiff d, const ref Image golden, isize width, isize height) {
     isize gw = golden.width();
     isize gh = golden.height();
-    if (gw != width || gh != height) { return "the golden is ${gw}x${gh}, the frame ${width}x${height}"; }
-    PixelFormat f = golden.format();
-    bool rgba8 = match (f) { case Rgba8Unorm: true; case _: false; };
-    if (!rgba8) { string named = formatName(f: f); return "the golden decodes as " + named + ", not Rgba8Unorm"; }
-    isize count = 0;
-    isize first = -1;
-    borrow golden.samples8() as want {
-        if (want.length() != frame.length()) {
-            isize wl = want.length();
-            isize fl = frame.length();
-            return "the golden holds ${wl} bytes, the frame ${fl}";
+    return match (d.verdict()) {
+        case Same: "";
+        case SizeDiffers: "the golden is ${gw}x${gh}, the frame ${width}x${height}";
+        case FormatDiffers: {
+            string named = formatName(format: golden.format());
+            := "the golden decodes as " + named + ", not Rgba8Unorm";
         }
-        for (isize t = 0; t < width * height; t = t + 1) {
-            isize at = t * 4;
-            bool same = frame[at] == want[at] && frame[at + 1] == want[at + 1] && frame[at + 2] == want[at + 2]
-                && frame[at + 3] == want[at + 3];
-            if (!same) {
-                if (first < 0) { first = t; }
-                count = count + 1;
-            }
+        case PixelsDiffer: {
+            isize count = d.differing();
+            PixelAt at = match (d.first()) { case Some(value: p): p; case None: PixelAt.of(x: -1, y: -1); };
+            isize x = at.x;
+            isize y = at.y;
+            isize r = cast<isize>(d.testSample(channel: 0));
+            isize g = cast<isize>(d.testSample(channel: 1));
+            isize b = cast<isize>(d.testSample(channel: 2));
+            isize a = cast<isize>(d.testSample(channel: 3));
+            isize wr = cast<isize>(d.referenceSample(channel: 0));
+            isize wg = cast<isize>(d.referenceSample(channel: 1));
+            isize wb = cast<isize>(d.referenceSample(channel: 2));
+            isize wa = cast<isize>(d.referenceSample(channel: 3));
+            := "${count} of its texels differ from the golden's, the first at (${x}, ${y}): ${r} ${g} ${b} ${a}, the golden ${wr} ${wg} ${wb} ${wa}";
         }
-        if (count == 0) { return ""; }
-        isize x = first % width;
-        isize y = first / width;
-        isize at = first * 4;
-        uint8 r = frame[at];
-        uint8 g = frame[at + 1];
-        uint8 b = frame[at + 2];
-        uint8 a = frame[at + 3];
-        uint8 wr = want[at];
-        uint8 wg = want[at + 1];
-        uint8 wb = want[at + 2];
-        uint8 wa = want[at + 3];
-        return "${count} of its texels differ from the golden's, the first at (${x}, ${y}): ${r} ${g} ${b} ${a}, the golden ${wr} ${wg} ${wb} ${wa}";
-    }
+        case _: "the golden differs from the frame: " + d.message();
+    };
 }
 
 // The frame held to its golden, whose bytes were read as `golden` (NotFound when the test has none on this GPU yet).

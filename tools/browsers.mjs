@@ -1,6 +1,7 @@
 // tools/browsers.mjs: the browsers the web leg runs in under `kama run --target WASM`, and what each is started with.
-// Copied unchanged from @kama/gpu (its AGENTS.gpu.md item 11, with @kama/window's WIN-18), since each package keeps
-// its own. node 22 or later; no npm packages.
+// Copied from @kama/gpu (its AGENTS.gpu.md item 11, with @kama/window's WIN-18), since each package keeps its own, and
+// changed in one place: kamaRunFlags gives Edge and an installed Chrome a scale of 1.5, as Chrome for Testing has
+// (kyoten's rendering.md § Decided, 2026-11-20). node 22 or later; no npm packages.
 //
 //   node tools/browsers.mjs run              # one path a line: Edge and Chrome as installed, then the newest Firefox and
 //                                            # the newest Chrome for Testing pinned under $KAMA_BROWSERS (~/browsers)
@@ -101,9 +102,13 @@ export function runBrowsers() {
 //     with both (measured 2026-11-14, one flag at a time), and the cases on the fallback adapter ask for it;
 //   --disable-features=NetworkServiceSandbox: an unzipped Chrome for Testing never loads a page without it, since its
 //     sandboxed network service crashes (kyoten's KY-53, ~/browsers/README.md);
-//   --scale 1.5: a device scale that is not 1, so pixel sizes are not CSS sizes, as the retired driver ran it.
+//   --scale 1.5: a device scale that is not 1, so pixel sizes are not CSS sizes, as the retired driver ran it. Edge and an
+//     installed Chrome take it too (kyoten's rendering.md § Decided, 2026-11-20), so every Chromium leg runs at one
+//     scale, and a frame drawn on its own GPU is the size of SwiftShader's, which @kama/graphics holds it to by FLIP.
 export function kamaRunFlags(browser) {
-    if (kind(browser) !== 'chrome-for-testing') return [];
+    const k = kind(browser);
+    if (k === 'edge' || k === 'chrome') return ['--scale', '1.5'];
+    if (k !== 'chrome-for-testing') return [];
     return ['--scale', '1.5',
             '--chromium-arg', '--enable-unsafe-webgpu',
             '--chromium-arg', '--enable-unsafe-swiftshader',

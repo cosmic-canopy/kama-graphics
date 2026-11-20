@@ -8,8 +8,9 @@
 // the frames are counted, so each counted frame draws with no miss, and the cube turns a degree a frame, so the last
 // frame is the same on every run. That frame is read back from the window (`renderer.readWindowPixels()`) and held as
 // src/check.kama says: under `--golden <gpu>` to that software GPU's golden, byte for byte, its adapter held to the GPU
-// named; on a player's hardware, to being drawn. Its exit status is 1 when the frame was never read, or not as it
-// should be, or the renderer reported a misuse.
+// named; under `--flip-against <gpu>`, drawn on a player's GPU and held to that software GPU's golden by FLIP; with
+// neither, to being drawn. Its exit status is 1 when the frame was never read, or not as it should be, or the renderer
+// reported a misuse.
 //
 // It is a `std::app` `App`, a step a tick, as `@kama/gpu`'s examples are: on the web the browser answers the GPU's
 // requests and a read's map between ticks, and paces the frames. Every handle is one its drop releases, so nothing here
@@ -30,7 +31,7 @@ import {
     graphics::Scene, graphics::Mesh, graphics::BoxGeometry, graphics::MeshStandardMaterial, graphics::DirectionalLight,
     graphics::AmbientLight, graphics::PerspectiveCamera, graphics::Euler, graphics::EulerOrder,
     graphics::CompileRequest, graphics::CompileStatus, graphics::PixelRead, graphics::PixelStatus,
-    knownGpu, adapterSays, adapterIsNamed, heldToGolden, drawnHere,
+    knownGpu, adapterSays, adapterIsNamed, heldToGolden, heldByFlip, drawnHere,
 };
 
 comptime int32 WIDE = 640;          // the window's logical size
@@ -111,6 +112,7 @@ type resource Stage {
 type resource Cube implements App {
     int32 limit = 0;
     string gpu = "";
+    string flipAgainst = "";   // under `--flip-against <gpu>`: the software GPU whose golden FLIP holds the frame to
     int32 stage = 0;   // 0 opening, 1 compiling, 2 frames, 3 reading, 4 the totals, 5 done
     Instant began = monotonicNow();
     Optional<Window> window = Optional::None;
@@ -132,7 +134,16 @@ type resource Cube implements App {
             this.stage = 4;
             return give this;
         }
+        string against = argumentAfter(flag: "--flip-against");
+        if (!against.isEmpty() && (!knownGpu(gpu: against) || !named.isEmpty())) {
+            println(s: "FAIL --flip-against names a software GPU this example knows (warp, swiftshader), and never beside --golden: it names '"
+                    + against + "'");
+            this.wrong = true;
+            this.stage = 4;
+            return give this;
+        }
         this.gpu = give named;
+        this.flipAgainst = give against;
     }
 
     public fn void lifecycle(Lifecycle event) { }
@@ -300,6 +311,16 @@ type resource Cube implements App {
                 println(s: "ok   golden cube on " + this.gpu + ": the window's last frame is its golden's bytes");
             } else {
                 println(s: "FAIL golden cube on " + this.gpu + ": " + why);
+                this.wrong = true;
+            }
+            return;
+        }
+        if (!this.flipAgainst.isEmpty()) {
+            string why = heldByFlip(frame: frame, gpu: this.flipAgainst);
+            if (why.isEmpty()) {
+                println(s: "ok   flip cube against " + this.flipAgainst + ": the window's last frame is within FLIP's limits of its golden");
+            } else {
+                println(s: "FAIL flip cube against " + this.flipAgainst + ": " + why);
                 this.wrong = true;
             }
             return;

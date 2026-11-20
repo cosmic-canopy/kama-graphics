@@ -168,9 +168,10 @@ is built (SPEC § The renderer, § The camera and § Reading the window back): `
 renderer in a window requesting its own GPU, a camera's aspect following what it draws into, vsync as a property pair,
 and `readWindowPixels()`, a read of the window by Bevy's way. Step 2 is built (SPEC § The example): `examples/cube`, a
 lit cube in a window from one source on both legs, its last frame held to its golden on each software GPU, and
-`renderer.adapterInfo()`, which says which GPU a renderer draws with. Next, its step 3: FLIP, in `@kama/imagediff`,
-a package of its own, with Edge held to SwiftShader's golden at Chrome for Testing's scale (ROADMAP_DETAIL § GFX-1,
-decided 2026-11-20); then the 150 KB measurement, FEATURES.md's rows and the SPEC.
+`renderer.adapterInfo()`, which says which GPU a renderer draws with. Step 3 is built: the cube on a player's GPU held
+to its software golden by FLIP, from `@kama/imagediff` (`../kama-imagediff`), natively against WARP's and in Edge, at
+Chrome for Testing's scale, against SwiftShader's, and both golden comparisons are that package's. Next, step 4: the
+150 KB measurement, FEATURES.md's rows and the SPEC (ROADMAP_DETAIL § GFX-1).
 GFX-1 is built depth-first, and every example is a test: a headless readback and a golden image, on web and native. A
 feature a program does not use drops out at link time. [SPEC.md](SPEC.md) is what is built so far, and grows with each
 part.

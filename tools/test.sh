@@ -94,11 +94,13 @@ builtAs() {
     fi
 }
 
-# examples/cube's run (GFX-1's part 6, step 2; tools/legs.sh): CUBE_FRAMES frames drawn into its window with no misuse,
-# and its last frame read back from the window and held. On a leg naming a software GPU that frame is the golden's bytes,
-# examples/cube/goldens/<gpu>.png, and no frame is printed; on a leg naming none, the frame reads back as drawn.
+# examples/cube's run (GFX-1's part 6, steps 2 and 3; tools/legs.sh): CUBE_FRAMES frames drawn into its window with no
+# misuse, and its last frame read back from the window and held. On a leg naming a software GPU that frame is the golden's
+# bytes, examples/cube/goldens/<gpu>.png, and no frame is printed; on a player's GPU held against a software GPU's golden
+# by FLIP (`--flip-against`), it is within FLIP's two limits, and no frame is printed; on a leg naming neither, the frame
+# reads back as drawn.
 cubeHeld() {
-    local log="$1" gpu="$2" leg="$3" said
+    local log="$1" gpu="$2" leg="$3" flip="${4:-}" said
     said="$(grep -E '^FAIL|^cube: ' "$log" | grep -v "^cube: $CUBE_FRAMES frames drawn, 0 misuses reported$" | cut -c1-200 | head -3 || true)"
     if ! grep -qx "cube: $CUBE_FRAMES frames drawn, 0 misuses reported" "$log"; then
         echo "FAIL examples/cube ($leg) did not draw $CUBE_FRAMES frames with no misuse reported: ${said:-it said nothing}"
@@ -108,6 +110,14 @@ cubeHeld() {
             echo "ok   examples/cube's last frame, read back from its window, is its $gpu golden ($leg)"
         else
             echo "FAIL examples/cube ($leg) --golden $gpu: its last frame is not its golden: ${said:-it said nothing}"
+            failed=1
+        fi
+    elif [ -n "$flip" ]; then
+        if grep -q "^ok   flip cube against $flip: " "$log" && ! grep -q '^frame-png ' "$log"; then
+            echo "ok   examples/cube's last frame, read back from its window, is within FLIP's limits of its $flip golden ($leg)"
+            grep "^info flip cube against $flip: mean " "$log" | cut -c1-160 || true
+        else
+            echo "FAIL examples/cube ($leg) --flip-against $flip: its last frame is not within FLIP's limits: ${said:-it said nothing}"
             failed=1
         fi
     elif grep -qx "cube: the window's last frame reads back as drawn" "$log"; then
@@ -233,11 +243,18 @@ fi
 if [ -n "${KAMA_WINDOW_NO_DISPLAY:-}" ]; then
     echo "skip KAMA_WINDOW_NO_DISPLAY is set"
 else
+    # A machine with a software golden holds its GPU's frame to it by FLIP: a leg that held it to none would pass on the
+    # frame being drawn alone.
+    if [ -n "$(nativeGolden)" ] && [ -z "$(nativeFlip)" ]; then
+        echo "FAIL natively the GPU's frame is held to no golden, though this machine has $(nativeGolden)'s"
+        failed=1
+    fi
     for mode in debug release; do
         if buildCube "$mode"; then
-            echo "-- examples/cube, native, $mode, on the GPU"
-            runCube "$mode" "" "tests/out/run-cube-$mode.log" || failed=1
-            cubeHeld "tests/out/run-cube-$mode.log" "" "native on the GPU, $mode"
+            flip="$(nativeFlip)"
+            echo "-- examples/cube, native, $mode, on the GPU${flip:+, --flip-against $flip}"
+            runCube "$mode" "" "tests/out/run-cube-$mode.log" "$flip" || failed=1
+            cubeHeld "tests/out/run-cube-$mode.log" "" "native on the GPU, $mode" "$flip"
             builtAs "tests/out/run-cube-$mode.log" "$mode" "examples/cube, native on the GPU, $mode"
             if [ -n "$gpu" ]; then
                 echo "-- examples/cube, native, $mode, --golden $gpu"
@@ -260,6 +277,24 @@ else
         else
             grep -E '^FAIL|^golden-png|^ok   golden|^cube: ' tests/out/cube-wrong-gpu.log | cut -c1-160
             echo "FAIL examples/cube --golden swiftshader on WARP: the run's status is $code, or it compared or printed a frame"
+            failed=1
+        fi
+    fi
+    # FLIP's hold itself: the cube on the GPU stopped at half its frames, turned 30 degrees from its golden's, must fail
+    # both of FLIP's limits, its mean and its share above the threshold, and print its frame, so a hold that passed every
+    # frame, or held to one number alone, would fail here.
+    flip="$(nativeFlip)"
+    if [ -n "$flip" ] && [ -x "tests/out/cube-native-debug/cube$EXE" ]; then
+        "tests/out/cube-native-debug/cube$EXE" --frames $((CUBE_FRAMES / 2)) --flip-against "$flip" < /dev/null 2>&1 | tr -d '\r' \
+            > tests/out/cube-flip-other.log && code=0 || code=$?
+        if [ "$code" != 0 ] \
+                && grep -q "^FAIL flip cube against $flip: its mean error, [0-9.e-]*, is above 0.005; and [0-9]* of its [0-9]* pixels, a share of [0-9.e-]*, err above 0.1, more than " tests/out/cube-flip-other.log \
+                && grep -q "^frame-png cube $flip " tests/out/cube-flip-other.log; then
+            echo "ok   examples/cube on the GPU turned 30 degrees from its $flip golden fails FLIP's limits, and prints the frame"
+            grep "^info flip cube against $flip: mean " tests/out/cube-flip-other.log | cut -c1-160 || true
+        else
+            grep -E '^FAIL|^ok   flip|^info flip|^cube: ' tests/out/cube-flip-other.log | cut -c1-160
+            echo "FAIL examples/cube on the GPU turned from its $flip golden: the run's status is $code, or it did not fail FLIP's limits and print the frame"
             failed=1
         fi
     fi
@@ -305,7 +340,13 @@ else
             n=$((n + 1))
             name="${browser##*[/\\]}"
             gpu="$(runGolden "$browser")"
+            flip="$(runFlip "$browser")"
             flags="$(browserFlags "$browser" | tr '\n' ' ')"
+            # Every web leg holds the cube to a golden: its software GPU's byte for byte, or, on its own GPU, one by FLIP.
+            if [ -z "$gpu" ] && [ -z "$flip" ]; then
+                echo "FAIL $name runs on its own GPU and holds the cube to no golden"
+                failed=1
+            fi
             # Each browser runs a debug build, then a release build, each held to the same goldens.
             for mode in debug release; do
                 echo "-- kama run, $browser, $mode${flags:+ ${flags% }}${gpu:+, --golden $gpu}"
@@ -313,9 +354,9 @@ else
                 goldensHeld "tests/out/run-web-$n-$mode.log" "$gpu" "$name, $mode"
                 refusalsPrinted "tests/out/run-web-$n-$mode.log" "$name, $mode"
                 builtAs "tests/out/run-web-$n-$mode.log" "$mode" "kama run, $name, $mode"
-                echo "-- kama run, $browser, $mode: examples/cube on #canvas for $CUBE_FRAMES frames${gpu:+, --golden $gpu}"
-                runCubeKama "$browser" "$gpu" "tests/out/run-cube-web-$n-$mode.log" "$mode" || failed=1
-                cubeHeld "tests/out/run-cube-web-$n-$mode.log" "$gpu" "$name, $mode"
+                echo "-- kama run, $browser, $mode: examples/cube on #canvas for $CUBE_FRAMES frames${gpu:+, --golden $gpu}${flip:+, --flip-against $flip}"
+                runCubeKama "$browser" "$gpu" "tests/out/run-cube-web-$n-$mode.log" "$mode" "$flip" || failed=1
+                cubeHeld "tests/out/run-cube-web-$n-$mode.log" "$gpu" "$name, $mode" "$flip"
                 builtAs "tests/out/run-cube-web-$n-$mode.log" "$mode" "examples/cube, kama run, $name, $mode"
             done
             # The pinned Chrome for Testing is the web's SwiftShader leg (decided with the owner on 2026-11-14): one that
@@ -366,6 +407,11 @@ fi
 if grep -qs '^golden-png ' tests/out/run-*.log; then
     echo
     echo "FAIL some frames differ from their goldens, or have none: run tools/update-goldens.sh, then review the diff"
+    failed=1
+fi
+if grep -qs '^frame-png ' tests/out/run-*.log; then
+    echo
+    echo "FAIL some frames drawn on a player's GPU are past FLIP's limits: their frame-png lines show them"
     failed=1
 fi
 

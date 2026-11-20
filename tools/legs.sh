@@ -78,6 +78,19 @@ runGolden() {
     esac
 }
 
+# The software golden a leg on a player's GPU holds examples/cube's frame to by FLIP (GFX-1's part 6, step 3; kyoten's
+# rendering.md § Decided, 2026-11-20): natively on Windows, WARP's, at the same 640 x 400; a Chromium on its own GPU
+# (Edge, an installed Chrome), at Chrome for Testing's scale of 1.5, SwiftShader's, the web's, so every web leg on every
+# operating system can be held to it. "" for a leg with none: natively off Windows until its software GPU's golden is
+# measured (lavapipe on Linux), and every leg already on a software GPU.
+nativeFlip() { nativeGolden; }
+runFlip() {
+    case "$(browserKind "$1")" in
+        edge|chrome) echo swiftshader ;;
+        *) echo "" ;;
+    esac
+}
+
 buildNative() {
     local mode="$1" flag=""
     [ "$mode" = release ] && flag="--release"
@@ -139,15 +152,17 @@ buildCubeWeb() {
 }
 
 runCube() {
-    local mode="$1" gpu="$2" log="$3" args=(--frames "$CUBE_FRAMES")
+    local mode="$1" gpu="$2" log="$3" flip="${4:-}" args=(--frames "$CUBE_FRAMES")
     [ -n "$gpu" ] && args+=(--golden "$gpu")
+    [ -n "$flip" ] && args+=(--flip-against "$flip")
     "tests/out/cube-native-$mode/cube$EXE" "${args[@]}" < /dev/null 2>&1 | tr -d '\r' | tee "$log"
 }
 
 runCubeKama() {
-    local browser="$1" gpu="$2" log="$3" mode="${4:-debug}" args=(-- --frames "$CUBE_FRAMES") flags=() f build=""
+    local browser="$1" gpu="$2" log="$3" mode="${4:-debug}" flip="${5:-}" args=(-- --frames "$CUBE_FRAMES") flags=() f build=""
     while IFS= read -r f; do [ -n "$f" ] && flags+=("$f"); done < <(browserFlags "$browser")
     [ -n "$gpu" ] && args+=(--golden "$gpu")
+    [ -n "$flip" ] && args+=(--flip-against "$flip")
     [ "$mode" = release ] && build="--release"
     KAMA_BROWSER="$browser" bounded "$KAMA" run examples/cube/kama.json $build --target WASM --headless \
         ${flags[@]+"${flags[@]}"} "${args[@]}" < /dev/null 2>&1 | tr -d '\r' | tee "$log"

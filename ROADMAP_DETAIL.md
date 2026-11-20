@@ -657,10 +657,52 @@ natively. The library's own `examples/cube` is the same scene without an engine.
      a program that compares images.
   2. **Edge runs at Chrome for Testing's scale of 1.5 and is held to SwiftShader's golden,** the web's, so every web
      leg on every operating system can be held to it. Natively on Windows, the GPU's frame is held to WARP's golden.
-- **Next, part 6's step 3:** `@kama/imagediff` seeded, the exact comparison moved there, and FLIP, LDR, ported from
-  NVIDIA's FLIP at `d3ab02a4` (v1.7's C++ with PR #45's mean summed in a double). It compares a hardware leg's frame
-  with the leg's software golden, its two limits set from the cube on the reference machines present. Then step 4, the
-  150 KB measurement, FEATURES.md's rows and the SPEC.
+- **Built, part 6's step 3, FLIP** (2026-11-20, [SPEC.md](SPEC.md) § The example and § Tests), on `@kama/imagediff`
+  (`../kama-imagediff`, its DIFF-1 and DIFF-2), seeded the same day:
+  - **the exact comparison moved there:** the tests' `golden.kama` and the cube's `check.kama` call `compareExact`, the
+    golden the reference and the frame the test, and keep their own words, which the harness's 13 cases hold; their two
+    copies of the comparison went;
+  - **`--flip-against <gpu>`,** the cube on a player's GPU held to that software GPU's golden by FLIP, on its mean and
+    its share of pixels above an error of 0.1, a failing frame printed as a `frame-png` line, which
+    `tools/update-goldens.sh` never writes;
+  - **the gate:** natively on Windows the GPU's run held against WARP's golden, and Edge, at Chrome for Testing's scale
+    of 1.5 (`tools/browsers.mjs`), held against SwiftShader's, debug and release; the cube on the GPU stopped 30 degrees
+    short of its golden's turn must fail both limits and print its frame; a leg that holds the cube to no golden fails,
+    natively and on the web; no passing run prints a `frame-png` line.
+
+  **The limits, measured** from the cube on this machine's AMD Radeon 880M, the same on every run, debug and release:
+  natively against WARP's golden, 640 x 400, a mean error of 0.00121 and no pixel's error above 0.037; in Edge at 1.5
+  against SwiftShader's, 960 x 600, a mean of 0.00053 and 6 pixels of 576,000 above 0.1, at most 0.118, on the cube's
+  edges. The threshold, 0.1, is above every error the GPU's frames hold but those six edge pixels'; each limit is four
+  times the most measured, rounded up, as `@kama/imagediff`'s tolerance is: a mean of 0.005, and a share of 5e-5, 28
+  pixels of 960 x 600 and 12 of 640 x 400. For scale, the cube a degree from its golden's turn has a mean of 0.0117 and
+  2 % of its pixels above 0.1, and fails both. Raising a limit takes a written reason. A native hardware leg off
+  Windows is held once its software GPU's golden is measured (lavapipe on Linux); the Mac's in its own session.
+
+  **Settled while building, and reported:**
+  - the flag is `--flip-against <gpu>`, never beside `--golden`, which asks for the fallback adapter where this one
+    draws on the player's GPU;
+  - a failing hardware frame prints itself as `frame-png cube <gpu> <base64>`, a PNG at `archival()` as a golden line
+    is, for a person to look at; FLIP's magma map waits for its row in `@kama/imagediff`;
+  - every Chromium leg runs at 1.5, Edge's tests too, so one rule covers them; `@kama/gpu`'s `browsers.mjs`, which this
+    one copies, keeps Edge at 1, since its Edge leg holds no golden;
+  - the cube's wasm build may grow its memory (`ALLOW_MEMORY_GROWTH`): FLIP on a 960 x 600 frame needs about 35 MB,
+    past emscripten's 16 MB start;
+  - `compareExact` compares alpha too, which the cube's own copy did not; every golden was written from the frame's
+    own four channels, so none moved.
+
+  450 cases natively, 451 in Firefox and in Chrome for Testing, 438 in Edge, now at a scale of 1.5, each debug and
+  release; the cube within FLIP's limits natively on the GPU and in Edge, in both builds. **12 of 12 mutations caught**
+  (kyoten's `.scratch/s42/kg/list1.py`), each by its own FAIL lines, held to the gate's own lines: natively, **a hardware
+  frame held to nothing, step 2's one left,** the mean or the share never held, the threshold at 1, a failing frame never
+  printed, FLIP's hold skipped for being drawn, `--flip-against` never read, the cube's golden held to itself byte for
+  byte, and the GPU held to no golden, which the native guard catches; in Edge, held to no golden, which the web guard
+  catches, and run at a scale of 1, which FLIP refuses by size; and the harness's frame held to itself. Planning them
+  found a gap first: a leg whose hardware golden came back empty went back to being held as drawn and passed, so the
+  gate fails a leg that holds the cube to no golden, natively and on the web.
+- **Next, part 6's step 4:** the 150 KB measurement (wasm plus JS, release, brotli; kyoten's examples.md's A1 row) in the
+  gate as a ratchet, FEATURES.md's rows for the slice `built` with their budgets, and the SPEC. Then kyoten's join
+  draws the hello cube through it.
 - **Done:**
   - `examples/cube` draws from one source on both legs;
   - its golden passes on a software GPU on each leg CI has, and perceptually on the reference machines present;

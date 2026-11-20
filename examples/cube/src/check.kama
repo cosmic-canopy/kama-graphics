@@ -8,9 +8,15 @@
 // frame that differs, or has no golden yet, is printed as one line, `golden-png cube <gpu> <base64>`, the frame as a
 // PNG at @kama/image's archival(), which tools/update-goldens.sh writes into `goldens/`, run on purpose.
 //
-// A run that names no software GPU, on a player's hardware, holds the frame to being drawn: the window's size, and the
-// cube at its centre, which the corner's background is not. Held to the golden perceptually is FLIP's (GFX-1's part 6,
-// step 3).
+// Under `--flip-against <gpu>` the run draws on a player's GPU and holds its frame to that software GPU's golden by
+// NVIDIA's FLIP (@kama/imagediff), on two numbers (kyoten's rendering.md § Decided, GFX-1's question 4): the mean error,
+// and the share of pixels whose error is above FLIP_THRESHOLD, so one missing highlight is not averaged away. Both limits
+// were measured from this cube on the reference machine's GPU, natively against WARP's golden and in Edge at a scale of
+// 1.5 against SwiftShader's, plus a margin. A frame past either limit fails, and is printed as one line,
+// `frame-png cube <gpu> <base64>`, for a person to look at; tools/update-goldens.sh never writes it as a golden.
+//
+// A run that names no GPU at all holds the frame to being drawn: the window's size, and the cube at its centre, which the
+// corner's background is not. Both comparisons with a golden are @kama/imagediff's, as the library's tests' are.
 
 import {
     core::println,
@@ -21,8 +27,23 @@ import {
     gpu::AdapterInfo, gpu::AdapterKind,
     image::Image, image::ImageError, image::PixelFormat, image::AlphaMode, image::ColorSpace, image::DecodeOptions,
     image::png::decode as pngDecode, image::png::encode as pngEncode, image::png::EncodeOptions,
+    imagediff::compareExact, imagediff::ExactDiff, imagediff::ExactVerdict, imagediff::PixelAt,
+    imagediff::compareFlip, imagediff::FlipOptions, imagediff::FlipMap, imagediff::DiffError,
 };
-export { knownGpu, adapterSays, adapterIsNamed, heldToGolden, drawnHere };
+export { knownGpu, adapterSays, adapterIsNamed, heldToGolden, heldByFlip, drawnHere };
+
+// What a hardware frame is held to against its leg's software golden (above), measured from this cube on the reference
+// machine's GPU (an AMD Radeon 880M, 2026-11-20), the same numbers on every run, debug and release:
+// - natively against WARP's golden, 640 x 400: a mean error of 0.00121, and no pixel's error above 0.037;
+// - in Edge at a scale of 1.5 against SwiftShader's, 960 x 600: a mean of 0.00053, and 6 pixels of 576,000 above 0.1, at
+//   most 0.118, on the cube's edges, where the rasterizers cover an edge's samples differently;
+// - for scale, the cube a degree from its golden's turn: a mean of 0.0117, and 2 % of pixels above 0.1.
+// FLIP_THRESHOLD, 0.1, is above every error the GPU's frames hold but those six edge pixels'. Each limit is four times the
+// most measured, rounded up, as @kama/imagediff's tolerance is: FLIP_MEAN_LIMIT, 0.005; FLIP_SHARE_LIMIT, 0.00005, which
+// is 28 pixels of a 960 x 600 frame and 12 of a 640 x 400. Raising a limit takes a written reason, as every budget does.
+comptime float32 FLIP_THRESHOLD = 0.1;
+comptime float64 FLIP_MEAN_LIMIT = 0.005;
+comptime float64 FLIP_SHARE_LIMIT = 0.00005;
 
 // The software GPUs a run can name.
 fn bool knownGpu(const ref string gpu) { return gpu == "warp" || gpu == "swiftshader"; }
@@ -68,46 +89,32 @@ fn Result<DynamicArray<uint8>, ImageError> framePng(const ref Image frame) {
     };
 }
 
-// How the golden differs from the frame: "" when it does not.
+// How the golden differs from the frame, by @kama/imagediff's exact comparison: "" when it does not. The golden is the
+// reference, the frame the test.
 fn string differs(const ref Image golden, const ref Image frame) {
+    ExactDiff d = compareExact(reference: golden, test: frame);
     isize gw = golden.width();
     isize gh = golden.height();
     isize fw = frame.width();
     isize fh = frame.height();
-    if (gw != fw || gh != fh) { return "the golden is ${gw}x${gh}, the frame ${fw}x${fh}"; }
-    bool rgba8 = match (golden.format()) { case Rgba8Unorm: true; case _: false; };
-    if (!rgba8) { return "the golden is not RGBA8"; }
-    isize count = 0;
-    isize first = -1;
-    borrow golden.samples8() as want {
-        borrow frame.samples8() as got {
-            if (want.length() != got.length()) {
-                isize wl = want.length();
-                isize gl = got.length();
-                return "the golden holds ${wl} bytes, the frame ${gl}";
-            }
-            for (isize t = 0; t < fw * fh; t = t + 1) {
-                isize at = t * 4;
-                bool same = got[at] == want[at] && got[at + 1] == want[at + 1] && got[at + 2] == want[at + 2]
-                    && got[at + 3] == want[at + 3];
-                if (!same) {
-                    if (first < 0) { first = t; }
-                    count = count + 1;
-                }
-            }
-            if (count == 0) { return ""; }
-            isize x = first % fw;
-            isize y = first / fw;
-            isize at = first * 4;
-            uint8 r = got[at];
-            uint8 g = got[at + 1];
-            uint8 b = got[at + 2];
-            uint8 wr = want[at];
-            uint8 wg = want[at + 1];
-            uint8 wb = want[at + 2];
-            return "${count} of its texels differ from the golden's, the first at (${x}, ${y}): ${r} ${g} ${b}, the golden ${wr} ${wg} ${wb}";
+    return match (d.verdict()) {
+        case Same: "";
+        case SizeDiffers: "the golden is ${gw}x${gh}, the frame ${fw}x${fh}";
+        case PixelsDiffer: {
+            isize count = d.differing();
+            PixelAt at = match (d.first()) { case Some(value: p): p; case None: PixelAt.of(x: -1, y: -1); };
+            isize x = at.x;
+            isize y = at.y;
+            isize r = cast<isize>(d.testSample(channel: 0));
+            isize g = cast<isize>(d.testSample(channel: 1));
+            isize b = cast<isize>(d.testSample(channel: 2));
+            isize wr = cast<isize>(d.referenceSample(channel: 0));
+            isize wg = cast<isize>(d.referenceSample(channel: 1));
+            isize wb = cast<isize>(d.referenceSample(channel: 2));
+            := "${count} of its texels differ from the golden's, the first at (${x}, ${y}): ${r} ${g} ${b}, the golden ${wr} ${wg} ${wb}";
         }
-    }
+        case _: "the golden differs from the frame: " + d.message();
+    };
 }
 
 // The frame held to `goldens/<gpu>.png`: "" when it is the golden's bytes. Otherwise the frame is printed as its line,
@@ -130,6 +137,68 @@ unsafe fn string heldToGolden(const ref Image frame, const ref string gpu) {
         case Ok(value: file): { println(s: "golden-png cube " + gpu + " " + base64Encode(bytes: file.view())); }
         case Err(error: e): { return why + "; and the frame could not be encoded as a PNG: " + e.message(); }
     };
+    return why;
+}
+
+// The golden `goldens/<gpu>.png` decoded, or `why` set.
+unsafe fn Optional<Image> goldenOf(const ref string gpu, ref string why) {
+    Result<DynamicArray<uint8>, IoError> golden = readAsset(name: gpu + ".png");
+    return match (golden) {
+        case Ok(value: bytes): {
+            Result<Image, ImageError> decoded = pngDecode(bytes: bytes.view(), options: DecodeOptions.defaults());
+            := match (give decoded) {
+                case Ok(value: img): Optional::Some(value: give img);
+                case Err(error: e): { why = "the golden is not a PNG this check reads: " + e.message(); := Optional::None; }
+            };
+        }
+        case Err(error: e): { why = "no golden yet: " + e.message(); := Optional::None; }
+    };
+}
+
+// The frame, drawn on a player's GPU, held to `goldens/<gpu>.png` by FLIP (above): "" when both numbers are within their
+// limits. It prints what FLIP found either way, and the frame as its line when it fails.
+unsafe fn string heldByFlip(const ref Image frame, const ref string gpu) {
+    string why = "";
+    Optional<Image> golden = goldenOf(gpu: gpu, why: ref why);
+    match (golden) {
+        case Some(value: g): {
+            Result<FlipMap, DiffError> r = compareFlip(reference: g, test: frame, options: FlipOptions.defaults());
+            match (r) {
+                case Ok(value: m): { why = flipVerdict(m: m, gpu: gpu); }
+                case Err(error: e): { why = "FLIP refused the frame: " + e.message(); }
+            };
+        }
+        case None: { }
+    };
+    if (why.isEmpty()) { return ""; }
+    Result<DynamicArray<uint8>, ImageError> png = framePng(frame: frame);
+    match (give png) {
+        case Ok(value: file): { println(s: "frame-png cube " + gpu + " " + base64Encode(bytes: file.view())); }
+        case Err(error: e): { return why + "; and the frame could not be encoded as a PNG: " + e.message(); }
+    };
+    return why;
+}
+
+// FLIP's two numbers, printed, and held to their limits: "" when within both.
+fn string flipVerdict(const ref FlipMap m, const ref string gpu) {
+    float64 mean = m.mean();
+    isize pixels = m.width() * m.height();
+    isize above = m.countAbove(error: FLIP_THRESHOLD);
+    float64 share = m.shareAbove(error: FLIP_THRESHOLD);
+    float32 largest = 0.0f32;
+    borrow m.errors() as e { for (isize i = 0; i < e.length(); i = i + 1) { if (e[i] > largest) { largest = e[i]; } } }
+    float64 s1 = m.shareAbove(error: 0.1f32);
+    float64 s2 = m.shareAbove(error: 0.2f32);
+    float64 s3 = m.shareAbove(error: 0.3f32);
+    float64 s5 = m.shareAbove(error: 0.5f32);
+    println(s: "info flip cube against " + gpu + ": the largest error ${largest}; shares above 0.1 ${s1}, 0.2 ${s2}, 0.3 ${s3}, 0.5 ${s5}");
+    println(s: "info flip cube against " + gpu + ": mean ${mean}, ${above} of ${pixels} pixels above ${FLIP_THRESHOLD}, a share of ${share}");
+    string why = "";
+    if (!(mean <= FLIP_MEAN_LIMIT)) { why = "its mean error, ${mean}, is above ${FLIP_MEAN_LIMIT}"; }
+    if (!(share <= FLIP_SHARE_LIMIT)) {
+        string more = "${above} of its ${pixels} pixels, a share of ${share}, err above ${FLIP_THRESHOLD}, more than ${FLIP_SHARE_LIMIT}";
+        why = why.isEmpty() ? copy more : why + "; and " + more;
+    }
     return why;
 }
 

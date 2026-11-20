@@ -5,11 +5,11 @@ tested. What comes next is [ROADMAP.md](ROADMAP.md), every feature it will have 
 decided design and the library's departures from kama's are [AGENTS.graphics.md](AGENTS.graphics.md), and its history
 is the git log and [CHANGELOG.md](CHANGELOG.md).
 
-**Where it stands** (2026-11-19, kama 0.9.978): GFX-1's parts 1 to 5 and part 6's first two steps. A `Renderer` draws a
+**Where it stands** (2026-11-20, kama 0.9.978): GFX-1's parts 1 to 5 and part 6's first three steps. A `Renderer` draws a
 scene of boxes through a perspective camera into a window or a render target, with reversed depth, and reads either back
 as an `@kama/image` `Image`, natively on Windows on wgpu-native v29.0.1.1 and on the web in headless Edge 157, Chrome for
 Testing 157 and Firefox 160. `examples/cube`, a lit cube spun in a window, draws from one source on both legs, its last
-frame held to its golden on each software GPU.
+frame held to its golden on each software GPU byte for byte, and on the GPU natively and in Edge by FLIP.
 A box is lit by directional and ambient lights through three.js r187's physical model (`MeshStandardMaterial`), or drawn
 unlit (`MeshBasicMaterial`). A material's shader is typed nodes compiled to WGSL at run time. A misuse the types cannot
 refuse is refused and reported, never ending the program. Every frame in the tests is held to its software GPU's golden.
@@ -714,8 +714,17 @@ tick; Escape or the close button quits. It reaches the GPU only through the libr
   the GPU named as the tests hold theirs (its kind CPU, and SwiftShader's architecture exactly where the run names it),
   and holds the last frame byte for byte to `examples/cube/goldens/<gpu>.png`, read through `std::asset`. A frame that
   differs, or has no golden yet, fails and is printed as `golden-png cube <gpu> <base64>`; one from another GPU is
-  neither compared nor printed. With no `--golden`, on a player's GPU, the frame must be the window's size with the cube
-  drawn at its centre; FLIP holds it to the golden perceptually (step 3, next).
+  neither compared nor printed. The comparison is `@kama/imagediff`'s exact one, as the tests' is.
+- **`--flip-against <gpu>`** (`warp` or `swiftshader`, never beside `--golden`) draws on a player's GPU and holds the last
+  frame to that software GPU's golden by NVIDIA's FLIP (`@kama/imagediff`), on two numbers: the mean error at most
+  0.005, and at most 0.005 % of pixels (5e-5 of them) with an error above 0.1, so one missing highlight is not averaged
+  away. The frame must be the golden's size. A frame past either limit fails and is printed as one line,
+  `frame-png cube <gpu> <base64>`, which `tools/update-goldens.sh` never writes as a golden. Measured from the cube on the
+  reference machine's GPU (an AMD Radeon 880M), the same on every run, debug and release: natively against WARP's golden,
+  a mean of 0.00121 and no error above 0.037; in Edge at a scale of 1.5 against SwiftShader's, a mean of 0.00053 and 6
+  pixels of 576,000 above 0.1, at most 0.118, on the cube's edges. Each limit is four times the most measured, rounded
+  up; the cube a degree from its golden's turn, a mean of 0.0117 with 2 % of pixels above 0.1, fails both.
+- With neither, the frame must be the window's size with the cube drawn at its centre.
 - **Its goldens** are the window's frames in device pixels: 640 x 400 on WARP, natively at a scale of 1 and in Firefox,
   the same bytes on both, and 960 x 600 on SwiftShader in Chrome for Testing at its 1.5. A native leg on a display at
   another scale fails its golden, saying both sizes. They are the example's own assets, since kama refuses an `assets`
@@ -730,12 +739,15 @@ tick; Escape or the close button quits. It reaches the GPU only through the libr
 - `kama check` on the library, its tests and `examples/cube`;
 - then `tests/`, one program, built debug and release and run natively, and built for the web and run under `kama run`
   in Edge, Firefox and the pinned Chrome for Testing, each started as `tools/browsers.mjs` says;
-- and `examples/cube` for 60 frames, built debug and release: natively on the GPU and with the leg's `--golden`, and in
-  each browser beside the tests, with the leg's `--golden` where it names one. Each run is held to its last frame read
-  back, as its golden or as drawn, to 60 frames with no misuse reported, and to the build it says it is; its release
-  build's JS to Closure. Natively the cube naming SwiftShader on WARP fails on its adapter and compares and prints no
-  frame, and a run a frame short of its golden fails it by its texels and prints the frame, which holds the comparison
-  itself.
+- and `examples/cube` for 60 frames, built debug and release: natively on the GPU, held against WARP's golden by FLIP on
+  Windows, and with the leg's `--golden`; and in each browser beside the tests, with the leg's `--golden` where it names
+  one, and in Edge, on its GPU, held against SwiftShader's golden by FLIP. Each run is held to its last frame read back,
+  as its golden, within FLIP's limits or as drawn, to 60 frames with no misuse reported, and to the build it says it is;
+  its release build's JS to Closure. A leg that holds the cube to no golden fails. Natively the cube naming SwiftShader
+  on WARP fails on its adapter and compares and prints no frame; a run a frame short of its golden fails it by its
+  texels and prints the frame, which holds the comparison itself; and the cube on the GPU stopped 30 degrees short of
+  its golden's turn fails both of FLIP's limits and prints its frame, which holds FLIP's hold itself. No passing run
+  prints a `golden-png` or `frame-png` line.
 
 It is 450 cases natively and 451 in Firefox and in Chrome for Testing, each leg that names a software GPU, and 438
 in Edge, whose leg names none: a web leg reads the page's canvas and holds that it offers `Fifo` alone, where natively a
@@ -747,7 +759,10 @@ Firefox's WebGPU does.
   - Each leg names its software GPU: `--golden warp` natively on Windows and in Firefox, `--golden swiftshader` in the
     pinned Chrome for Testing, started with the flags that offer WebGPU SwiftShader. Edge and an installed Chrome, which
     run on their real GPU as a player's do, and macOS natively name none. The gate fails a pinned Chrome for Testing
-    that ran naming none.
+    that ran naming none. Every Chromium leg runs at a device scale of 1.5 (`tools/browsers.mjs`), so Edge's frames are
+    SwiftShader's size.
+  - A frame is held to its golden by `@kama/imagediff`'s exact comparison (`compareExact`), the golden the reference and
+    the frame the test; the words are the harness's.
   - The adapter is asked for with `forceFallbackAdapter` and held to what it can say: its kind is CPU, and SwiftShader's
     architecture names it.
   - Every frame is held byte for byte to `tests/goldens/<test>/<gpu>.png`, read through `std::asset` and decoded with

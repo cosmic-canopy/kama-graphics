@@ -4,6 +4,7 @@
     "@kama/gpu": { "source": "path", "path": "../../kama-gpu", "dependencies": ["@kama/window"] },
     "@kama/graphics": { "source": "path", "path": "..", "dependencies": ["@kama/gpu", "@kama/image", "@kama/window"] },
     "@kama/image": { "source": "path", "path": "../../kama-image", "dependencies": [] },
+    "@kama/imagediff": { "source": "path", "path": "../../kama-imagediff", "dependencies": ["@kama/image"] },
     "@kama/window": { "source": "path", "path": "../../kama-window", "dependencies": [] }
   }
 }

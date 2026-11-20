@@ -3,9 +3,10 @@
   "version": "0.1.0",
   "kind": "executable",
   "kama": ">=0.9.958",
-  "description": "A lit cube spun in a window on @kama/graphics, natively and in a browser; --frames N reads its last frame back from the window, and --golden <gpu> holds it to that software GPU's golden",
+  "description": "A lit cube spun in a window on @kama/graphics, natively and in a browser, its last frame held to a software GPU's golden: byte for byte, or by FLIP on a player's GPU",
   "entry": "src/main.kama",
   "webgpu": true,
+  "emSettings": { "ALLOW_MEMORY_GROWTH": 1 },
   "shellFile": "web/shell.html",
   "assets": "goldens",
   "modules": {
@@ -15,6 +16,7 @@
     "@kama/graphics": { "path": "../.." },
     "@kama/gpu": { "path": "../../../kama-gpu" },
     "@kama/window": { "path": "../../../kama-window" },
-    "@kama/image": { "path": "../../../kama-image" }
+    "@kama/image": { "path": "../../../kama-image" },
+    "@kama/imagediff": { "path": "../../../kama-imagediff" }
   }
 }

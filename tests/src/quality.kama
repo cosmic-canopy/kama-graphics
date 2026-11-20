@@ -49,13 +49,13 @@ fn string sameAs(Quality got, Quality want) {
 unsafe fn void qualityCases(ref Verdicts found) {
     Quality resolved = Quality.of(antialiasing: Antialiasing::Msaa4);
     Quality toneMapped = Quality.of(antialiasing: Antialiasing::Msaa4ToneMapped);
-    found.add(name: "quality: the library's Low takes Msaa4, the GPU's resolve",
+    found.add(name: "presets: the library's Low takes Msaa4, the GPU's resolve",
               why: sameAs(got: Quality.make(preset: QualityPreset::Low), want: resolved));
-    found.add(name: "quality: the library's Medium takes Msaa4ToneMapped, the tone-mapped resolve",
+    found.add(name: "presets: the library's Medium takes Msaa4ToneMapped, the tone-mapped resolve",
               why: sameAs(got: Quality.make(preset: QualityPreset::Medium), want: toneMapped));
-    found.add(name: "quality: the library's High takes Msaa4ToneMapped, the tone-mapped resolve",
+    found.add(name: "presets: the library's High takes Msaa4ToneMapped, the tone-mapped resolve",
               why: sameAs(got: Quality.make(preset: QualityPreset::High), want: toneMapped));
-    found.add(name: "quality: the library's Ultra takes Msaa4ToneMapped, the tone-mapped resolve",
+    found.add(name: "presets: the library's Ultra takes Msaa4ToneMapped, the tone-mapped resolve",
               why: sameAs(got: Quality.make(preset: QualityPreset::Ultra), want: toneMapped));
 }
 
@@ -99,38 +99,38 @@ type resource QualityRun {
     // Every case at once: nothing here waits on the GPU.
     public unsafe fn bool step() {
         Renderer r = Renderer.withDevice(device: copy this.device, queue: copy this.queue);
-        this.found.add(name: "quality: a new renderer's quality() is the default's, Msaa4ToneMapped",
+        this.found.add(name: "presets: a new renderer's quality() is the default's, Msaa4ToneMapped",
                        why: sameAs(got: r.quality(), want: Quality.of(antialiasing: Antialiasing::Msaa4ToneMapped)));
 
-        this.found.add(name: "quality: applyQuality of the library's Low over None writes Msaa4 and hands it back, which quality() reads",
+        this.found.add(name: "presets: applyQuality of the library's Low over None writes Msaa4 and hands it back, which quality() reads",
                        why: this.applied(r: ref r, asked: Quality.make(preset: QualityPreset::Low), over: Antialiasing::None,
                                          want: Antialiasing::Msaa4));
-        this.found.add(name: "quality: applyQuality of the library's Medium over None writes Msaa4ToneMapped and hands it back, which quality() reads",
+        this.found.add(name: "presets: applyQuality of the library's Medium over None writes Msaa4ToneMapped and hands it back, which quality() reads",
                        why: this.applied(r: ref r, asked: Quality.make(preset: QualityPreset::Medium), over: Antialiasing::None,
                                          want: Antialiasing::Msaa4ToneMapped));
-        this.found.add(name: "quality: applyQuality of the library's High over None writes Msaa4ToneMapped and hands it back, which quality() reads",
+        this.found.add(name: "presets: applyQuality of the library's High over None writes Msaa4ToneMapped and hands it back, which quality() reads",
                        why: this.applied(r: ref r, asked: Quality.make(preset: QualityPreset::High), over: Antialiasing::None,
                                          want: Antialiasing::Msaa4ToneMapped));
-        this.found.add(name: "quality: applyQuality of the library's Ultra over None writes Msaa4ToneMapped and hands it back, which quality() reads",
+        this.found.add(name: "presets: applyQuality of the library's Ultra over None writes Msaa4ToneMapped and hands it back, which quality() reads",
                        why: this.applied(r: ref r, asked: Quality.make(preset: QualityPreset::Ultra), over: Antialiasing::None,
                                          want: Antialiasing::Msaa4ToneMapped));
 
         // a game's own preset: the library's Low with anti-aliasing turned off, over the tone-mapped resolve
         Quality own = Quality.make(preset: QualityPreset::Low);
         own.antialiasing = Antialiasing::None;
-        this.found.add(name: "quality: a game's own preset, the library's Low with anti-aliasing set to None, is applied as it is over Msaa4ToneMapped",
+        this.found.add(name: "presets: a game's own preset, the library's Low with anti-aliasing set to None, is applied as it is over Msaa4ToneMapped",
                        why: this.applied(r: ref r, asked: own, over: Antialiasing::Msaa4ToneMapped, want: Antialiasing::None));
 
         // a method set directly, after that preset was applied
         r.antialiasingMut() = Antialiasing::Msaa4;
-        this.found.add(name: "quality: quality() reads a method set directly by antialiasingMut(), Msaa4 after a preset of None",
+        this.found.add(name: "presets: quality() reads a method set directly by antialiasingMut(), Msaa4 after a preset of None",
                        why: sameAs(got: r.quality(), want: Quality.of(antialiasing: Antialiasing::Msaa4)));
 
-        this.found.add(name: "quality: supportsAntialiasing(method: Msaa4ToneMapped) is true, core WebGPU on every device",
+        this.found.add(name: "presets: supportsAntialiasing(method: Msaa4ToneMapped) is true, core WebGPU on every device",
                        why: this.supported(r: r, method: Antialiasing::Msaa4ToneMapped));
-        this.found.add(name: "quality: supportsAntialiasing(method: Msaa4) is true, core WebGPU on every device",
+        this.found.add(name: "presets: supportsAntialiasing(method: Msaa4) is true, core WebGPU on every device",
                        why: this.supported(r: r, method: Antialiasing::Msaa4));
-        this.found.add(name: "quality: supportsAntialiasing(method: None) is true, core WebGPU on every device",
+        this.found.add(name: "presets: supportsAntialiasing(method: None) is true, core WebGPU on every device",
                        why: this.supported(r: r, method: Antialiasing::None));
         return true;
     }

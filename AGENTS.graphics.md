@@ -163,17 +163,18 @@ The renderer): `Quality`, a value the game owns with the library's four presets 
 handing back the quality in effect, `quality()`, and `supportsAntialiasing(method:)`; the step-down comes with the
 first method a device may lack (GFX-19).
 
-**Part 6 is under way** (2026-11-19): its first step's three questions were decided (ROADMAP_DETAIL § GFX-1), and step 1
+**Part 6 is built** (2026-11-19 and 20): its first step's three questions were decided (ROADMAP_DETAIL § GFX-1), and step 1
 is built (SPEC § The renderer, § The camera and § Reading the window back): `Renderer.make(window:, options:)`, a
 renderer in a window requesting its own GPU, a camera's aspect following what it draws into, vsync as a property pair,
 and `readWindowPixels()`, a read of the window by Bevy's way. Step 2 is built (SPEC § The example): `examples/cube`, a
 lit cube in a window from one source on both legs, its last frame held to its golden on each software GPU, and
 `renderer.adapterInfo()`, which says which GPU a renderer draws with. Step 3 is built: the cube on a player's GPU held
 to its software golden by FLIP, from `@kama/imagediff` (`../kama-imagediff`), natively against WARP's and in Edge, at
-Chrome for Testing's scale, against SwiftShader's, and both golden comparisons are that package's. Next, step 4, its
-three questions decided on 2026-11-20 (ROADMAP_DETAIL § GFX-1): the cube's web code measured as a player gets it and
-held by a ratchet, FEATURES.md's rows sharing that measurement, and the SPEC; GFX-20 looks for what brings the cube
-under the 150 KB gauge.
+Chrome for Testing's scale, against SwiftShader's, and both golden comparisons are that package's. Step 4 is built
+(SPEC § The example and § Tests): the cube's web code as a player gets it (`--define CUBE_PLAYER`) held by a ratchet,
+169.1 KB, a golden for each feature GFX-1 built that draws something of its own, and FEATURES.md saying what is built,
+14 rows built and 9 partial. Next, kyoten's join draws the hello cube through the library, which closes GFX-1; GFX-20
+looks for what brings the cube under the 150 KB gauge.
 GFX-1 is built depth-first, and every example is a test: a headless readback and a golden image, on web and native. A
 feature a program does not use drops out at link time. [SPEC.md](SPEC.md) is what is built so far, and grows with each
 part.

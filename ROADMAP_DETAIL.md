@@ -730,15 +730,51 @@ natively. The library's own `examples/cube` is the same scene without an engine.
   3. **the goldens' loader is measured in:** kama packs a manifest's `assets` into every build, so a flag cannot leave
      emscripten's file packager out (kyoten's KY-63, filed); the ratchet's record says the loader is in, and is lowered
      with that reason when kama gives a way out.
-- **Next, part 6's step 4:** the build flag and the player's build in the gate, its measurement the ratchet; the new
-  goldens; FEATURES.md's rows with their status and the shared budget, with the rule in § How to read a row and
-  `tools/check-features.sh`; and the SPEC. Then kyoten's join draws the hello cube through it.
+- **Built, part 6's step 4, the cube's web code and the map, and so part 6** (2026-11-20, [SPEC.md](SPEC.md) § The
+  example and § Tests; kyoten's `docs/design/rendering.md` § Decided, step 4's two askings), in three commits:
+  1. **the ratchet:** `examples/cube --define CUBE_PLAYER`, the player's build, leaves the harness out (the goldens, PNG,
+     FLIP and the adapter hold), says `harness: out`, and refuses a run naming a golden before it draws. The gate builds
+     it for the web at `--release`, holds its JS to Closure, runs it once in a player's browser, and measures its wasm
+     plus JS at brotli quality 11 (`tools/web-size.mjs`, the `brotli -q 11` command line's bytes) against
+     `examples/cube/web-size.json`'s last entry for the emcc that built it: 169,091 B (wasm 148,800, JS 20,291) on kama
+     0.9.978 and emcc 6.0.13, two builds of one tree measuring the same bytes. Above the record the gate fails; below it,
+     it passes and says to lower it; `tools/update-web-size.sh "<why>"` appends an entry with its reason. 16 crafted
+     cases hold `web-size.mjs`;
+  2. **a golden for each feature GFX-1 built that draws something of its own,** twelve, named as FEATURES.md names their
+     tests (SPEC § Tests), each scene chosen so its feature changes pixels, every frame looked at enlarged before
+     `tools/update-goldens.sh` wrote it;
+  3. **FEATURES.md as built:** 14 rows built and 9 partial, Color spaces moved to `level` and Depth textures to
+     `shooter`; the five tests that draw nothing of their own carried by existing cases' names; `check-features.sh`
+     holding each built row's test to its golden, an example's goldens or cases named for it, never a word, and its
+     budget to its example's record, or `with` its own live example.
+
+  **Settled while building, and reported:**
+  - the flag is `CUBE_PLAYER`, and the record `examples/cube/web-size.json`, an entry per emcc, since a build's bytes
+    are its toolchain's as much as its source's (Closure breaks the JS's lines with the host's line ending; the Mac's
+    emsdk is 7.0.0, this machine's 6.0.13);
+  - the player's build keeps the frame read under `--frames N` and its as-drawn hold, with the example's argument
+    handling 1.9 KB, so the gate's run holds the build it measures to drawing; `ENVIRONMENT=web` saves 0.7 KB;
+  - **the gate's last word on itself:** a run that printed a FAIL line fails, whatever its status said, found when a
+    mutation dropping the ratchet's status got through. A passing gate prints none, here and in every package's gate;
+  - `resize`'s golden is the window's first frame at its size in device pixels: a posted Resize cannot be one, since
+    natively the frame takes the posted size and on the web the canvas keeps its own;
+  - `light-units`' scene is a physical one at EV100 15, sunlight's exposure; lux itself stays unstated and unheld, so
+    the row's lux is not marked built;
+  - buffer geometry's built part and the four features that draw nothing of their own are held by named cases:
+    `flat-core:`, `presets:`, `pipeline-cache`, `material-values:` and `geometry-buffer:`.
+
+  475 cases natively, 476 in Firefox and in Chrome for Testing, 451 in Edge, each debug and release. **Mutations:** the
+  ratchet's 24 of 24 (kyoten's `.scratch/s43/kg/list1.py`), the last once the gate's net was added; the goldens' 12 of
+  12, each caught by its own golden (`list2.py`), `depth-precision`'s once its nearer slab was drawn first, so that a
+  24-bit depth could not win the overlap for it by order; and the map's 11 new failure cases, each failing on a mutated
+  map (`features-proof.py`).
+- **Next:** kyoten's join (its FIRST-SLICE steps 7 to 10) draws the hello cube through the library, which closes GFX-1.
 - **Done:**
   - `examples/cube` draws from one source on both legs;
   - its golden passes on a software GPU on each leg CI has, and perceptually on the reference machines present;
   - its web code, as a player gets it, is measured and held by its ratchet, beside the hello cube's 150 KB gauge;
   - no release anywhere is written by hand;
-  - FEATURES.md's rows for the slice are `built`, each with its budget;
+  - FEATURES.md's rows for the slice say what is built, each with its budget (step 4's second asking);
   - kyoten's hello cube draws through it.
 
 <a id="level"></a>

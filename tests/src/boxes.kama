@@ -244,25 +244,25 @@ type resource BoxesRun {
             Shared<Scene> s = match (this.crossing) { case Some(value: x): copy x; case None: { panic(msg: "made at the first stage"); } };
             Shared<Mesh> a = match (this.left) { case Some(value: x): copy x; case None: { panic(msg: "made at the first stage"); } };
             RenderInfo still = this.renderOnly(scene: copy s);
-            this.found.add(name: "render: a frame where nothing changed makes no world matrix, and draws the same",
+            this.found.add(name: "flat-core: a frame where nothing changed makes no world matrix, and draws the same",
                            why: infoIs(got: still, calls: 4, triangles: 48, objects: 2, matrices: 0));
             a.positionMut().x = -0.6;
             RenderInfo one = this.renderOnly(scene: copy s);
-            this.found.add(name: "render: one box moved makes its world matrix alone",
+            this.found.add(name: "flat-core: one box moved makes its world matrix alone",
                            why: infoIs(got: one, calls: 4, triangles: 48, objects: 2, matrices: 1));
             s.positionMut().y = 0.0;
             RenderInfo all = this.renderOnly(scene: copy s);
-            this.found.add(name: "render: the scene moved makes every world matrix below it",
+            this.found.add(name: "flat-core: the scene moved makes every world matrix below it",
                            why: infoIs(got: all, calls: 4, triangles: 48, objects: 2, matrices: 3));
             Shared<BoxGeometry> small = new BoxGeometry.make(width: 0.2, height: 0.2, depth: 0.2);
             Shared<Mesh> late = new Mesh.make(geometry: small, material: coloured(hex: BLUE));
             s.add(object: late);
             RenderInfo added = this.renderOnly(scene: copy s);
-            this.found.add(name: "render: a mesh added after the first frame is drawn, its world matrix the one made",
+            this.found.add(name: "flat-core: a mesh added after the first frame is drawn, its world matrix the one made",
                            why: infoIs(got: added, calls: 6, triangles: 72, objects: 3, matrices: 1));
             s.remove(object: late);
             RenderInfo dropped = this.renderOnly(scene: copy s);
-            this.found.add(name: "render: the mesh removed again is drawn no more",
+            this.found.add(name: "flat-core: the mesh removed again is drawn no more",
                            why: infoIs(got: dropped, calls: 4, triangles: 48, objects: 2, matrices: 0));
             // a refused add (the scene under one of its own meshes) changes nothing: no mark, no record, the same draws
             bool looped = a.add(object: s);
@@ -463,7 +463,7 @@ type resource BoxesRun {
         // a mesh that leaves its scene gives up its record
         s.remove(object: parent);
         RenderInfo emptied = this.renderOnly(scene: copy s);
-        this.found.add(name: "tree: a mesh removed from its scene gives up its record and is no longer drawn",
+        this.found.add(name: "flat-core: a mesh removed from its scene gives up its record and is no longer drawn",
                        why: infoIs(got: emptied, calls: 0, triangles: 0, objects: 0, matrices: 0));
     }
 }

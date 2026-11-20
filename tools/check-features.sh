@@ -8,8 +8,15 @@
 #   2. Every feature row has the seven cells, and its feature name is unique.
 #   3. Its status is `planned`, `partial` or `built`; a `partial` row marks a built method ✓, and a `planned` one none.
 #   4. Its example is a declared one, or `asked`; and every declared example is some row's.
-#   5. Its test is a kebab-case name, unique, and once a method is built, `tests/` has it.
-#   6. Its budget is `—` while planned, and measured (anything else) once a method is built.
+#   5. Its test is a kebab-case name, unique, and once a method is built, something holds it by that name (GFX-1's part
+#      6, step 4; kyoten's rendering.md § Decided, 2026-11-20): its golden, `tests/goldens/<test>/`, or a golden per
+#      method, `tests/goldens/<test>-<method>/` where `<test>-<method>` is no other row's test; an example's own goldens,
+#      `examples/<test>/goldens/`; or, for a feature that draws nothing of its own, named cases, each printed as
+#      `<test>: …` or `<test>, …`. A word that merely appears somewhere in `tests/` holds nothing.
+#   6. Its budget is `—` while planned, and once a method is built either the measurement it shares, `<n.n> KB, the
+#      <example>'s`, equal to that example's web-size record (examples/<example>/web-size.json, its latest entry for
+#      some emcc, in KB of 1,000 bytes to one decimal), or `with <example>`, naming its own example, while a live row
+#      schedules it: a built feature the first example's build leaves out, measured once that example is.
 set -u
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
@@ -46,6 +53,7 @@ problems=$(printf '%s\n' "$rows" | awk -F '\t' -v ids=" $ids " '
         ex[$4] = 1; nex++
         if ($5 != "shipped" && index(ids, " " $5 " ") == 0)
             print "line " $2 ": example \"" $4 "\" is scheduled by " $5 ", which ROADMAP.md has no row for (a shipped row: write `shipped`)"
+        if ($5 != "shipped") print "LIVE\t" $4
         next
     }
     $1 == "FT" {
@@ -62,9 +70,10 @@ problems=$(printf '%s\n' "$rows" | awk -F '\t' -v ids=" $ids " '
         if (t !~ /^[a-z0-9]+(-[a-z0-9]+)*$/) print "line " $2 ": test \"" t "\" is not a kebab-case name"
         if (t in test) print "line " $2 ": test \"" t "\" is also line " test[t] "'"'"'s"
         test[t] = $2
+        print "TEST\t" t
         if (st == "planned" && b != "—") print "line " $2 ": \"" f "\" is planned, so its budget is — until a measurement sets it"
         if (st != "planned" && (b == "—" || b == "")) print "line " $2 ": \"" f "\" has a built method, so its budget is the measured one"
-        if (st != "planned") print "BUILT\t" t
+        if (st != "planned") print "BUILT\t" $2 "\t" f "\t" t "\t" eg "\t" b
     }
     END {
         if (nex == 0) print "no examples table"
@@ -74,13 +83,74 @@ problems=$(printf '%s\n' "$rows" | awk -F '\t' -v ids=" $ids " '
     }
 ')
 
-built=$(printf '%s\n' "$problems" | awk -F '\t' '$1 == "BUILT" { print $2 }')
-problems=$(printf '%s\n' "$problems" | grep -v '^BUILT' | grep .)
+built=$(printf '%s\n' "$problems" | awk -F '\t' '$1 == "BUILT"')
+tests=" $(printf '%s\n' "$problems" | awk -F '\t' '$1 == "TEST" { print $2 }' | tr '\n' ' ')"
+live=" $(printf '%s\n' "$problems" | awk -F '\t' '$1 == "LIVE" { print $2 }' | tr '\n' ' ')"
+problems=$(printf '%s\n' "$problems" | grep -v '^BUILT\|^TEST\|^LIVE' | grep .)
 
-for t in $built; do
-    [ -d "$ROOT/tests" ] && grep -rqw -- "$t" "$ROOT/tests" || problems="$problems
-test \"$t\" is claimed built, and tests/ does not have it"
-done
+# Whether something holds test `$1` by its name (invariant 5).
+heldBy() {
+    [ -n "$(ls "$ROOT/tests/goldens/$1/"*.png 2>/dev/null)" ] && return 0
+    for d in "$ROOT/tests/goldens/$1"-*/; do
+        [ -d "$d" ] || continue
+        m=$(basename "$d")
+        case "$tests" in *" $m "*) continue ;; esac
+        [ -n "$(ls "$d"*.png 2>/dev/null)" ] && return 0
+    done
+    [ -n "$(ls "$ROOT/examples/$1/goldens/"*.png 2>/dev/null)" ] && return 0
+    [ -d "$ROOT/tests/src" ] && grep -rqE "\"$1[:,] " "$ROOT/tests/src" && return 0
+    return 1
+}
+
+# An example's web-size record's latest code per emcc, in KB to one decimal, one a line.
+recordedKb() {
+    awk -F '[:,]' '
+        /"emcc":/ { e = $2; gsub(/[ "]/, "", e) }
+        /"code":/ { c = $2; gsub(/ /, "", c); last[e] = c }
+        END { for (e in last) printf "%.1f\n", last[e] / 1000 }
+    ' "$1"
+}
+
+tab=$(printf '\t')
+while IFS="$tab" read -r kind line f t eg b; do
+    [ "$kind" = BUILT ] || continue
+    heldBy "$t" || problems="$problems
+line $line: test \"$t\" is claimed built, and nothing holds it by that name: no golden tests/goldens/$t/ or $t-<method>/, no examples/$t/goldens/, no case named \"$t: …\""
+    case "$b" in
+        "with "*)
+            ex=${b#with }
+            if [ "$ex" != "$eg" ]; then
+                problems="$problems
+line $line: \"$f\"'s budget waits on $ex, where its example is $eg"
+            else
+                case "$live" in
+                    *" $ex "*) ;;
+                    *) problems="$problems
+line $line: \"$f\"'s budget waits on $ex, which no live row schedules: measure it" ;;
+                esac
+            fi
+            ;;
+        *" KB, the "*"'s")
+            kb=${b%% KB*}
+            ex=${b#* KB, the }
+            ex=${ex%\'s}
+            record="$ROOT/examples/$ex/web-size.json"
+            if [ ! -f "$record" ]; then
+                problems="$problems
+line $line: \"$f\" shares $ex's measurement, and examples/$ex/web-size.json does not exist"
+            elif ! recordedKb "$record" | grep -qx "$kb"; then
+                problems="$problems
+line $line: \"$f\" says $kb KB, the $ex's, and its record says $(recordedKb "$record" | tr '\n' ' ' | sed 's/ $//') KB"
+            fi
+            ;;
+        *)
+            problems="$problems
+line $line: \"$f\"'s budget \"$b\" is neither <n.n> KB, the <example>'s, nor with <example>"
+            ;;
+    esac
+done <<EOF
+$built
+EOF
 problems=$(printf '%s\n' "$problems" | grep .)
 
 if [ -n "$problems" ]; then
@@ -94,4 +164,5 @@ nf=$(printf '%s\n' "$rows" | grep -c '^FT')
 ne=$(printf '%s\n' "$rows" | grep -c '^EX')
 na=$(printf '%s\n' "$rows" | awk -F '\t' '$1 == "FT" && $6 == "asked"' | grep -c .)
 echo "check-features: OK ($nf features: $(count built) built, $(count partial) partial, $(count planned) planned; $na asked for by"
-echo "                    no example yet; $ne examples, each scheduled by a row; every test name unique)"
+echo "                    no example yet; $ne examples, each scheduled by a row; every test name unique, and each built"
+echo "                    one held by its golden or its named cases)"

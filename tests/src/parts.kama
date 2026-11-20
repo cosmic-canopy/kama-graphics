@@ -198,9 +198,9 @@ unsafe fn void boxCases(ref Verdicts found) {
                 bad = bad + " group ${i} is ${gr.start} ${gr.count} ${gr.materialIndex};";
             }
         }
-        found.add(name: "BoxGeometry: a box is 24 vertices and 36 indices, a group of 6 a face, material indices 0 to 5 in face order",
+        found.add(name: "geometry-buffer: a box is 24 vertices and 36 indices, a group of 6 a face, material indices 0 to 5 in face order",
                   why: v == 24 && n == 36 && bad.isEmpty() ? "" : "${v} vertices, ${n} indices;" + bad);
-        found.add(name: "BoxGeometry: its index fits 16 bits, as three.js chooses", why: box.buffers().shortIndex() ? "" : "it does not");
+        found.add(name: "geometry-buffer: a box's index fits 16 bits, as three.js chooses", why: box.buffers().shortIndex() ? "" : "it does not");
         found.add(name: "BoxGeometry: every triangle winds counter-clockwise seen from outside", why: windsOut(g: box.buffers()));
     }
     {

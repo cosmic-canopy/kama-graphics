@@ -217,3 +217,8 @@ package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `depth-precision`, `geometry-primitives`, `render-target`, `nodes`, `nodes-override`, `material-unlit`, `light-units`
   and `exposure` (`tests/src/features.kama`), `tone-mapping-none` beside the curves', and `resize` among the window's
   cases.
+- GFX-1's part 6, step 4, its last part, and so GFX-1's six parts: FEATURES.md says what GFX-1 built, 14 rows built
+  and 9 partial, each sharing the cube's 169.1 KB or waiting `with` its example; `tools/check-features.sh` holds a
+  built row's test to its golden, an example's goldens or cases named for it, and its budget to the example's
+  web-size record. The cases holding the flat core, presets, pipelines compiled off the frame, material values and
+  buffer geometry carry those tests' names.

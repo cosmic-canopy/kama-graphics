@@ -5,11 +5,12 @@ tested. What comes next is [ROADMAP.md](ROADMAP.md), every feature it will have 
 decided design and the library's departures from kama's are [AGENTS.graphics.md](AGENTS.graphics.md), and its history
 is the git log and [CHANGELOG.md](CHANGELOG.md).
 
-**Where it stands** (2026-11-20, kama 0.9.978): GFX-1's parts 1 to 5 and part 6's first three steps. A `Renderer` draws a
+**Where it stands** (2026-11-20, kama 0.9.978): GFX-1's six parts. A `Renderer` draws a
 scene of boxes through a perspective camera into a window or a render target, with reversed depth, and reads either back
 as an `@kama/image` `Image`, natively on Windows on wgpu-native v29.0.1.1 and on the web in headless Edge 157, Chrome for
 Testing 157 and Firefox 160. `examples/cube`, a lit cube spun in a window, draws from one source on both legs, its last
-frame held to its golden on each software GPU byte for byte, and on the GPU natively and in Edge by FLIP.
+frame held to its golden on each software GPU byte for byte, and on the GPU natively and in Edge by FLIP. Its web code
+as a player gets it is held by a ratchet: 169.1 KB of wasm and JS after brotli (`examples/cube/web-size.json`).
 A box is lit by directional and ambient lights through three.js r187's physical model (`MeshStandardMaterial`), or drawn
 unlit (`MeshBasicMaterial`). A material's shader is typed nodes compiled to WGSL at run time. A misuse the types cannot
 refuse is refused and reported, never ending the program. Every frame in the tests is held to its software GPU's golden.
@@ -725,6 +726,13 @@ tick; Escape or the close button quits. It reaches the GPU only through the libr
   pixels of 576,000 above 0.1, at most 0.118, on the cube's edges. Each limit is four times the most measured, rounded
   up; the cube a degree from its golden's turn, a mean of 0.0117 with 2 % of pixels above 0.1, fails both.
 - With neither, the frame must be the window's size with the cube drawn at its centre.
+- **The player's build, `--define CUBE_PLAYER`** (GFX-1's part 6, step 4; kyoten's rendering.md § Decided, 2026-11-20),
+  leaves the harness out: `src/check.kama`'s goldens, PNG and FLIP, and the adapter hold `--golden` asks for. Its
+  second line says `harness: out`, where the harness's says `harness: in`, and a run naming a golden fails before it
+  draws. Under `--frames N` it still reads its last frame back and holds it as drawn. It is the build the gate measures
+  as the web code a player gets. The goldens stay in its page as assets, and emscripten's file packager with them,
+  about 6.8 KB of its JS, since kama packs a manifest's assets into every build (kyoten's KY-63).
+- **Its manifest sets `ENVIRONMENT=web`,** a free saving, since it runs only in a browser: 0.7 KB of JS.
 - **Its goldens** are the window's frames in device pixels: 640 x 400 on WARP, natively at a scale of 1 and in Firefox,
   the same bytes on both, and 960 x 600 on SwiftShader in Chrome for Testing at its 1.5. A native leg on a display at
   another scale fails its golden, saying both sizes. They are the example's own assets, since kama refuses an `assets`
@@ -747,9 +755,24 @@ tick; Escape or the close button quits. It reaches the GPU only through the libr
   on WARP fails on its adapter and compares and prints no frame; a run a frame short of its golden fails it by its
   texels and prints the frame, which holds the comparison itself; and the cube on the GPU stopped 30 degrees short of
   its golden's turn fails both of FLIP's limits and prints its frame, which holds FLIP's hold itself. No passing run
-  prints a `golden-png` or `frame-png` line.
+  prints a `golden-png` or `frame-png` line;
+- **the cube as a player gets it** (GFX-1's part 6, step 4): natively, its player build says its harness is out and
+  refuses `--golden warp` before it draws; built for the web at `--release`, its JS held to Closure, it is run once in a
+  player's browser (Edge or Chrome as installed, else the first there is), held to 60 frames drawn with no misuse and
+  read back as drawn, to `build: release` and to `harness: out`; and its wasm plus its JS, each at brotli quality 11, is
+  the ratchet (`tools/web-size.mjs`, the `brotli -q 11` command line's bytes). It is held to the last entry of
+  `examples/cube/web-size.json` for the emcc that built it, since a build's bytes are its toolchain's as much as its
+  source's: above it the gate fails, saying by how much, and raising the record takes a written reason; below it, it
+  passes and says to lower the record. Only `tools/update-web-size.sh "<why>"` writes the record, appending the size
+  with its date, its kama, its emcc and the reason. `tools/web-size.mjs` is held first on crafted records, 16 cases: a
+  build at, a byte over and under its record; the last entry the record, not the largest; another emcc's entry not this
+  build's; no entry for its emcc, none at all, no record, a record not JSON; an entry with no reason, or whose code is not
+  its wasm plus its JS; a part measured as nothing, a measurement not two byte counts; and a record with no reason, a
+  record appended and then held, and a record that changes nothing;
+- **the gate's last word on itself:** it runs itself once more under `tee` and fails a run that printed a `FAIL` line,
+  whatever its status said, so a check that prints FAIL and forgets the status cannot pass. A passing gate prints none.
 
-It is 450 cases natively and 451 in Firefox and in Chrome for Testing, each leg that names a software GPU, and 438
+It is 475 cases natively and 476 in Firefox and in Chrome for Testing, each leg that names a software GPU, and 451
 in Edge, whose leg names none: a web leg reads the page's canvas and holds that it offers `Fifo` alone, where natively a
 mode the surface offers is taken. Natively the window run opens a system window, so it needs a display. Natively on Windows the
 legs run with `@kama/gpu`'s `dxcompiler.dll` on the PATH (`tools/legs.sh`), so Direct3D 12 compiles with DXC, as
@@ -924,7 +947,8 @@ Firefox's WebGPU does.
     green sit between entries, where the formulas part from it by 10 to 22 steps); `AgX` within a step of r187's formulas
     worked in float64; `None` clamped and sRGB-encoded;
   - a camera drawing into a 16-bit float target ignoring its tone mapping;
-  - `tone-mapping-blender-agx/<gpu>.png` and `tone-mapping-agx/<gpu>.png`: a box running red to blue across it and over
+  - `tone-mapping-blender-agx/<gpu>.png`, `tone-mapping-agx/<gpu>.png` and, since part 6's step 4,
+    `tone-mapping-none/<gpu>.png`: a box running red to blue across it and over
     about nine stops up it, through Blender's AgX and through r187's. Natively on Windows the legs compile with DXC, as
     Firefox does (`tools/legs.sh` puts `@kama/gpu`'s `dxcompiler.dll` on the PATH): under FXC, WARP's two legs round 2
     of r187's 2,048 texels a step apart (kyoten's rendering.md § Decided, DXC).
@@ -1068,10 +1092,38 @@ Firefox's WebGPU does.
     fails a window read at its first poll, and offers `Fifo` alone; one made `withDevice` says its device's adapter at
     once, field by field;
   - **the camera's aspect:** 1 before a render; a 2:1 target's taken at a render; a fixed 0.75 kept through one, and
-    read back; set back to `None`, the target's again.
+    read back; set back to `None`, the target's again;
+  - **the golden `resize`** (part 6's step 4): the window's first frame, at its size in device pixels and the camera
+    following its aspect, 160 x 96 at a scale of 1 and 240 x 144 at 1.5, held on a leg that names a software GPU. A
+    posted `Resize` cannot be a golden, since natively the frame takes the posted size and on the web the canvas keeps
+    its own, so WARP's two legs would draw two frames.
 
   Every other GPU case's camera now follows its target, its aspect dropped (one with no render fixes its own), and no
   golden moved.
+- **Part 6's step 4, a golden for each feature GFX-1 built that draws something of its own** (kyoten's rendering.md §
+  Decided, step 4's second asking, question 2; `tests/src/features.kama`), each a small scene in which the feature
+  changes pixels, named as FEATURES.md names the feature's test, held byte for byte on WARP and SwiftShader:
+  - `scene-graph`: a group turned 30 degrees and squashed, holding two unlit boxes, one turned and holding a third;
+  - `camera-perspective`: three boxes going back from a 75-degree camera into a 2:1 target;
+  - `depth-precision`: two slabs 600 m broad 5 km from a camera whose near plane is 10 cm, their faces 5 cm apart, and on
+    every leg every texel where they overlap the nearer slab's colour, exactly;
+  - `geometry-primitives`: a box of 6 x 6 x 6 segments under a program's material that pulls each vertex towards a
+    sphere, so its faces round where a box of no segments stays flat;
+  - `render-target`: two boxes crossing in depth in a 50 x 30 target, whose rows the copy pads;
+  - `nodes`: a program's own node material, warm to cool by height in world space and shaded by a direction;
+  - `nodes-override`: `MeshStandardMaterial`'s colour, roughness, metalness and emissive slots set to nodes over the
+    world position, under a sun and an ambient light;
+  - `material-unlit`: `MeshBasicMaterial` beside `MeshStandardMaterial` of its colour under a strong sun, and on every leg
+    the unlit box's faces its colour, exactly;
+  - `light-units`: a box under a 100,000-lux sun and a 20,000-lux ambient light at EV100 15, through Blender's AgX, its
+    backdrop exposed with it;
+  - `exposure`: three.js's default light on a box seen 1.5 stops brighter, `ev100For(exposure: 2.828427)`, no curve;
+
+  and `tone-mapping-none` and `resize` beside their runs (above). On every leg each frame is held to being read back
+  with something drawn, and the frames raise no WebGPU error. **Named cases** hold what draws nothing of its own, each
+  printed with its test's name: `flat-core:` (the records a frame writes, one moved, the scene moved, a mesh added and
+  removed), `presets:` (the quality cases), `pipeline-cache:` (the compiling cases), `material-values:` (a value's change
+  compiles nothing) and `geometry-buffer:` (the box's index and groups).
 - **Part 2's golden holds part 3's compiler:** `boxes/<gpu>.png` is matched byte for byte with `MeshBasicMaterial`'s
   nodes, as it was with its WGSL by hand.
 - **Printed from outside the program:** the gate counts each leg's printed lines: one for the render refused by the

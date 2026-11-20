@@ -304,7 +304,7 @@ type resource CompilingRun {
         if (this.stage == 0) {
             this.fresh(way: WhileCompiling::General);
             bool general = match (this.renderer) { case Some(value: r): r.whileCompiling() == WhileCompiling::General; case None: false; };
-            this.found.add(name: "compiling: a renderer's way while a pipeline compiles is General by default", why: general ? "" : "it is another");
+            this.found.add(name: "pipeline-cache: a renderer's way while a pipeline compiles is General by default", why: general ? "" : "it is another");
             this.stageScene(two: false);
             Shared<RenderTarget> t = this.theTarget();
             match (this.renderer) {
@@ -312,7 +312,7 @@ type resource CompilingRun {
                 case None: { }
             };
             RenderInfo first = this.renderNow();
-            this.found.add(name: "compiling, the default: a new scene's first render draws nothing, counting the box skipped and 3 misses (the box, the resolve, the output)",
+            this.found.add(name: "pipeline-cache, the default: a new scene's first render draws nothing, counting the box skipped and 3 misses (the box, the resolve, the output)",
                            why: infoIs(got: first, misses: 3, skipped: 1, waited: 0, calls: 0));
             this.startRead();
             this.stage = 1;
@@ -320,7 +320,7 @@ type resource CompilingRun {
         }
         if (this.stage == 1) {
             if (!this.answered()) { return false; }
-            this.found.add(name: "compiling, the default: while the output pass compiles, the target is left as it was, cleared to #336699",
+            this.found.add(name: "pipeline-cache, the default: while the output pass compiles, the target is left as it was, cleared to #336699",
                            why: this.everywhere(r: 0x33, g: 0x66, b: 0x99));
             this.began = monotonicNow();
             this.stage = 2;
@@ -329,7 +329,7 @@ type resource CompilingRun {
         if (this.stage == 2) {
             RenderInfo again = this.renderNow();
             if (again.misses != 0 && this.began.elapsed().asMillis() < PATIENCE_MS) { return false; }
-            this.found.add(name: "compiling, the default: drawn again each tick, a render with no miss comes, drawing the box's two passes",
+            this.found.add(name: "pipeline-cache, the default: drawn again each tick, a render with no miss comes, drawing the box's two passes",
                            why: infoIs(got: again, misses: 0, skipped: 0, waited: 0, calls: 2));
             this.startRead();
             this.stage = 3;
@@ -339,16 +339,16 @@ type resource CompilingRun {
             if (!this.answered()) { return false; }
             string centre = this.shows(x: 8, y: 6, r: 255, g: 0, b: 0);
             string corner = this.shows(x: 0, y: 0, r: 0, g: 0, b: 0);
-            this.found.add(name: "compiling, the default: once its pipelines answer, the box is drawn on the clear colour", why: centre + corner);
+            this.found.add(name: "pipeline-cache, the default: once its pipelines answer, the box is drawn on the clear colour", why: centre + corner);
             this.fresh(way: WhileCompiling::Skip);
             this.stageScene(two: false);
             RenderInfo skipping = this.renderNow();
-            this.found.add(name: "compiling, Skip: a new scene's first render draws nothing, counting the box skipped and 3 misses",
+            this.found.add(name: "pipeline-cache, Skip: a new scene's first render draws nothing, counting the box skipped and 3 misses",
                            why: infoIs(got: skipping, misses: 3, skipped: 1, waited: 0, calls: 0));
             this.fresh(way: WhileCompiling::Wait);
             this.stageScene(two: false);
             RenderInfo waited = this.renderNow();
-            this.found.add(name: "compiling, Wait: the first render compiles its 4 pipelines (the box's two, the resolve, the output) and draws the box, with no miss",
+            this.found.add(name: "pipeline-cache, Wait: the first render compiles its 4 pipelines (the box's two, the resolve, the output) and draws the box, with no miss",
                            why: infoIs(got: waited, misses: 0, skipped: 0, waited: 4, calls: 2));
             this.startRead();
             this.stage = 4;
@@ -356,9 +356,9 @@ type resource CompilingRun {
         }
         if (this.stage == 4) {
             if (!this.answered()) { return false; }
-            this.found.add(name: "compiling, Wait: the first render shows the box", why: this.shows(x: 8, y: 6, r: 255, g: 0, b: 0));
+            this.found.add(name: "pipeline-cache, Wait: the first render shows the box", why: this.shows(x: 8, y: 6, r: 255, g: 0, b: 0));
             RenderInfo second = this.renderNow();
-            this.found.add(name: "compiling, Wait: the next render compiles nothing", why: infoIs(got: second, misses: 0, skipped: 0, waited: 0, calls: 2));
+            this.found.add(name: "pipeline-cache, Wait: the next render compiles nothing", why: infoIs(got: second, misses: 0, skipped: 0, waited: 0, calls: 2));
             this.fresh(way: WhileCompiling::General);
             this.stageScene(two: false);
             this.startCompile();
@@ -368,18 +368,18 @@ type resource CompilingRun {
         if (this.stage == 5) {
             int32 c = this.compiled();
             if (c == 0) { return false; }
-            this.found.add(name: "compiling, compile(scene:, camera:): its request comes to Ready", why: c == 1 ? "" : "it is still pending");
+            this.found.add(name: "pipeline-cache, compile(scene:, camera:): its request comes to Ready", why: c == 1 ? "" : "it is still pending");
             RenderInfo after = this.renderNow();
-            this.found.add(name: "compiling, compile(scene:, camera:): the first render after it draws everything, with no miss",
+            this.found.add(name: "pipeline-cache, compile(scene:, camera:): the first render after it draws everything, with no miss",
                            why: infoIs(got: after, misses: 0, skipped: 0, waited: 0, calls: 2));
-            this.found.add(name: "compiling, compile(scene:, camera:): polled again, its request stays Ready", why: this.compiled() == 1 ? "" : "it is not");
+            this.found.add(name: "pipeline-cache, compile(scene:, camera:): polled again, its request stays Ready", why: this.compiled() == 1 ? "" : "it is not");
             this.startRead();
             this.stage = 6;
             return false;
         }
         if (this.stage == 6) {
             if (!this.answered()) { return false; }
-            this.found.add(name: "compiling, compile(scene:, camera:): that render shows the box", why: this.shows(x: 8, y: 6, r: 255, g: 0, b: 0));
+            this.found.add(name: "pipeline-cache, compile(scene:, camera:): that render shows the box", why: this.shows(x: 8, y: 6, r: 255, g: 0, b: 0));
             this.fresh(way: WhileCompiling::General);
             this.stageScene(two: true);
             this.startCompile();
@@ -389,11 +389,11 @@ type resource CompilingRun {
         if (this.stage == 7) {
             int32 c = this.compiled();
             if (c == 0) { return false; }
-            this.found.add(name: "compiling, a pipeline the device refuses: the request comes to Ready, the refusal an answer", why: c == 1 ? "" : "it is still pending");
-            this.found.add(name: "compiling, a pipeline the device refuses: takeErrors() reports it once the request answers, before any render, as Material, in the device's words, the stages' interface refused",
+            this.found.add(name: "pipeline-cache, a pipeline the device refuses: the request comes to Ready, the refusal an answer", why: c == 1 ? "" : "it is still pending");
+            this.found.add(name: "pipeline-cache, a pipeline the device refuses: takeErrors() reports it once the request answers, before any render, as Material, in the device's words, the stages' interface refused",
                            why: this.errorsAre(none: false));
             RenderInfo beside = this.renderNow();
-            this.found.add(name: "compiling, a pipeline the device refuses: the box beside it draws, and the refused one is no miss",
+            this.found.add(name: "pipeline-cache, a pipeline the device refuses: the box beside it draws, and the refused one is no miss",
                            why: infoIs(got: beside, misses: 0, skipped: 0, waited: 0, calls: 2));
             this.startRead();
             this.stage = 8;
@@ -403,10 +403,10 @@ type resource CompilingRun {
             if (!this.answered()) { return false; }
             string left = this.shows(x: 3, y: 6, r: 255, g: 0, b: 0);
             string right = this.shows(x: 12, y: 6, r: 0, g: 0, b: 0);
-            this.found.add(name: "compiling, a pipeline the device refuses: the box beside it is drawn, and where the refused one stands the clear colour shows",
+            this.found.add(name: "pipeline-cache, a pipeline the device refuses: the box beside it is drawn, and where the refused one stands the clear colour shows",
                            why: left + right);
             RenderInfo next = this.renderNow();
-            this.found.add(name: "compiling, a pipeline the device refuses: the next render draws the same, and reports nothing again",
+            this.found.add(name: "pipeline-cache, a pipeline the device refuses: the next render draws the same, and reports nothing again",
                            why: infoIs(got: next, misses: 0, skipped: 0, waited: 0, calls: 2) + this.errorsAre(none: true));
             this.fresh(way: WhileCompiling::General);
             this.choose(method: Antialiasing::Msaa4);
@@ -420,7 +420,7 @@ type resource CompilingRun {
             if (c == 0) { return false; }
             this.choose(method: Antialiasing::Msaa4ToneMapped);
             RenderInfo resolving = this.renderNow();
-            this.found.add(name: "compiling, the tone-mapped resolve while it compiles: compiled at Msaa4, drawn at Msaa4ToneMapped, the GPU resolves that render, one miss",
+            this.found.add(name: "pipeline-cache, the tone-mapped resolve while it compiles: compiled at Msaa4, drawn at Msaa4ToneMapped, the GPU resolves that render, one miss",
                            why: (c == 1 ? "" : "the compile never answered; ") + infoIs(got: resolving, misses: 1, skipped: 0, waited: 0, calls: 2));
             this.startRead();
             this.stage = 10;
@@ -428,7 +428,7 @@ type resource CompilingRun {
         }
         if (this.stage == 10) {
             if (!this.answered()) { return false; }
-            this.found.add(name: "compiling, the tone-mapped resolve while it compiles: that render shows the box", why: this.shows(x: 8, y: 6, r: 255, g: 0, b: 0));
+            this.found.add(name: "pipeline-cache, the tone-mapped resolve while it compiles: that render shows the box", why: this.shows(x: 8, y: 6, r: 255, g: 0, b: 0));
             this.began = monotonicNow();
             this.stage = 11;
             return false;
@@ -436,11 +436,11 @@ type resource CompilingRun {
         if (this.stage == 11) {
             RenderInfo again = this.renderNow();
             if (again.misses != 0 && this.began.elapsed().asMillis() < PATIENCE_MS) { return false; }
-            this.found.add(name: "compiling, the tone-mapped resolve while it compiles: drawn again each tick, a render with no miss comes",
+            this.found.add(name: "pipeline-cache, the tone-mapped resolve while it compiles: drawn again each tick, a render with no miss comes",
                            why: infoIs(got: again, misses: 0, skipped: 0, waited: 0, calls: 2));
             this.choose(method: Antialiasing::Msaa4);
             RenderInfo back = this.renderNow();
-            this.found.add(name: "compiling: a method set back draws at once, its pipelines kept, with no miss",
+            this.found.add(name: "pipeline-cache: a method set back draws at once, its pipelines kept, with no miss",
                            why: infoIs(got: back, misses: 0, skipped: 0, waited: 0, calls: 2));
             // a renderer that prints, as a program that never reads takeErrors() keeps it: the render that finds the
             // refusal prints it, once, which the gate counts (tools/test.sh)
@@ -454,7 +454,7 @@ type resource CompilingRun {
         if (this.stage == 12) {
             RenderInfo again = this.renderNow();
             if (again.misses != 0 && this.began.elapsed().asMillis() < PATIENCE_MS) { return false; }
-            this.found.add(name: "compiling, a pipeline the device refuses, found by a render: drawn again each tick, a render with no miss comes, the box beside it drawn",
+            this.found.add(name: "pipeline-cache, a pipeline the device refuses, found by a render: drawn again each tick, a render with no miss comes, the box beside it drawn",
                            why: infoIs(got: again, misses: 0, skipped: 0, waited: 0, calls: 2));
             // a render never draws with a pipeline it asked for itself: a box's draw asks for the pipelines the boxes of its
             // material share, and natively @kama/gpu's own threads may answer before a later box's draw, which must not
@@ -462,12 +462,12 @@ type resource CompilingRun {
             this.fresh(way: WhileCompiling::Skip);
             this.stageMany();
             RenderInfo many = this.renderNow();
-            this.found.add(name: "compiling: a render never draws with a pipeline it asked for itself, so twelve boxes, by turns of two materials, are all skipped by a new scene's first render (and the resolve and the output)",
+            this.found.add(name: "pipeline-cache: a render never draws with a pipeline it asked for itself, so twelve boxes, by turns of two materials, are all skipped by a new scene's first render (and the resolve and the output)",
                            why: infoIs(got: many, misses: 14, skipped: 12, waited: 0, calls: 0));
             this.fresh(way: WhileCompiling::General);
             this.stageMany();
             RenderInfo general = this.renderNow();
-            this.found.add(name: "compiling, General: a render never draws by a general form it asked for itself, so the twelve boxes are all skipped by a new scene's first render",
+            this.found.add(name: "pipeline-cache, General: a render never draws by a general form it asked for itself, so the twelve boxes are all skipped by a new scene's first render",
                            why: infoIs(got: general, misses: 14, skipped: 12, waited: 0, calls: 0));
             // a refusal a render found is reported by takeErrors() alone, with no render after it: it polls the requests
             this.fresh(way: WhileCompiling::General);
@@ -482,7 +482,7 @@ type resource CompilingRun {
             isize n = e.reports().length();
             if (n == 0 && this.began.elapsed().asMillis() < PATIENCE_MS) { return false; }
             bool isMaterial = n == 1 && match (e.reports()[0].kind()) { case Material: true; case _: false; };
-            this.found.add(name: "compiling, a pipeline the device refuses, asked for by one render: takeErrors() polled alone, with no render after it, reports it once, as Material",
+            this.found.add(name: "pipeline-cache, a pipeline the device refuses, asked for by one render: takeErrors() polled alone, with no render after it, reports it once, as Material",
                            why: isMaterial ? "" : "it reports ${n}");
             // a mesh's two pipelines, shaded and depth-only, are refused as one, whichever answers first: twelve meshes,
             // each a refused material of its own, drawn each tick with takeErrors() polled after each render, so that
@@ -508,7 +508,7 @@ type resource CompilingRun {
             RendererErrors last = match (this.renderer) { case Some(value: r): r.takeErrors(); case None: { panic(msg: "made first"); } };
             this.reported = this.reported + cast<int32>(last.reports().length());
             int32 n = this.reported;
-            this.found.add(name: "compiling: a mesh's two pipelines the device refuses are reported once, whichever answers first, so twelve refused materials drawn each tick with takeErrors() read after each render are twelve reports",
+            this.found.add(name: "pipeline-cache: a mesh's two pipelines the device refuses are reported once, whichever answers first, so twelve refused materials drawn each tick with takeErrors() read after each render are twelve reports",
                            why: n == 12 && settled ? "" : settled ? "they are ${n} reports" : "the compile never came to Ready");
             this.compiling = Optional::None;
             this.renderer = Optional::None;

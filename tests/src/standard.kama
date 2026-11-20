@@ -84,7 +84,7 @@ unsafe fn void standardCases(ref Verdicts found) {
     uint32 g1 = m.graphVersion();
     string moved = still.isEmpty() ? "" : "version() did not move for" + still;
     if (g1 != g0) { moved = moved + " graphVersion() moved from ${g0} to ${g1}"; }
-    found.add(name: "MeshStandardMaterial: each value's Mut moves version(), and none moves graphVersion(), so a value's change compiles nothing",
+    found.add(name: "material-values: each of MeshStandardMaterial's values' Mut moves version(), and none moves graphVersion(), so a value's change compiles nothing",
               why: give moved);
 
     // the settings: names, types and offsets, then each value's bits
@@ -302,7 +302,7 @@ type resource StandardRun {
         counted.retune();
         this.draw(s: copy s, read: false);
         int32 fifth = counted.compiles();
-        this.found.add(name: "Renderer: a material whose version() alone moved, a setting changed, compiles nothing",
+        this.found.add(name: "material-values: a material whose version() alone moved, a setting changed, compiles nothing",
                        why: fifth == 2 ? "" : "compiled ${fifth} time(s)");
     }
 

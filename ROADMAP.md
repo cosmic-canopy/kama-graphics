@@ -11,7 +11,7 @@ decided design are [AGENTS.graphics.md](AGENTS.graphics.md), and the history is 
 > **`GFX-<n>` is a permanent id, not a position.** It is assigned once, from the counter below, which the same edit
 > bumps; it is never reused or renumbered, and a shipped row's id retires with it.
 
-**Next id: GFX-20**
+**Next id: GFX-21**
 
 **The order is by example** (the design pass, 2026-11-11, "and may change"). Each slice is what one of the library's
 examples needs, built depth-first on the web and natively, and every example is a test. The state of the art follows as
@@ -54,4 +54,5 @@ programs ask, each technique a ladder of methods, best first.
 
 | id | item | why |
 |---|---|---|
+| GFX-20 | **The cube's web code under its 150 KB gauge**: what brings a player's build of `examples/cube` (158.7 KB on 2026-11-20) under it, each saving measured and no feature dropped | [detail](ROADMAP_DETAIL.md#web-size) |
 | GFX-18 | **The first publish**: `tests/` green on every target the library claims, `@kama/gpu` and `@kama/window` published first, and the README and description written for the registry | [detail](ROADMAP_DETAIL.md#publish) |

@@ -700,13 +700,28 @@ natively. The library's own `examples/cube` is the same scene without an engine.
   catches, and run at a scale of 1, which FLIP refuses by size; and the harness's frame held to itself. Planning them
   found a gap first: a leg whose hardware golden came back empty went back to being held as drawn and passed, so the
   gate fails a leg that holds the cube to no golden, natively and on the web.
-- **Next, part 6's step 4:** the 150 KB measurement (wasm plus JS, release, brotli; kyoten's examples.md's A1 row) in the
-  gate as a ratchet, FEATURES.md's rows for the slice `built` with their budgets, and the SPEC. Then kyoten's join
+- **Decided on 2026-11-20, step 4's three questions** (kyoten's `docs/design/rendering.md` § Decided, `96152ad`), each
+  (A), the owner: "1. A yes", "2. I think A makes sense... the guage is just a budget we want to identify growth.", "3.
+  I don't have a preference here... I will go with your rec." Measured first on kyoten's pin: the cube as built is
+  213.8 KB of code (wasm plus JS, release, `brotli -q 11`), 160.9 KB without its harness, 158.7 KB with
+  `ENVIRONMENT=web` and emmalloc:
+  1. **the ratchet measures the cube as a player gets it:** the gate builds `examples/cube` a second time, release, with
+     `src/check.kama`'s harness (PNG decoding, FLIP, the goldens) left out by a build flag, from the same source, and
+     measures that build;
+  2. **the cube enters with what it measures,** its ratchet failing only on growth without a written reason, and the
+     150 KB gauge shows growth and holds nothing back; GFX-20 looks for what brings the cube under it;
+  3. **the 22 rows the cube built share its measurement,** since none can be left out and `-Oz` inlines them together;
+     from the next example on, a feature's budget is what it adds to the first example that uses it, that example built
+     with and without it. The rule goes into FEATURES.md § How to read a row and `tools/check-features.sh`. GPU time
+     waits on `@kama/gpu`'s timestamps (GPU-6).
+- **Next, part 6's step 4:** the build flag and the player's build in the gate, its measurement the ratchet; FEATURES.md's
+  22 cube rows with their status (`built`, or `partial` with ✓ where a ladder's methods are not all built) and the
+  shared budget, with the rule in § How to read a row and `tools/check-features.sh`; and the SPEC. Then kyoten's join
   draws the hello cube through it.
 - **Done:**
   - `examples/cube` draws from one source on both legs;
   - its golden passes on a software GPU on each leg CI has, and perceptually on the reference machines present;
-  - its web code is measured against the cube's 150 KB budget;
+  - its web code, as a player gets it, is measured and held by its ratchet, beside the hello cube's 150 KB gauge;
   - no release anywhere is written by hand;
   - FEATURES.md's rows for the slice are `built`, each with its budget;
   - kyoten's hello cube draws through it.
@@ -917,3 +932,21 @@ kama's floor for a first publish is `tests/` green on every target the library c
   library on its own terms (AGENTS.graphics.md § Rules).
 
 When, among the slices, is the owner's call when the row comes up.
+
+<a id="web-size"></a>
+## GFX-20: the cube's web code under its 150 KB gauge
+
+**What drives it:** kyoten's hello cube has a gauge of 150 KB of code on the web (wasm plus JS, release, brotli; kyoten's
+`docs/design/web-and-native.md` question 4), and a player's build of `examples/cube` measured 158.7 KB on 2026-11-20,
+with `ENVIRONMENT=web` and emmalloc, on kyoten's 0.9.978 pin (kyoten's `.scratch/s42/size/`). The gauge shows growth and
+holds nothing back (the owner, 2026-11-20: "the gauge is just a budget we want to identify growth"), so this row waits
+for the owner's call, and the cube's ratchet holds it from growing meanwhile.
+
+**Where to look first,** from a build with `--profiling-funcs`: of 426 KB of raw code, this library holds 199 KB, the
+example's own seven functions 91 KB with what `-Oz` inlined into them, libc and the rest 65 KB, `@kama/gpu` 39 KB,
+emdawnwebgpu 21 KB and kama's runtime 11 KB, and the data section 45 KB. The leads:
+- `__floatscan` and `sscanf`, 11 KB raw, whose caller is not yet found;
+- the standard material's `shade` (25 KB) and the node builder's `wgsl` and `spelled` (22 KB);
+- what `-Oz` inlines, `Cube.render` alone being 59 KB.
+
+Each saving is measured as a change of the cube's ratchet, and none drops a feature or a method.

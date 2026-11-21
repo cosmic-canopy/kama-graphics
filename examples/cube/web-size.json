@@ -9,6 +9,15 @@
       "js": 20291,
       "code": 169091,
       "why": "The cube enters with what it measures (kyoten's rendering.md § Decided, GFX-1's part 6, step 4, 2026-11-20): its player build, the harness left out by --define CUBE_PLAYER, with ENVIRONMENT=web. The goldens stay in it as assets, and emscripten's file packager with them, about 6.8 KB of the JS, since a build flag cannot leave a manifest's assets out (kyoten's KY-63): lower this with that reason when kama gives a way out. GFX-20 looks for what brings it under the hello cube's 150 KB gauge."
+    },
+    {
+      "date": "2026-11-21",
+      "kama": "0.9.978+g5e542c55",
+      "emcc": "6.0.13",
+      "wasm": 149247,
+      "js": 20408,
+      "code": 169655,
+      "why": "@kama/window's WIN-25 and WIN-26 (kama-window 642d116, 663689e and fedfc75), 564 B more: wasm 148,800 to 149,247 (its code 983 B larger before brotli, its data 64 B smaller), JS 20,291 to 20,408 (293 B larger before brotli). WIN-25 adds no code the cube keeps (its enums' serializers are pruned); alone it moved two trap sites' line numbers in window.kama, two bytes of a wasm of the same size, which brotli at quality 11 packs 163 B larger (measured by building against window.kama before and after it, kyoten's .scratch/s45/cubesize). The rest is WIN-26, each event's time, which kyoten's input needs: the event record 8 bytes longer, the C seam reading kama's clock and stamping each record, the web's times held to the pumps and in order, and the page reading each DOM event's timeStamp and a pad's timestamp."
     }
   ]
 }

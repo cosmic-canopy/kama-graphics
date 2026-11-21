@@ -10,7 +10,7 @@ scene of boxes through a perspective camera into a window or a render target, wi
 as an `@kama/image` `Image`, natively on Windows on wgpu-native v29.0.1.1 and on the web in headless Edge 157, Chrome for
 Testing 157 and Firefox 160. `examples/cube`, a lit cube spun in a window, draws from one source on both legs, its last
 frame held to its golden on each software GPU byte for byte, and on the GPU natively and in Edge by FLIP. Its web code
-as a player gets it is held by a ratchet: 169.1 KB of wasm and JS after brotli (`examples/cube/web-size.json`).
+as a player gets it is held by a ratchet: 169.7 KB of wasm and JS after brotli (`examples/cube/web-size.json`).
 A box is lit by directional and ambient lights through three.js r187's physical model (`MeshStandardMaterial`), or drawn
 unlit (`MeshBasicMaterial`). A material's shader is typed nodes compiled to WGSL at run time. A misuse the types cannot
 refuse is refused and reported, never ending the program. Every frame in the tests is held to its software GPU's golden.

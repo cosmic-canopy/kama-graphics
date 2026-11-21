@@ -25,7 +25,7 @@ import {
     std::memory::Owned,
     std::time::Instant, std::time::monotonicNow,
     gpu::AdapterInfo,
-    window::Window, window::WindowOptions, window::WindowError, window::Event, window::Key, window::Size,
+    window::Window, window::WindowOptions, window::WindowError, window::Event, window::TimedEvent, window::Key, window::Size,
     image::Image,
     graphics::Renderer, graphics::RendererOptions, graphics::RendererErrors, graphics::RenderInfo, graphics::Color,
     graphics::Scene, graphics::Mesh, graphics::BoxGeometry, graphics::MeshStandardMaterial, graphics::DirectionalLight,
@@ -199,11 +199,11 @@ type resource Cube implements App {
                 w.pump();
                 bool polling = true;
                 while (polling) {
-                    Optional<Event> next = w.pollEvent();
+                    Optional<TimedEvent> next = w.pollEvent();
                     match (next) {
                         case None: { polling = false; }
                         case Some(value: e): {
-                            match (e) {
+                            match (e.event) {
                                 case CloseRequested: { running = false; }
                                 case KeyDown(key: k, mods: m, repeat: rep): { if (k == Key::Escape) { running = false; } }
                                 case _: { }

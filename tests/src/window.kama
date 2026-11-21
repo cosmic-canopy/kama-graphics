@@ -308,7 +308,7 @@ type resource WindowRun {
 
     unsafe fn void post(int32 width, int32 height) {
         match (this.window) {
-            case Some(value: w): { w.post(event: Event::Resize(width: width, height: height)); w.pump(); }
+            case Some(value: w): { w.post(event: Event::Resize(width: width, height: height), at: monotonicNow()); w.pump(); }
             case None: { }
         };
     }

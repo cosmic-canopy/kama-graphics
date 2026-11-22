@@ -27,6 +27,15 @@
       "js": 20375,
       "code": 172326,
       "why": "kyoten's kama pin bump, 0.9.978 to 0.9.1018 (575a9cc6), with no source changed: 2,671 B more, wasm 149,247 to 151,951 (its code 11.5 KB larger before brotli, 481,824 to 493,599 B raw), JS 20,408 to 20,375. Measured by function in a --profiling-funcs build on each compiler (kyoten's .scratch/s45/bump/cubesize.sh): clang inlines kama's code differently, most of it into Cube.render (59.7 KB to 68.2 KB raw) as small helpers are folded into it (the vertex and settings writers putFloat, putWord, MaterialSettings.place and put, the Mat4 and Mat3 arrays' add), then NodeBuilder.spelled (+2.1 KB), Renderer.compileOn (+1.2 KB) and BufferGeometry.entryOn (+1.1 KB). kama's array growth route changed in that range (0.9.995 and 0.9.996: a capacity's bytes checked before any allocator is asked, KR-422), and DynamicArray's growTo is no longer a function of its own; its C emitter changed too, so the split between them is not measured. No feature added or dropped; GFX-20 looks for savings."
+    },
+    {
+      "date": "2026-11-22",
+      "kama": "0.9.1026+gb2f627b0",
+      "emcc": "6.0.13",
+      "wasm": 152043,
+      "js": 20375,
+      "code": 172418,
+      "why": "kyoten's kama pin bump, 0.9.1018 to 0.9.1026 (b2f627b0), with no source changed: 92 B more, wasm 151,951 to 152,043 (its code 291 B larger before brotli), JS 20,375 unchanged. Measured by function in a --profiling-funcs build on each compiler (kyoten's .scratch/s45/ready/cubesize26.sh): Cube.pumped alone grew (4,424 to 4,715 B raw), every other difference a renamed function of the same size. kama 0.9.1023 (KR-441) makes `cast<char>` trap on a value that is no Unicode scalar value, and @kama/window's eventOf, inlined into pumped, reads a text event's code point with one (`cast<char>(cast<uint32>(e.a))`); the new wasm carries that trap's message and the old does not. No feature added or dropped."
     }
   ]
 }

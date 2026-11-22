@@ -18,6 +18,15 @@
       "js": 20408,
       "code": 169655,
       "why": "@kama/window's WIN-25 and WIN-26 (kama-window 642d116, 663689e and fedfc75), 564 B more: wasm 148,800 to 149,247 (its code 983 B larger before brotli, its data 64 B smaller), JS 20,291 to 20,408 (293 B larger before brotli). WIN-25 adds no code the cube keeps (its enums' serializers are pruned); alone it moved two trap sites' line numbers in window.kama, two bytes of a wasm of the same size, which brotli at quality 11 packs 163 B larger (measured by building against window.kama before and after it, kyoten's .scratch/s45/cubesize). The rest is WIN-26, each event's time, which kyoten's input needs: the event record 8 bytes longer, the C seam reading kama's clock and stamping each record, the web's times held to the pumps and in order, and the page reading each DOM event's timeStamp and a pad's timestamp."
+    },
+    {
+      "date": "2026-11-21",
+      "kama": "0.9.1018+g575a9cc6",
+      "emcc": "6.0.13",
+      "wasm": 151951,
+      "js": 20375,
+      "code": 172326,
+      "why": "kyoten's kama pin bump, 0.9.978 to 0.9.1018 (575a9cc6), with no source changed: 2,671 B more, wasm 149,247 to 151,951 (its code 11.5 KB larger before brotli, 481,824 to 493,599 B raw), JS 20,408 to 20,375. Measured by function in a --profiling-funcs build on each compiler (kyoten's .scratch/s45/bump/cubesize.sh): clang inlines kama's code differently, most of it into Cube.render (59.7 KB to 68.2 KB raw) as small helpers are folded into it (the vertex and settings writers putFloat, putWord, MaterialSettings.place and put, the Mat4 and Mat3 arrays' add), then NodeBuilder.spelled (+2.1 KB), Renderer.compileOn (+1.2 KB) and BufferGeometry.entryOn (+1.1 KB). kama's array growth route changed in that range (0.9.995 and 0.9.996: a capacity's bytes checked before any allocator is asked, KR-422), and DynamicArray's growTo is no longer a function of its own; its C emitter changed too, so the split between them is not measured. No feature added or dropped; GFX-20 looks for savings."
     }
   ]
 }

@@ -44,7 +44,7 @@ by any of them.
 - **Budget:** `—` until the first measurement sets it: the web code the feature adds (KB of 1,000 bytes, brotli) and
   its GPU time on each reference machine at that machine's default preset (GPU time waits on `@kama/gpu`'s timestamp
   queries, GPU-6).
-  - **GFX-1's rows share the cube's measurement,** `169.7 KB, the cube's`: its player build's wasm plus JS,
+  - **GFX-1's rows share the cube's measurement,** `172.3 KB, the cube's`: its player build's wasm plus JS,
     `examples/cube/web-size.json`, which the gate holds as a ratchet. None of them can be left out of a cube, and the
     compiler inlines them together, so a split between them would be false (kyoten's rendering.md § Decided,
     2026-11-20). `tools/check-features.sh` holds that number to the record.
@@ -84,15 +84,15 @@ that kind needs.
 
 | Feature | Known as | Methods, best first (needs) | Status | Example | Test | Budget |
 |---|---|---|---|---|---|---|
-| Renderer on the web and natively | `WebGPURenderer` | WebGPU in the browser · wgpu-native natively | built | cube | cube | 169.7 KB, the cube's |
-| Headless rendering and readback | `readRenderTargetPixelsAsync` | an offscreen target read back | built | cube | readback | 169.7 KB, the cube's |
-| Scene graph | `Scene`, `Group`, `Object3D` | nodes held through `Shared`, a `Weak` parent, over the flat core | built | cube | scene-graph | 169.7 KB, the cube's |
-| Flat core for engines | Godot's `RenderingServer` | packed instances in one storage buffer, under the scene graph ✓ · driven by an engine directly | partial | cube | flat-core | 169.7 KB, the cube's |
-| Render targets | `RenderTarget`, MRT | one color target with depth, 8-bit sRGB or 16-bit float ✓ · several at once (MRT) | partial | cube | render-target | 169.7 KB, the cube's |
-| Size and pixel ratio | `setSize`, `setPixelRatio` | from `@kama/window`'s window or canvas | built | cube | resize | 169.7 KB, the cube's |
-| Depth precision | `reverseDepthBuffer`, `logarithmicDepthBuffer` | reversed Z with float depth, the only one (decided 2026-11-14: 5 cm resolved at 5 km, where the standard convention fails) | built | cube | depth-precision | 169.7 KB, the cube's |
-| Quality presets and method ladders | three.js's `hasFeature`; Unreal's scalability settings; Unity's quality levels | presets per machine, and a technique set directly | built | cube | presets | 169.7 KB, the cube's |
-| Pipelines compiled off the frame | `compileAsync` | asynchronous creation on the web · worker threads natively | built | cube | pipeline-cache | 169.7 KB, the cube's |
+| Renderer on the web and natively | `WebGPURenderer` | WebGPU in the browser · wgpu-native natively | built | cube | cube | 172.3 KB, the cube's |
+| Headless rendering and readback | `readRenderTargetPixelsAsync` | an offscreen target read back | built | cube | readback | 172.3 KB, the cube's |
+| Scene graph | `Scene`, `Group`, `Object3D` | nodes held through `Shared`, a `Weak` parent, over the flat core | built | cube | scene-graph | 172.3 KB, the cube's |
+| Flat core for engines | Godot's `RenderingServer` | packed instances in one storage buffer, under the scene graph ✓ · driven by an engine directly | partial | cube | flat-core | 172.3 KB, the cube's |
+| Render targets | `RenderTarget`, MRT | one color target with depth, 8-bit sRGB or 16-bit float ✓ · several at once (MRT) | partial | cube | render-target | 172.3 KB, the cube's |
+| Size and pixel ratio | `setSize`, `setPixelRatio` | from `@kama/window`'s window or canvas | built | cube | resize | 172.3 KB, the cube's |
+| Depth precision | `reverseDepthBuffer`, `logarithmicDepthBuffer` | reversed Z with float depth, the only one (decided 2026-11-14: 5 cm resolved at 5 km, where the standard convention fails) | built | cube | depth-precision | 172.3 KB, the cube's |
+| Quality presets and method ladders | three.js's `hasFeature`; Unreal's scalability settings; Unity's quality levels | presets per machine, and a technique set directly | built | cube | presets | 172.3 KB, the cube's |
+| Pipelines compiled off the frame | `compileAsync` | asynchronous creation on the web · worker threads natively | built | cube | pipeline-cache | 172.3 KB, the cube's |
 | Pipeline cache on disk | Unreal's PSO caches | the driver's pipeline cache, natively · none | planned | shooter | pipeline-disk-cache | — |
 | GPU time per pass and statistics | `renderer.info`, timestamp queries | timestamp queries (ts) · CPU time only | planned | level | gpu-timing | — |
 | Stats overlay | `Stats` | frame and GPU time drawn over the view | planned | level | stats | — |
@@ -106,7 +106,7 @@ that kind needs.
 
 | Feature | Known as | Methods, best first (needs) | Status | Example | Test | Budget |
 |---|---|---|---|---|---|---|
-| Perspective camera | `PerspectiveCamera` | — | built | cube | camera-perspective | 169.7 KB, the cube's |
+| Perspective camera | `PerspectiveCamera` | — | built | cube | camera-perspective | 172.3 KB, the cube's |
 | Orthographic camera | `OrthographicCamera` | — | planned | dataviz | camera-ortho | — |
 | Stereo cameras | `ArrayCamera`, WebXR's cameras | multiview (mv) · a pass per eye | planned | headset | camera-stereo | — |
 | Cube camera | `CubeCamera` | six faces into a cube target | planned | interior | cube-camera | — |
@@ -119,8 +119,8 @@ that kind needs.
 
 | Feature | Known as | Methods, best first (needs) | Status | Example | Test | Budget |
 |---|---|---|---|---|---|---|
-| Buffer geometry | `BufferGeometry`, attributes, index, groups | the index and groups of the library's shapes ✓ · a program's own vertices and attributes | partial | cube | geometry-buffer | 169.7 KB, the cube's |
-| Primitive shapes | `BoxGeometry`, `SphereGeometry`, `PlaneGeometry`, `CylinderGeometry`, `ConeGeometry`, `TorusGeometry`, `TorusKnotGeometry`, `CapsuleGeometry`, `CircleGeometry`, `RingGeometry`, the polyhedra | the box, with segments ✓ · the other shapes | partial | cube | geometry-primitives | 169.7 KB, the cube's |
+| Buffer geometry | `BufferGeometry`, attributes, index, groups | the index and groups of the library's shapes ✓ · a program's own vertices and attributes | partial | cube | geometry-buffer | 172.3 KB, the cube's |
+| Primitive shapes | `BoxGeometry`, `SphereGeometry`, `PlaneGeometry`, `CylinderGeometry`, `ConeGeometry`, `TorusGeometry`, `TorusKnotGeometry`, `CapsuleGeometry`, `CircleGeometry`, `RingGeometry`, the polyhedra | the box, with segments ✓ · the other shapes | partial | cube | geometry-primitives | 172.3 KB, the cube's |
 | Shapes, extrusions, lathes and tubes | `Shape`, `ShapeGeometry`, `ExtrudeGeometry`, `LatheGeometry`, `TubeGeometry` | — | planned | dataviz | geometry-shapes | — |
 | Bounds | `Box3`, `Sphere`, `computeBoundingBox` | — | planned | level | bounds | — |
 | Normals and tangents at runtime | `computeVertexNormals`, `computeTangents` | MikkTSpace tangents | planned | level | tangents | — |
@@ -148,10 +148,10 @@ that kind needs.
 
 | Feature | Known as | Methods, best first (needs) | Status | Example | Test | Budget |
 |---|---|---|---|---|---|---|
-| Standard material | `MeshStandardMaterial`; glTF's metal-roughness | a typed preset over the node-material system | built | cube | material-standard | 169.7 KB, the cube's |
-| Material values without recompiling | Unreal's Material Instances | values in the material's buffer, one pipeline for every value | built | cube | material-values | 169.7 KB, the cube's |
-| Node materials | three.js's TSL and node materials; Unity's Shader Graph; Unreal's material graph; Godot's visual shaders | graphs over the standard slots, compiled to WGSL, built from kama | built | cube | nodes | 169.7 KB, the cube's |
-| Slot overrides and WGSL | `colorNode`, `roughnessNode`; Bevy's `ExtendedMaterial` | a node expression ✓ · WGSL for a slot or a stage | partial | viewer | nodes-override | 169.7 KB, the cube's |
+| Standard material | `MeshStandardMaterial`; glTF's metal-roughness | a typed preset over the node-material system | built | cube | material-standard | 172.3 KB, the cube's |
+| Material values without recompiling | Unreal's Material Instances | values in the material's buffer, one pipeline for every value | built | cube | material-values | 172.3 KB, the cube's |
+| Node materials | three.js's TSL and node materials; Unity's Shader Graph; Unreal's material graph; Godot's visual shaders | graphs over the standard slots, compiled to WGSL, built from kama | built | cube | nodes | 172.3 KB, the cube's |
+| Slot overrides and WGSL | `colorNode`, `roughnessNode`; Bevy's `ExtendedMaterial` | a node expression ✓ · WGSL for a slot or a stage | partial | viewer | nodes-override | 172.3 KB, the cube's |
 | Physical material | `MeshPhysicalMaterial`; glTF's `KHR_materials_*` | clearcoat, sheen, transmission, iridescence, anisotropy, dispersion, specular, IOR, volume, emissive strength | planned | viewer | material-physical | — |
 | Shadow catcher | `ShadowMaterial` | — | planned | viewer | material-shadow | — |
 | Unlit material | `MeshBasicMaterial`; glTF's `KHR_materials_unlit` | — | built | editor | material-unlit | with editor |
@@ -190,9 +190,9 @@ that kind needs.
 
 | Feature | Known as | Methods, best first (needs) | Status | Example | Test | Budget |
 |---|---|---|---|---|---|---|
-| Ambient light | `AmbientLight` | — | built | cube | light-ambient | 169.7 KB, the cube's |
-| Directional light | `DirectionalLight` | — | built | cube | light-directional | 169.7 KB, the cube's |
-| Physical light units | the engines' physical light units | exposure in EV100 ✓ · lux for the sun and the sky · candela for point and spot lights | partial | cube | light-units | 169.7 KB, the cube's |
+| Ambient light | `AmbientLight` | — | built | cube | light-ambient | 172.3 KB, the cube's |
+| Directional light | `DirectionalLight` | — | built | cube | light-directional | 172.3 KB, the cube's |
+| Physical light units | the engines' physical light units | exposure in EV100 ✓ · lux for the sun and the sky · candela for point and spot lights | partial | cube | light-units | 172.3 KB, the cube's |
 | Hemisphere light | `HemisphereLight` | — | planned | viewer | light-hemisphere | — |
 | Area lights | `RectAreaLight` | linearly transformed cosines | planned | viewer | light-area | — |
 | Point light | `PointLight`; Godot's `OmniLight3D` | — | planned | shooter | light-point | — |
@@ -247,11 +247,11 @@ that kind needs.
 
 | Feature | Known as | Methods, best first (needs) | Status | Example | Test | Budget |
 |---|---|---|---|---|---|---|
-| Tone mapping | `toneMapping`: AgX, Neutral, ACES Filmic, Reinhard | options: Blender's AgX, the default ✓ · three.js r187's AgX ✓ · Neutral · ACES · Reinhard · none ✓ | partial | cube | tone-mapping | 169.7 KB, the cube's |
-| Anti-aliasing | `antialias`, `samples`, `TRAANode`, `SMAANode`, `FXAANode`; Filament's `customResolve` | TAA · 8× MSAA, natively where the adapter has it · 4× MSAA, the tone-mapped resolve (the default) ✓ · 4× MSAA, the GPU's resolve ✓ · SMAA · FXAA · none ✓ | partial | cube | anti-aliasing | 169.7 KB, the cube's |
+| Tone mapping | `toneMapping`: AgX, Neutral, ACES Filmic, Reinhard | options: Blender's AgX, the default ✓ · three.js r187's AgX ✓ · Neutral · ACES · Reinhard · none ✓ | partial | cube | tone-mapping | 172.3 KB, the cube's |
+| Anti-aliasing | `antialias`, `samples`, `TRAANode`, `SMAANode`, `FXAANode`; Filament's `customResolve` | TAA · 8× MSAA, natively where the adapter has it · 4× MSAA, the tone-mapped resolve (the default) ✓ · 4× MSAA, the GPU's resolve ✓ · SMAA · FXAA · none ✓ | partial | cube | anti-aliasing | 172.3 KB, the cube's |
 | Post-processing chain | three.js's `RenderPipeline`; Unity's Volumes; Unreal's post-process volumes | passes from nodes or WGSL over MRT | planned | shooter | post-chain | — |
 | Motion vectors | velocity buffers | written by the depth prepass | planned | shooter | motion-vectors | — |
-| Exposure | `toneMappingExposure`; the engines' auto exposure | automatic, from a histogram · manual, in EV ✓ | partial | shooter | exposure | 169.7 KB, the cube's |
+| Exposure | `toneMappingExposure`; the engines' auto exposure | automatic, from a histogram · manual, in EV ✓ | partial | shooter | exposure | 172.3 KB, the cube's |
 | Upscaling | `TAAUNode`; Unreal's TSR; Unity's STP; DLSS, XeSS and FSR | vendor upscalers, native packages · the library's temporal upscaler · spatial · bilinear | planned | shooter | upscaling | — |
 | Sharpening | contrast-adaptive sharpening | — | planned | shooter | sharpen | — |
 | Bloom | `BloomNode`, `UnrealBloomPass` | a bloom over the mip chain | planned | shooter | bloom | — |

@@ -36,6 +36,15 @@
       "js": 20375,
       "code": 172418,
       "why": "kyoten's kama pin bump, 0.9.1018 to 0.9.1026 (b2f627b0), with no source changed: 92 B more, wasm 151,951 to 152,043 (its code 291 B larger before brotli), JS 20,375 unchanged. Measured by function in a --profiling-funcs build on each compiler (kyoten's .scratch/s45/ready/cubesize26.sh): Cube.pumped alone grew (4,424 to 4,715 B raw), every other difference a renamed function of the same size. kama 0.9.1023 (KR-441) makes `cast<char>` trap on a value that is no Unicode scalar value, and @kama/window's eventOf, inlined into pumped, reads a text event's code point with one (`cast<char>(cast<uint32>(e.a))`); the new wasm carries that trap's message and the old does not. No feature added or dropped."
+    },
+    {
+      "date": "2026-11-22",
+      "kama": "0.9.1027+g25d97c29",
+      "emcc": "6.0.13",
+      "wasm": 151970,
+      "js": 20402,
+      "code": 172372,
+      "why": "@kama/window WIN-27 (kama-window 9274a48): eventOf reads a Text event's code point with try cast<char>, so the cast's trap on a value that is no Unicode scalar value, and its message, leave the cube"
     }
   ]
 }

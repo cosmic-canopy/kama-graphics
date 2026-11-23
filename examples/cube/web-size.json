@@ -45,6 +45,15 @@
       "js": 20402,
       "code": 172372,
       "why": "@kama/window WIN-27 (kama-window 9274a48): eventOf reads a Text event's code point with try cast<char>, so the cast's trap on a value that is no Unicode scalar value, and its message, leave the cube"
+    },
+    {
+      "date": "2026-11-23",
+      "kama": "0.9.1027+g25d97c29",
+      "emcc": "6.0.13",
+      "wasm": 152254,
+      "js": 20402,
+      "code": 172656,
+      "why": "@kama/window WIN-28 (kama-window 54184ab), a pad reading's time, padAt, which kyoten's input reads: 284 B more, wasm 151,970 to 152,254, JS 20,402 unchanged. Measured by function in a --profiling-funcs build against @kama/window before and after it, on the same kama (kyoten's .scratch/s47/size/win28size.sh): its code 158 B larger before brotli, pad_take (922 to 1,000 B raw), which now keeps each reading's time beside its sample, a take (+40 B) and Cube.tick, into which the pump is inlined (+40 B); no trap and nothing read from outside added. A feature added, nothing dropped."
     }
   ]
 }

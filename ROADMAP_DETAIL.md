@@ -794,7 +794,7 @@ up by a `writeBuffer` of its own. That fits a program, as three.js does. An engi
 
 **What it designs,** laid out from the code and asked in full before it is built:
 - instances by id, made, written and released by an engine, each a world matrix (the core keeping the previous one for
-  motion vectors, area 1's question 4), a geometry and a material, with its flags;
+  motion vectors, area 3's question 4), a geometry and a material, with its flags;
 - the changed records uploaded together, at most once a frame;
 - lights, cameras and the environment as data, beside the instances;
 - what a view hands back, which kyoten's `DrawnView` reads;

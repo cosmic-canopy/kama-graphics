@@ -11,7 +11,7 @@ decided design are [AGENTS.graphics.md](AGENTS.graphics.md), and the history is 
 > **`GFX-<n>` is a permanent id, not a position.** It is assigned once, from the counter below, which the same edit
 > bumps; it is never reused or renumbered, and a shipped row's id retires with it.
 
-**Next id: GFX-21**
+**Next id: GFX-22**
 
 **The order is by example** (the design pass, 2026-11-11, "and may change"). Each slice is what one of the library's
 examples needs, built depth-first on the web and natively, and every example is a test. The state of the art follows as
@@ -22,6 +22,7 @@ programs ask, each technique a ladder of methods, best first.
 | id | item | why |
 |---|---|---|
 | GFX-1 | **A lit cube**, the first slice through every part: the renderer on the web and natively, the scene graph on the flat core, a box, the standard material, a camera, a sun and ambient light, the depth prepass, 4× MSAA, HDR with AgX, pipelines compiled off the frame, and the first golden image | [detail](ROADMAP_DETAIL.md#cube) |
+| GFX-21 | **The flat core's engine surface**, what kyoten's render module drives: instances by id, each a world matrix written straight from an engine's transform, a geometry and a material; the changed records uploaded together; lights and cameras as data. Designed, measured and asked before kyoten's hello cube draws | [detail](ROADMAP_DETAIL.md#engine-surface) |
 
 ## NEXT: a slice per example
 

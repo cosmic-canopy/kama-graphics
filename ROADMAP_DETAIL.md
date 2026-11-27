@@ -777,6 +777,30 @@ natively. The library's own `examples/cube` is the same scene without an engine.
   - FEATURES.md's rows for the slice say what is built, each with its budget (step 4's second asking);
   - kyoten's hello cube draws through it.
 
+<a id="engine-surface"></a>
+## GFX-21: the flat core's engine surface
+
+**What drives it:** kyoten's step 9, its render module (kyoten's `docs/design/rendering.md` § Decided, 2026-11-27, step
+9's two questions, each (A)). After Output, kyoten's generated world extracts what is drawn into a render list carrying
+only what changed (what entered, changed and left, by entity handle, each moving entity blended at the frame's time and
+relative to the camera's zone, or the whole scene when asked), and its open platforms draw that list through this
+library. The flat core is the tier an engine drives (area 1's question 1, 2026-11-11), and it "is internal; an
+engine's way to drive it is decided when one first does" ([SPEC.md](SPEC.md)). Now one does.
+
+**Why not the scene graph:** an engine already has world matrices, so the tree, the rotation held both ways and a
+`Shared<Mesh>` per entity are extra, and a node's write marks it without comparing values, its 112-byte record going
+up by a `writeBuffer` of its own. That fits a program, as three.js does. An engine pushes into a flat table, as Godot's
+`RenderingServer` (instances by RID), Unreal's GPU scene, Unity's `BatchRendererGroup` and Bevy's instance buffers do.
+
+**What it designs,** laid out from the code and asked in full before it is built:
+- instances by id, made, written and released by an engine, each a world matrix (the core keeping the previous one for
+  motion vectors, area 1's question 4), a geometry and a material, with its flags;
+- the changed records uploaded together, at most once a frame;
+- lights, cameras and the environment as data, beside the instances;
+- what a view hands back, which kyoten's `DrawnView` reads;
+- the scene graph kept on the same core, so `examples/cube` and a program's scene draw as before;
+- what it measures at scale against the scene graph's path, each a case and a number.
+
 <a id="level"></a>
 ## GFX-2: a level
 

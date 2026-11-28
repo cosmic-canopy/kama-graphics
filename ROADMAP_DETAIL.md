@@ -792,14 +792,35 @@ engine's way to drive it is decided when one first does" ([SPEC.md](SPEC.md)). N
 up by a `writeBuffer` of its own. That fits a program, as three.js does. An engine pushes into a flat table, as Godot's
 `RenderingServer` (instances by RID), Unreal's GPU scene, Unity's `BatchRendererGroup` and Bevy's instance buffers do.
 
-**What it designs,** laid out from the code and asked in full before it is built:
-- instances by id, made, written and released by an engine, each a world matrix (the core keeping the previous one for
-  motion vectors, area 3's question 4), a geometry and a material, with its flags;
-- the changed records uploaded together, at most once a frame;
-- lights, cameras and the environment as data, beside the instances;
-- what a view hands back, which kyoten's `DrawnView` reads;
-- the scene graph kept on the same core, so `examples/cube` and a program's scene draw as before;
-- what it measures at scale against the scene graph's path, each a case and a number.
+**Measured, then decided** (kyoten's fifty-fourth session; kyoten's `docs/research/graphics.md` § 11 and
+`docs/design/rendering.md` § Decided, 2026-11-27, GFX-21's four questions, each (A)). Natively on the AMD Radeon 880M:
+- **one `writeBuffer` a changed record,** as the core uploads today, costs about 1.8 µs each: 4.0 ms at 15 % of 10,000
+  and 27.5 ms with all;
+- **the whole buffer** costs 0.2 ms whatever changed;
+- **the scene graph's path at 10,000 meshes** takes 12.4 ms of CPU a render with nothing moved, most of it each
+  mesh's two WGSL strings copied and compared to find its pipeline, and its two draws.
+
+What the row builds:
+1. **An instance is an owned handle the core hands back,** its slot freed when it is dropped, and refused on another
+   core.
+2. **A frame's changed records go up as the peers' compute scatter** (Bevy below its 15 %, Unity's Entities Graphics
+   always): the changed records and their slots in one write, placed by a compute pass. Above a measured share the
+   whole buffer goes up instead, as Bevy's does. It needs `@kama/gpu`'s compute (its GPU-5), brought forward first;
+   the rest of the row does not wait on it.
+3. **Views are data:** each a camera in its cell, a projection, a target, a rectangle and an order. Every view of a
+   frame is drawn together, each with its own frame block, and each hands back its projection and the size it drew,
+   which kyoten's `DrawnView` reads.
+4. **A write that changes nothing marks nothing:** the core compares a written matrix with the one it holds, as
+   Godot's `instance_set_transform` does.
+
+Settled beside them:
+- **the record:** the world matrix within its cell, the previous frame's matrix (area 3's question 4), the normal
+  matrix, the cell and flags, about 192 bytes; a cut sets the previous to the new, as Godot's `instance_teleport`;
+- **each instance keeps its draw,** found when its geometry or material changes, not each render. Batching stays in
+  GFX-2;
+- **the scene graph becomes a client of the same surface,** so `examples/cube` and a program's scene draw as before;
+- **lights and the environment are data beside the instances;**
+- **each part is a case and a number at scale** against the scene graph's path.
 
 <a id="level"></a>
 ## GFX-2: a level
